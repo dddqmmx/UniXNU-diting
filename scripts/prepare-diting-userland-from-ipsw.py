@@ -67,8 +67,8 @@ COMPONENTS = USED_COMPONENTS + RECORD_COMPONENTS
 
 # Geometry from migration/ipados18/README.zh.md: SystemOS grew from 3.69 GiB to
 # 5 GiB, and Data is its own fresh 8 GiB disk rather than the iOS 16 one.
-SYSTEMOS_MIB = 5242880
-DATA_MIB = 8388608
+SYSTEMOS_MIB = 5120
+DATA_MIB = 8192
 
 # hdiutil detach reports "resource busy" while the last writes are still being
 # flushed, so retry before giving up.
@@ -410,8 +410,8 @@ def materialize_raw(rec, source, destination, label):
     return size
 
 
-def create_apfs_image(rec, path, mib, volume_name, label):
-    """An empty APFS volume of `mib` KiB, as `hdiutil create -type SPARSE` writes it.
+def create_apfs_image(rec, path, mib, volume_name, label, layout='NONE'):
+    """An empty APFS volume of `mib` MiB, as `hdiutil create -type SPARSE` writes it.
 
     The result is a single sparse *file* (a UDSP image), not the directory a
     sparsebundle is: that is what the local recipe's command produces, and it is
@@ -419,8 +419,8 @@ def create_apfs_image(rec, path, mib, volume_name, label):
     the disk, which is why a 5 GiB and an 8 GiB volume cost far less than 13 GiB
     while they are being filled.
     """
-    rec.run(label, ['hdiutil', 'create', '-size', '%dk' % mib, '-type', 'SPARSE',
-                    '-layout', 'NONE', '-fs', 'APFS', '-volname', volume_name, str(path)])
+    rec.run(label, ['hdiutil', 'create', '-size', '%dm' % mib, '-type', 'SPARSE',
+                    '-layout', layout, '-fs', 'APFS', '-volname', volume_name, str(path)])
     if path.is_dir():
         fail('%s came back as a directory; this chain expects the single-file sparse image '
              '`hdiutil create -type SPARSE` writes' % path)
@@ -773,13 +773,16 @@ def main():
     # diting-ipados18-data.cdr, so this is also converted to a raw disk first.
     rec.stage('data-image')
     data_sparse = work / 'DitingData18.sparseimage'
-    create_apfs_image(rec, data_sparse, args.data_mib, 'Diting-iPadOS18-Data', 'create Data volume')
+    create_apfs_image(rec, data_sparse, args.data_mib, 'Diting-iPadOS18-Data',
+                      'create Data volume', layout='GPTSPUD')
     data_raw = work / 'data-template.cdr'
-    rec.require('before-data-convert', work, args.data_mib * 1024 + 2 * GIB, 'the Data conversion')
+    rec.require('before-data-convert', work, args.data_mib * 1024 * 1024 + 2 * GIB, 'the Data conversion')
     data_raw_bytes = materialize_raw(rec, data_sparse, data_raw, 'convert Data to raw')
-    if data_raw_bytes != args.data_mib * 1024:
-        fail('the Data image is %d bytes, not the %d a %d KiB APFS volume gives'
-             % (data_raw_bytes, args.data_mib * 1024, args.data_mib))
+    if data_raw_bytes != args.data_mib * 1024 * 1024:
+        fail('the Data image is %d bytes, not the %d a %d MiB APFS disk gives'
+             % (data_raw_bytes, args.data_mib * 1024 * 1024, args.data_mib))
+    if image_kind(data_raw) != 'gpt':
+        fail('the Data window must be a GPT disk for the Diting UFS driver')
     probe_volume(rec, stage, data_raw, 'data', 0x40)
     if not args.keep_work:
         data_sparse.unlink(missing_ok=True)
