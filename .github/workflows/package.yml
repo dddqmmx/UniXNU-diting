@@ -21,6 +21,16 @@ on:
         required: false
         type: string
         default: ""
+      systemos_uuid:
+        description: "SystemOS volume UUID (optional; default from profile)"
+        required: false
+        type: string
+        default: ""
+      data_uuid:
+        description: "Data volume UUID (optional; default recorded layout)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -263,30 +273,34 @@ jobs:
       - name: volume layout
         env:
           DEFCONFIG: ${{ inputs.defconfig }}
+          SYSTEMOS_UUID: ${{ inputs.systemos_uuid }}
+          DATA_UUID: ${{ inputs.data_uuid }}
         run: |
           set -euo pipefail
           python3 - "$RUNNER_TEMP/volume-layout.json" <<'PY'
-          import json, os, sys, tomllib
+          import json, os, sys, tomllib, uuid
           from pathlib import Path
           profile = tomllib.loads(Path('device/os-profiles/ipados-18.7.10-22H374/profile.toml').read_text())
           root = profile['root']
+          sys_in = os.environ.get('SYSTEMOS_UUID', '').strip()
+          data_in = os.environ.get('DATA_UUID', '').strip()
+          systemos_uuid = str(uuid.UUID(sys_in)).upper() if sys_in else root['systemos_volume_uuid']
+          data_uuid = str(uuid.UUID(data_in)).upper() if data_in else '337CF716-F62B-446B-B959-4A5F12A7701C'
           layout = {
-              'ci_placeholder': True,
+              'ci_placeholder': not (sys_in and data_in),
               'build': '22H374',
               'lba_bytes': 4096,
               'os': {'uuid': root['os_volume_uuid']},
-              'systemos': {'uuid': root['systemos_volume_uuid']},
-              # The Data UUID recorded from the generated userdata layout; the placeholder
-              # bf5d77f3-... is gone, so the kernel, the payload and this file agree.
-              'data': {'uuid': '337CF716-F62B-446B-B959-4A5F12A7701C'},
+              'systemos': {'uuid': systemos_uuid},
+              'data': {'uuid': data_uuid},
           }
           Path(sys.argv[1]).write_text(json.dumps(layout, indent=2))
           # The UUIDs are compiled into the kernel (kern_exec selects the volumes by them), so
           # write the same values into the selected defconfig before the build reads it.
           conf = Path('device/configs') / os.environ['DEFCONFIG']
           text = conf.read_text()
-          for key, value in (('CONFIG_XNU_OWNER_ROOT_VOLUME_UUID', root['os_volume_uuid']),
-                             ('CONFIG_XNU_OWNER_CACHE_VOLUME_UUID', root['systemos_volume_uuid']),
+          for key, value in (('CONFIG_XNU_OWNER_ROOT_VOLUME_UUID', layout['os']['uuid']),
+                             ('CONFIG_XNU_OWNER_CACHE_VOLUME_UUID', layout['systemos']['uuid']),
                              ('CONFIG_XNU_OWNER_DATA_VOLUME_UUID', layout['data']['uuid'])):
               import re as _re
               text = _re.sub(key + r'=".*"', key + '="' + value + '"', text)

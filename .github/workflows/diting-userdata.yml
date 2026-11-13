@@ -84,13 +84,79 @@ jobs:
             --data-mib 8192 \
             --jobs 4
           df -h
+      - name: SHNGROOT directory
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/diting-ipsw-work" "$RUNNER_TEMP/diting-ufs"
+          mkdir -p "$RUNNER_TEMP/diting-ufs"
+          python3 device/scripts/prepare-ipados18-ufs-layout.py \
+            --userland "$RUNNER_TEMP/diting-userland" \
+            --systemos "$RUNNER_TEMP/diting-userland/diting-ipados18-systemos.cdr" \
+            --volume-layout "$RUNNER_TEMP/diting-userland/volume-layout.json" \
+            --output-dir "$RUNNER_TEMP/diting-ufs"
+          python3 - "$RUNNER_TEMP/diting-ufs" <<'PY'
+          import json, sys
+          from pathlib import Path
+          ufs = Path(sys.argv[1])
+          header = (ufs / 'shngroot-ipados18.bin').read_bytes()
+          layout = json.loads((ufs / 'ufs-layout.json').read_text())
+          names = [w['name'] for w in layout['windows']]
+          if header[:8] != b'SHNGROOT' or len(header) != 4096:
+              raise SystemExit('the SHNGROOT header is not a 4096-byte directory')
+          if names != ['OS', 'SystemOS', 'Data']:
+              raise SystemExit('layout windows are %s, not OS/SystemOS/Data' % names)
+          print('SHNGROOT directory', len(header), 'bytes for', ', '.join(names))
+          PY
+          df -h
+      - name: userdata image
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          python3 device/scripts/build-diting-userdata-image.py \
+            --layout "$RUNNER_TEMP/diting-ufs/ufs-layout.json" \
+            --header "$RUNNER_TEMP/diting-ufs/shngroot-ipados18.bin" \
+            --output "$RUNNER_TEMP/diting-ufs/diting-ipados18-userdata.img" \
+            --max-parts 4 \
+            --part-max-mib 8192 \
+            --delete-sources \
+            --delete-root "$RUNNER_TEMP/diting-userland" \
+            --json-out "$RUNNER_TEMP/diting-ufs/userdata-image.json"
+          ls -lh "$RUNNER_TEMP/diting-ufs"
+          df -h
       - uses: actions/upload-artifact@v4
         with:
-          name: diting-os-window
-          retention-days: 14
+          name: diting-userdata-meta
+          retention-days: 3
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/diting-userland/diting-ipados18-system.cdr
             ${{ runner.temp }}/diting-userland/report.json
             ${{ runner.temp }}/diting-userland/volume-layout.json
             ${{ runner.temp }}/diting-userland/apply-complete.json
+            ${{ runner.temp }}/diting-ufs/ufs-layout.json
+            ${{ runner.temp }}/diting-ufs/shngroot-ipados18.bin
+            ${{ runner.temp }}/diting-ufs/userdata-image.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diting-userdata-part00
+          retention-days: 3
+          if-no-files-found: error
+          path: ${{ runner.temp }}/diting-ufs/diting-ipados18-userdata.img.part00
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diting-userdata-part01
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/diting-ufs/diting-ipados18-userdata.img.part01
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diting-userdata-part02
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/diting-ufs/diting-ipados18-userdata.img.part02
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diting-userdata-part03
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/diting-ufs/diting-ipados18-userdata.img.part03
