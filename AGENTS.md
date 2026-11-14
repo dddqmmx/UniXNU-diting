@@ -1,3 +1,5 @@
+> services186 接续：本机 Recovery 已确认 ST61Y，而旧内核使用 Goodix 协议。新真实协议、GPIO119选择、ldoc2/AVDD、GENI完整FIFO与10us CS保持、复位恢复和共享GCC投票已实现；7项host测试、日志关闭编译模式、完整内核与八核打包通过。候选尚未部署，boot_b/运行系统仍services185；触控未验收。当前缓存 services169/tree/.cache/xnu-work 已对应services186。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。候选已准备后方可请求Fastboot实机验证；保留services185回退，不为重复读旧日志重启。
+
 > 当前 Linux 会话状态（2026-11-14）：services185 已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。持久 boot_b=services185，保持八核，本轮未更新 userdata。手机留在系统供观察；不要为重复取证主动重启或重刷。长期稳定性和各外围功能尚未验收。当前入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md) 和[任务交接](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)；其余较早记录为历史状态。
 
 # Diting probe policy
@@ -896,3 +898,12 @@ work is the boot itself, not the inputs.
 - services185 原生驱动编译、完整内核链接和八核打包通过；07:42 稀疏写 boot_b 两块全 OKAY（4.670 秒），临时启动 OKAY（2.459 秒）。用户先确认“进系统了”，随后报告触屏不工作。进入系统是实机观察；Wi-Fi 功放响应、联网、PCM、GPU 和长期稳定性不能据此标为通过。
 - 触屏旧轮日志已显示 `goodix: clocks stay off`、全零固件版本与 Goodix 初始化失败；这是 services184 证据，不能冒充 services185 日志。当前先定位 Goodix 初始化/事件链，保留正常启动和真实硬件成功条件。
 - 本地状态、构建和用户观察分别保存在 `diting-work/{build,logs/diting,tmp}/services185`。`services169/tree/.cache/xnu-work` 现对应 services185，不能作 services169 原始对象。用户已明确要求提交和推送本轮更改及文档状态；所有私有输入和产物留在本地。
+
+# 2026-11-14 services186 ST61Y 接续
+
+- 原始live DT与Recovery日志确认ST61Y / fts_spi 5.2.4.1 / firmware0007 / protocol06；GPIO119原始高为ST，低为GT9916S。旧Goodix全零版本日志不是芯片身份依据。
+- 以匹配LineageOS固定版本的协议和NothingOSS SM8475寄存器契约修正。GENI FIFO opcode3合法，CS_TOGGLE在bit0，主/副引擎active为bit0/bit12；不延续早期opcode判断错误。只有真实READY、chip ID、System Info、flush echo后提交scan，命令提交不是触控成功。
+- 触屏使用共享RPMh owner的ldoc2请求与GPIO71 AVDD；touch/WLAN/USB/audio用共享GCC62008 RMW/readback锁，AHB HWCG与core/core2x/SE的halt判定区分。
+- 真实事件高nibble、LE16 super-resolution、多指状态、空FIFO、丢失批次释放和复位后立即恢复已实现。错误初始化/超时保持有界并返回正常UI；不刷触控firmware、不校准/写OTP或工厂数据。
+- 7项host协议/资源测试、两套shell语法和workflow预检通过；ramoops关闭的resources-only archive和touch对象实际编译无未定义诊断引用，完整内核及八核打包通过。新增18个z前缀的增量XNU patch已追加series，未重写0001聚合补丁。
+- 实机候选101183488字节，继续services182 FD/template和33792字节loader，新hardware DTB只作本轮资源输入。boot_b/运行系统仍services185；services186尚未部署/触控未验收。只推送源码/测试/配置/记录，所有原始日志、firmware/restore和产物本地保存。

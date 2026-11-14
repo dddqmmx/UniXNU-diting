@@ -19,6 +19,7 @@ import importlib.util
 
 from diting_adt_contract import audit_adt
 from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
+from diting_touch_contract import adt_touch_properties, validate_touch_nodes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,7 +45,7 @@ def load_format2_hardware(path):
     """Use the selected DTSI/DTS for resources consumed by the Diting loader.
 
     Keep the existing Darwin24 handoff/manifest encoding. The generic ADT
-    encoder does not yet express Diting's PMIC and Goodix metadata properties.
+    encoder does not yet express Diting's PMIC and touch metadata properties.
     """
     global DRAM_BASE, GIC_DIST, GIC_DIST_SIZE, GIC_REDIST, GIC_REDIST_SIZE
     global GIC_REDIST_STRIDE, TIMEBASE, UFS_HC, UFS_HC_SIZE, GCC_UFS_PAGE
@@ -52,6 +53,7 @@ def load_format2_hardware(path):
     spec=importlib.util.spec_from_file_location('diting_fdt',ROOT/'scripts/prepare-diting-wifi.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     nodes=module.fdt_nodes(Path(path).read_bytes())
+    validate_touch_nodes(nodes)
     u32=module.cells
     value=lambda p,k:int.from_bytes(p[k],'big')
     gic=next(p for p in nodes.values() if p.get('compatible')==b'arm,gic-v3\0')
@@ -270,19 +272,9 @@ def main():
            ('unixnu,userdata-last-lba', struct.pack('<Q', args.userdata_last_lba))]
           if args.userdata_first_lba is not None else []),
     ])
-    # Actual Diting live DT: QUP0 SE4 / Goodix Berlin-D, GPIO20 reset/21 IRQ.
+    # Live DT carries both variants; GPIO119 selects ST61Y or GT9916S.
     # Absolute metadata avoids an incomplete arm-io interrupt/reg mapping.
-    touch = node('diting-touch', [
-        ('compatible', b'diting,goodix-berlin-d\0'),
-        ('spi-base', struct.pack('<Q', 0x990000)),
-        ('tlmm-base', struct.pack('<Q', 0xF000000)),
-        ('gcc-base', struct.pack('<Q', 0x100000)),
-        ('rsc-base', struct.pack('<Q', 0x17A20000)),
-        ('cmd-db-base', struct.pack('<Q', 0x80860000)),
-        ('gpio-offset', struct.pack('<I', 0x100000)),
-        ('pins', struct.pack('<6I', 16, 17, 18, 19, 21, 20)),
-        ('max-x', struct.pack('<I', 1080)), ('max-y', struct.pack('<I', 2412)),
-    ])
+    touch = node('diting-touch', adt_touch_properties())
     tree = node('device-tree', [
         # Keys use the actual SM8475 PMIC-arbiter resources below.
         # MobileGestalt derives ProductType/DeviceClass from hw.product, which
@@ -293,7 +285,7 @@ def main():
         ('compatible', b'J171AP\0iPhone17,1\0qcom,sm8475\0'),
         ('target-type', b'J171\0'),
         ('target-sub-type', b'J171AP\0'),
-        ('diting,physical-model', b'Nothing Phone (2)\0'),
+        ('diting,physical-model', b'Redmi K50 Ultra\0'),
         ('#address-cells', struct.pack('<I', 2)),
         ('#size-cells', struct.pack('<I', 2)),
     ], [

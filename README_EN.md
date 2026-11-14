@@ -2,13 +2,21 @@
 
 [简体中文](README.md) | **English**
 
-Format 2 device support for Nothing Phone (2), codename **Diting**, Qualcomm **SM8475**. Main targets **iPadOS 18.7.10 (22H374)** from iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69. The board remains Diting. The earlier iOS16 implementation remains in Git history.
+Format 2 device support for Redmi K50 Ultra, codename **diting**, Qualcomm **SM8475**. Main targets **iPadOS 18.7.10 (22H374)** from iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69. The board remains Diting. The earlier iOS16 implementation remains in Git history.
 
 - [UniXNU tools](https://github.com/UniXNU/UniXNU), [Diting UEFI](https://github.com/Chengdong-Yu/uefi-pong)
 - Official [migration](https://unixnu.com/en/porting/migration) and [device repository](https://unixnu.com/en/porting/device-repository) guides
 - [Format 2 integration](migration/format2/README.zh.md), [OS migration](migration/ipados18/README.zh.md), [porting record](porting.toml)
 
-## Hardware and progress
+## Current device status (2026-11-14)
+
+The user confirmed services185 entered the system. The display continues to update and physical buttons respond,
+but touch is not working. The phone's Recovery identifies an ST61Y controller; the old producer used Goodix commands.
+[services186](migration/ipados18/services186-st61y-touch.md) adds the matching protocol, shared GCC/RPMh ownership
+and recovery handling. Host tests, native kernel linking and eight-CPU packaging passed; device touch acceptance is pending.
+Persistent boot_b is still services185 and userdata was not updated.
+
+## Historical progress inherited from Pong
 
 | Area | Configuration and observations |
 | --- | --- |
@@ -24,12 +32,13 @@ Host builds and service publication are recorded separately from device function
 
 Current source includes the accumulated Wi-Fi, brightness, HID, audio, battery, native USB/Finder, keyboard, rootful userland and GPU/Metal fixes. Wi-Fi association, brightness and native audio volume have device confirmation; audio recovery after lock and remaining GPU frame latency are still under investigation. The installed Data volume has been expanded to 128 GB; the hosted userdata recipe retains its original 8 GiB seed. arm64e/PAC preparation does not switch the running 22H374 arm64 system. See [runtime integration and preserved packaging scripts](migration/ipados18/runtime-fixes-and-build-overlay.md).
 
-## Driver repositories
+## Driver sources
 
-Every board driver under `drivers/` is a submodule of its own Chengdong-Yu repository, the same layout [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng) uses. Path names are unchanged so the build scripts and the drivers' relative `#include`s keep working.
+The board driver sources are vendored under `drivers/`, retaining their original licenses and provenance links below. Path names are unchanged so the build scripts and relative includes keep working. The historical observations above do not establish functionality on the current Diting build.
 
 | Path | Repository | Hardware |
 | --- | --- | --- |
+| `drivers/DitingTouch` | [local protocol sources](drivers/DitingTouch/README.md) | ST61Y / GT9916S selector, QUP0 SE4, real GPIO/ldoc2 resources |
 | `drivers/ArmCpu` | [diting-arm-cpu](https://github.com/Chengdong-Yu/pong-arm-cpu) | SM8475 GICv3 + ARM generic timer, PSCI secondaries; Diting variant of upstream [ArmCpu](https://github.com/UniXNU/ArmCpu) |
 | `drivers/ArmDTPlatform` | [diting-arm-dt-platform](https://github.com/Chengdong-Yu/pong-arm-dt-platform) | Apple-format DT platform expert (`/chosen`/`/cpus`/`/arm-io`); Diting variant of upstream [ArmDTPlatform](https://github.com/UniXNU/ArmDTPlatform) |
 | `drivers/NativeRamBlock` | [diting-ram-block](https://github.com/Chengdong-Yu/pong-ram-block) | RAM-backed Data volume (sparse seed + persistent overlay); Diting variant of upstream [RamBlock](https://github.com/UniXNU/RamBlock) |

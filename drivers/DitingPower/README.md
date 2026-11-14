@@ -28,6 +28,8 @@ Diting 专属实现。协议与服务结构参照 UniXNU-sheng 的 Qualcomm 实�
 - 通过 `gPhysBase/gPhysSize` 检查 DarwinBoot 实际 RAM 所有权；若覆盖 ADSP carveout，停止加载，不覆盖 XNU RAM。
 - 电源、WLAN 与 GPU 通过 `DitingPlatformResources` 共用 APSS active TCS0–2 的完整交易锁。按真实命令完成和 idle 状态回收；超时保留所有权，不覆盖 sleep/wake/fast TCS。只保留启动 minima，不在 handover 时降掉共享电源投票。
 - ADSP 与 WLAN 共用 AOSS QMP owner，分别发送补零的 100/64 字节消息。超时不清空未消费邮箱，AOP 真实清零后才处理迟到完成与后续请求。
+- 触屏加入共享RPMh owner，ldoc2按本机provider请求1.8V/mode7；touch/WLAN/USB/audio共用
+  GCC62008投票锁与回读。只有带HWCG的AHB分支允许idle halt；core/core2x/SE必须真实运行。
 - `DitingBattery.cpp` / `ShengBattmgr.c`：沿用 UniXNU 协议 API，以 NothingOSS `qti_battery_charger.c` 的单电池属性编号解码；不访问 Xiaomi BOARD_GET 扩展、不写充电限值。
 - `DitingAudio.cpp`：`adsp_apps`、APM speaker/playback graph、TFA9873 配置、独立 SID1801 DMA 和输出环；只有真实初始化完成才发布 `DitingAudio`。尚无真机播放成功记录。
 
@@ -59,6 +61,10 @@ SID1801 的 DMA 映射，尚未完成 graph。services46 合并官方 power.md
 services185 已由用户确认进入系统，随后报告触屏不工作。共享 RPMh 的 10 个 host 场景、
 QMP 的 8 个 host 场景和完整原生内核构建通过；本轮 PAS、PCM 播放、充电状态与背光
 操作尚未验收。见 [services185](../../migration/ipados18/services185-bdf-power-boot.md)。
+
+services186的共享GCC并发、完整内核链接和resources-only/ramoops关闭编译检查通过，
+POWER/BACKLIGHT关闭时仍链接唯一资源owner。实机结果见
+[services186](../../migration/ipados18/services186-st61y-touch.md)。
 
 ## 许可
 

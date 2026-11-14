@@ -76,6 +76,31 @@
    stock vendor_boot DTB. SoC containers (GENI SPI, MDSS, pmic_glink) are
    placeholders: only the board children are reproduced. */
 &apss {
+    /* Touch vdd provider from this phone's live DT. AVDD is GPIO71. */
+    rsc@17a00000 {
+        compatible = "qcom,rpmh-rsc";
+        reg = <0 0x17a00000 0 0x10000>, <0 0x17a10000 0 0x10000>,
+              <0 0x17a20000 0 0x10000>;
+        reg-names = "drv0", "drv1", "drv2";
+        qcom,drv-id = <2>;
+        qcom,tcs-offset = <0xd00>;
+        qcom,tcs-config = <2 3 0 2 1 2 3 0 4 1>;
+        rpmh-regulator-ldoc2 {
+            compatible = "qcom,rpmh-vrm-regulator";
+            qcom,resource-name = "ldoc2";
+            qcom,regulator-type = "pmic5-ldo";
+            qcom,supported-modes = <2 4>;
+            qcom,mode-threshold-currents = <0 10000>;
+            touch_vdd: regulator-pm8350c-l2 {
+                regulator-name = "pm8350c_l2";
+                qcom,set = <3>;
+                regulator-min-microvolt = <1800000>;
+                regulator-max-microvolt = <1980000>;
+                qcom,init-voltage = <1800000>;
+                qcom,init-mode = <4>;
+            };
+        };
+    };
     spi@990000 {
         compatible = "qcom,spi-geni";
         reg = <0x0 0x990000 0x0 0x4000>;
@@ -122,7 +147,7 @@
             fts,reset-gpio = <&tlmm 0x14 0x00>;
             fts,reset-gpio-enable;
             fts,irq-gpio-name = "fts_irq";
-            fts,irq-gpio = <&tlmm 0x15 0x2008>;
+            fts,irq-gpio = <&tlmm 0x15 8>;
             fts,bus-reg-name = "vdd";
             fts,avdd-gpio = <&tlmm 0x47 0x00>;
             goodix,touch-expert-array = <0x02 0x03 0x02 0x02 0x04 0x03 0x03 0x02 0x03 0x03 0x04 0x02>;
@@ -134,14 +159,17 @@
             goodix,panel-max-x = <0x2fa8>;
             goodix,irq-flags = <0x02>;
             goodix,reset-gpio = <&tlmm 0x14 0x00>;
-            goodix,irq-gpio = <&tlmm 0x15 0x2008>;
+            goodix,irq-gpio = <&tlmm 0x15 8>;
             goodix,iovdd-name = "vdd";
             goodix,avdd-gpio = <&tlmm 0x47 0x00>;
-            interrupts = <0x15 0x2008>;
+            goodix,ts-id-gpio = <&tlmm 119 1>;
+            goodix,ts-id-gpio-match-value = <0>;
+            vdd-supply = <&touch_vdd>;
+            interrupts = <0x15 8>;
             interrupt-parent = <&tlmm>;
             spi-max-frequency = <0xb71b00>;
             reg = <0x00>;
-            compatible = "xiaomi,l12-spi";
+            compatible = "st,spi", "goodix,gt9916S";
             status = "ok";
             fts,cfg_0 {
                 fts,limit-name = "stm_fts_production_limits.csv";

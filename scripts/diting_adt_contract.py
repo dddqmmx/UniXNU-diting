@@ -8,6 +8,7 @@ import json
 import struct
 import uuid
 import xml.etree.ElementTree as ET
+from diting_touch_contract import validate_adt_touch
 
 
 def parse_adt(blob):
@@ -49,6 +50,7 @@ def parse_adt(blob):
 
 def audit_adt(blob, *, require_manifest=True, boot_manifest=None, expected_cpus=None):
     nodes = parse_adt(blob)
+    validate_adt_touch(nodes.get('/arm-io/diting-touch', {}))
     chosen = nodes['/chosen']
     manifest = nodes['/chosen/manifest-properties']
 

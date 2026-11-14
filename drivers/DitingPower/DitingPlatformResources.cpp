@@ -7,11 +7,19 @@
 #include "DitingPlatformResources.h"
 #include "DitingRpmhTransaction.h"
 #include "DitingQmpTransaction.h"
+#include "DitingGccVotes.h"
 
+#if XNU_DITING_RAMOOPS_CONSOLE
 extern "C" void diting_ramoops_diagnostic_write(const char *, int);
+#else
+static void diting_ramoops_diagnostic_write(const char *, int) {}
+#endif
 
 namespace {
 IOLock *powerLock, *smmuLeaseLock, *scmCallLock, *aopLock;
+IOLock *gccVoteLock;
+IOMemoryMap *gccVoteMap;
+volatile uint32_t *gccVoteWord;
 IOMemoryMap *rscMap;
 IOMemoryMap *aopMap, *aopDoorbellMap;
 volatile uint8_t *rsc;
@@ -26,6 +34,24 @@ void initLock(IOLock **slot) {
     IOLock *lock = IOLockAlloc(), *empty = nullptr;
     if (lock && !__atomic_compare_exchange_n(slot, &empty, lock, false,
                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) IOLockFree(lock);
+}
+uint32_t gccVoteRead(void *) {
+    const uint32_t value = *gccVoteWord;
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return value;
+}
+void gccVoteWrite(void *, uint32_t value) {
+    *gccVoteWord = value;
+    __asm__ volatile("dsb oshst" ::: "memory");
+}
+bool mapGccVote() {
+    if (gccVoteWord) return true;
+    auto memory = IODeviceMemory::withRange(0x162000, 0x1000);
+    if (!memory) return false;
+    gccVoteMap = memory->map(kIOMapAnywhere | kIOMapInhibitCache);
+    memory->release();
+    if (gccVoteMap) gccVoteWord = reinterpret_cast<volatile uint32_t *>(gccVoteMap->getVirtualAddress() + 8);
+    return gccVoteWord != nullptr;
 }
 uint64_t now() {
     uint64_t ns = 0;
@@ -125,6 +151,20 @@ extern "C" bool diting_rpmh_vote_many(const uint32_t *addresses, const uint32_t 
         if (n > 0) { diting_ramoops_diagnostic_write(line, n < int(sizeof(line)) ? n : int(sizeof(line)) - 1); IOLog("%s", line); }
     }
     return result == DitingRpmh::Result::Ok;
+}
+extern "C" bool diting_gcc_vote_update(uint32_t setMask, uint32_t clearMask) {
+    if (setMask & clearMask) return false;
+    initLock(&gccVoteLock);
+    if (!gccVoteLock) return false;
+    IOLockLock(gccVoteLock);
+    bool ok = false;
+    if (mapGccVote()) {
+        const DitingGccVoteIo io = {nullptr, gccVoteRead, gccVoteWrite};
+        ok = diting_gcc_vote_io(&io, setMask, clearMask);
+    }
+    IOLockUnlock(gccVoteLock);
+    if (!ok) IOLog("DITING GCC: vote failed set=%x clear=%x\n", setMask, clearMask);
+    return ok;
 }
 extern "C" bool diting_aop_send(const char *message, unsigned wireBytes) {
     initLock(&aopLock);

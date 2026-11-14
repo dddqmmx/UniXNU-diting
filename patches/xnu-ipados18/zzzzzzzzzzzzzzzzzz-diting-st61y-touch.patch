@@ -1,0 +1,762 @@
+diff --git a/bsd/dev/diting_goodix.c b/bsd/dev/diting_goodix.c
+--- a/bsd/dev/diting_goodix.c
++++ b/bsd/dev/diting_goodix.c
+@@ -1,8 +1,8 @@
+-/* Goodix Berlin-D / Diting SM8475. Adapted from the earlier redwood_goodix.c
++/* ST61Y / Goodix Berlin-D / Diting SM8475. Adapted from the earlier redwood_goodix.c
+  * (APSL 2.0). Hardware resources are the Diting live DT, checked against the
+  * NothingOSS cape pinctrl and waipio GCC source. No Redwood peripherals. */
+ #include <pexpert/arm64/board_config.h>
+-#if defined(DITING)
++#if defined(DITING) && XNU_DITING_TOUCH_BUILTIN
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <libkern/libkern.h>
+@@ -12,6 +12,10 @@
+ #include <kern/sched_prim.h>
+ #include <pexpert/device_tree.h>
+ #include <sys/systm.h>
++#include "DitingPlatformResources.h"
++#include "DitingGccVotes.h"
++#include "DitingSt61yProtocol.h"
++#include "DitingGeniSpi.h"
+ 
+ 
+ 
+@@ -19,9 +23,10 @@
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+ extern kern_return_t thread_terminate(thread_t thread);
+ 
+-static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
++static vm_offset_t tlmm, gcc, se, cmd_db;
+ static uint64_t tlmm_phys, gcc_phys, se_phys, rsc_phys, cmd_db_phys;
+-static uint32_t pins[6], gpio_offset, max_x, max_y;
++static uint32_t pins[6], gpio_offset, max_x, max_y, avdd_pin, id_pin, spi_hz, vdd_mv, vdd_mode;
++static bool st61y;
+ 
+ static bool
+ property(DTEntry entry, const char *name, void *out, unsigned size)
+@@ -35,15 +40,25 @@
+ configuration(void)
+ {
+     DTEntry entry;
++    static const char expected[]="diting,st61y\0diting,goodix-berlin-d";
++    char supply[6], compatible[sizeof(expected)];
++    uint32_t resolution;
+     if (SecureDTLookupEntry(NULL, "/arm-io/diting-touch", &entry) != kSuccess) return false;
+-    return property(entry,"spi-base",&se_phys,8) && property(entry,"tlmm-base",&tlmm_phys,8) &&
++    return property(entry,"compatible",compatible,sizeof(compatible)) &&
++        memcmp(compatible,expected,sizeof(expected))==0 &&
++        property(entry,"spi-base",&se_phys,8) && property(entry,"tlmm-base",&tlmm_phys,8) &&
+         property(entry,"gcc-base",&gcc_phys,8) && property(entry,"rsc-base",&rsc_phys,8) &&
+         property(entry,"cmd-db-base",&cmd_db_phys,8) && property(entry,"gpio-offset",&gpio_offset,4) &&
+         property(entry,"pins",pins,sizeof(pins)) && property(entry,"max-x",&max_x,4) &&
+-        property(entry,"max-y",&max_y,4) && se_phys==0x990000 && tlmm_phys==0xf000000 &&
+-        gcc_phys==0x100000 && rsc_phys==0x17a20000 && cmd_db_phys==0x80860000 &&
+-        gpio_offset==0x100000 && pins[0]==16 && pins[1]==17 && pins[2]==18 &&
+-        pins[3]==19 && pins[4]==21 && pins[5]==20 && max_x==1080 && max_y==2412;
++        property(entry,"max-y",&max_y,4) && property(entry,"avdd-pin",&avdd_pin,4) &&
++        property(entry,"id-pin",&id_pin,4) && property(entry,"spi-max-hz",&spi_hz,4) &&
++        property(entry,"vdd-resource",supply,sizeof(supply)) && property(entry,"vdd-mv",&vdd_mv,4) &&
++        property(entry,"vdd-mode",&vdd_mode,4) && property(entry,"super-resolution",&resolution,4) &&
++        se_phys==0x990000 && tlmm_phys==0xf000000 && gcc_phys==0x100000 &&
++        rsc_phys==0x17a20000 && cmd_db_phys==0x80860000 && gpio_offset==0x100000 &&
++        pins[0]==16 && pins[1]==17 && pins[2]==18 && pins[3]==19 && pins[4]==21 && pins[5]==20 &&
++        avdd_pin==71 && id_pin==119 && spi_hz==12000000 && memcmp(supply,"ldoc2\0",6)==0 &&
++        vdd_mv==1800 && vdd_mode==7 && max_x==12200 && max_y==27120 && resolution==1;
+ }
+ 
+ static inline uint32_t
+@@ -89,13 +104,19 @@
+ #define PIN_CS                  pins[3]
+ #define PIN_INT                 pins[4]      /* low = the chip has a report */
+ #define PIN_RESET               pins[5]     /* low = in reset */
+-#define PIN_FUNCTION_SPI        1       /* "qup15" */
+-
+-static void
++#define PIN_FUNCTION_SPI        1       /* cape QUP0 serial engine 4 */
++#define PIN_AVDD                avdd_pin
++#define PIN_ID                  id_pin
++
++static bool
+ gpio_configure(unsigned pin, unsigned function, unsigned pull, unsigned ma, bool output)
+ {
+ 	uint32_t value = pull | function << 2 | (ma / 2 - 1) << 6 | (output ? 1u << 9 : 0);
+-	wr(GPIO_CFG(pin), (rd(GPIO_CFG(pin)) & ~0x3ffu) | value);
++    const uint32_t old = rd(GPIO_CFG(pin));
++    if (old & (1u << 11)) value |= 1u << 12; /* enable EGPIO only when advertised */
++	wr(GPIO_CFG(pin), (old & ~0x3ffu) | value);
++    const uint32_t mask=0x3ffu|((old&(1u<<11))?(1u<<12):0);
++    return (rd(GPIO_CFG(pin))&mask)==(value&mask);
+ }
+ 
+ static void
+@@ -110,39 +131,18 @@
+ 	return rd(GPIO_IO(pin)) & 1;
+ }
+ 
+-static void
++static bool
+ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
+ {
+ 	gpio_set(pin, high);            /* the level first, so that the pin never drives the wrong one */
+-	gpio_configure(pin, 0, pull, ma, true);
+-}
+-
+-/* ---- the I/O supply (RPMh) ----------------------------------------------------------------------- */
++	return gpio_configure(pin, 0, pull, ma, true) &&
++        ((rd(GPIO_IO(pin))&2u)!=0)==high;
++}
++
++/* ---- the I/O supply (shared RPMh owner) -------------------------------------------------------- */
+ 
+ #define CMD_DB_PHYS             cmd_db_phys
+ #define CMD_DB_SIZE             0x20000UL
+-#define RSC_PHYS                rsc_phys    /* the application processor's "DRV 2" */
+-#define RSC_SIZE                0x10000UL
+-#define TCS(reg)                (rsc + 0xd00 + (reg))           /* command slot set 0, an "active" one */
+-#define TCS_IRQ_ENABLE          0x00
+-#define TCS_IRQ_STATUS          0x04
+-#define TCS_IRQ_CLEAR           0x08
+-#define TCS_WAIT_FOR_COMPLETION 0x10
+-#define TCS_CONTROL             0x14
+-#define TCS_CONTROL_ENABLE      (1u << 16)
+-#define TCS_CONTROL_TRIGGER     (1u << 24)
+-#define TCS_STATUS              0x18            /* 0 while busy */
+-#define TCS_CMD_ENABLE          0x1c
+-#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
+-#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
+-#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
+-#define MSGID_WRITE_4_BYTES     0x10008
+-#define MSGID_RESPONSE          0x100
+-
+-#define VRM_VOLTAGE             0               /* a regulator's registers, from its address: millivolts */
+-#define VRM_ENABLE              4
+-#define VRM_MODE                8
+-#define VRM_MODE_LDO_HPM        7
+ 
+ struct cmd_db_slave {
+ 	uint16_t id, header_offset, data_offset, count, version, reserved[3];
+@@ -191,70 +191,20 @@
+ 	return 0;
+ }
+ 
+-static bool
+-rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
+-{
+-	for (int i = 0; i < 2000; i++) {
+-		if ((rd(TCS(reg)) & mask) == value) {
+-			return true;
+-		}
+-		sleep_us(100);
+-	}
+-	printf("goodix: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS(reg)));
+-	return false;
+-}
+-
+-/* Send up to three register writes to RPMh and wait until they are done. */
+-static bool
+-rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+-{
+-	uint32_t irq_enable = rd(TCS(TCS_IRQ_ENABLE));
+-	bool done;
+-
+-	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
+-	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
+-		if (i > 2000) {
+-			printf("goodix: RPMh: the command slots stay busy\n");
+-			return false;
+-		}
+-		sleep_us(100);
+-	}
+-	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+-	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+-	wr(TCS(TCS_IRQ_CLEAR), 1);
+-	for (unsigned i = 0; i < count; i++) {
+-		wr(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
+-		wr(TCS(TCS_CMD_ADDR(i)), address[i]);
+-		wr(TCS(TCS_CMD_DATA(i)), data[i]);
+-	}
+-	wr(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
+-	wr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
+-	wr(TCS(TCS_IRQ_ENABLE), irq_enable | 1);        /* the status bit follows the enable; the interrupt itself stays masked */
+-	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
+-	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
+-
+-	done = rpmh_wait(TCS_IRQ_STATUS, 1, 1, "the request");
+-	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+-	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+-	wr(TCS(TCS_CMD_ENABLE), 0);
+-	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
+-	wr(TCS(TCS_IRQ_CLEAR), 1);
+-	wr(TCS(TCS_IRQ_ENABLE), irq_enable);
+-	return done;
+-}
+-
+-/* Diting DT: AVDD=pm8350c_l3 at 2.7 V, IOVDD=pm8350c_l12 at 1.8 V. */
++/* Live DT vdd-supply is pm8350c_l2 / ldoc2, init-voltage 1.8 V,
++ * explicit init-mode NORMAL -> pmic5 LDO HPM 7. AVDD is GPIO71.
++ * Never touch the old Nothing ldoc3/ldoc12 supplies or private TCS slots. */
+ static bool
+ io_supply_on(void)
+ {
+-    uint32_t avdd=rpmh_address("ldoc3"), iovdd=rpmh_address("ldoc12");
+-    if (!avdd || !iovdd || ((avdd>>16)&15)!=4 || ((iovdd>>16)&15)!=4) return false;
+-    uint32_t address[3]={iovdd,iovdd+4,iovdd+8}, data[3]={1800,1,7};
+-    if (!rpmh_write(address,data,3)) return false;
++    const uint32_t vdd=rpmh_address("ldoc2");
++    if (!vdd || ((vdd>>16)&7)!=4) return false;
++    const uint32_t address[3]={vdd+8,vdd,vdd+4}, data[3]={vdd_mode,vdd_mv,1};
++    if (!diting_rpmh_vote_many(address,data,3)) return false;
+     sleep_ms(3);
+-    address[0]=avdd;address[1]=avdd+4;address[2]=avdd+8;data[0]=2700;
+-    if (!rpmh_write(address,data,3)) return false;
+-    sleep_ms(15);return true;
++    if (!gpio_output(PIN_AVDD,true,PULL_NONE,8)) return false;
++    sleep_ms(10);
++    return true;
+ }
+ 
+ /* ---- clocks (GCC) -------------------------------------------------------------------------------- */
+@@ -304,7 +254,7 @@
+ static bool
+ clocks_on(void)
+ {
+-	wr(GCC_VOTE, rd(GCC_VOTE) | VOTE_QUP0_CORE_2X | VOTE_QUP0_CORE | VOTE_QUP0_M_AHB | VOTE_QUP0_S_AHB);
++	if (!diting_gcc_vote_update(VOTE_QUP0_CORE_2X | VOTE_QUP0_CORE | VOTE_QUP0_M_AHB | VOTE_QUP0_S_AHB,0)) return false;
+ 	if (rd(GCC_QUP0_SE4_DFSR) & 1) {
+ 		/* preset rates: the lowest that is at least 4 MHz */
+ 		for (uint32_t level = 0; level < 8; level++) {
+@@ -334,9 +284,13 @@
+ 		se_source_hz = XO_HZ;
+ 		se_clock_select = 0;
+ 	}
+-	wr(GCC_VOTE, rd(GCC_VOTE) | VOTE_QUP0_SE4);
++	if (!diting_gcc_vote_update(VOTE_QUP0_SE4,0)) return false;
+ 	for (int i = 0; i < 1000; i++) {
+-		if (!((rd(GCC_QUP0_M_AHB_CBCR) | rd(GCC_QUP0_S_AHB_CBCR) | rd(GCC_QUP0_SE4_CBCR)) & CLOCK_OFF)) {
++		if (diting_gcc_branch_ready(rd(GCC_QUP0_M_AHB_CBCR),true) &&
++            diting_gcc_branch_ready(rd(GCC_QUP0_S_AHB_CBCR),true) &&
++            diting_gcc_branch_ready(rd(gcc+0x33000),false) &&
++            diting_gcc_branch_ready(rd(gcc+0x3300c),false) &&
++            diting_gcc_branch_ready(rd(GCC_QUP0_SE4_CBCR),false)) {
+ 			return true;
+ 		}
+ 		sleep_us(10);
+@@ -400,7 +354,8 @@
+ #define M_ERRORS                ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 24) | (1u << 25) | (1u << 28) | (1u << 29))
+ #define SPI_FULL_DUPLEX         (3u << 27)
+ 
+-static uint32_t fifo_depth;
++static uint32_t fifo_depth, rx_fifo_depth;
++static DitingGeniSpiState geni_state;
+ 
+ /* 0 = ready; otherwise why the engine cannot be used */
+ static const char *
+@@ -408,6 +363,8 @@
+ {
+ 	uint32_t divider;
+ 
++    if (rd(GENI_STATUS) & DITING_GENI_ACTIVE) return "the serial engine still owns a firmware transaction";
++
+ 	if ((rd(GENI_FW_REVISION_RO) >> 8 & 0xff) != 1) {
+ 		return "the serial engine has no SPI firmware";
+ 	}
+@@ -415,9 +372,12 @@
+ 		return "the serial engine's FIFO interface is disabled";
+ 	}
+ 	fifo_depth = rd(SE_HW_PARAM_0) >> 16 & 0x3f;
+-	if (fifo_depth < 4) {
++    rx_fifo_depth = rd(se+0xe28) >> 16 & 0x3f;
++	if (fifo_depth < 4 || rx_fifo_depth < 4 ||
++        (rd(SE_HW_PARAM_0) >> 24 & 0x3f) != 32 || (rd(se+0xe28) >> 24 & 0x3f) != 32) {
+ 		return "the serial engine reports no FIFO";
+ 	}
++    geni_state.tx_depth=fifo_depth;geni_state.rx_depth=rx_fifo_depth;
+ 	wr(SE_GSI_EVENT_EN, 0);
+ 	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
+ 	wr(GENI_S_IRQ_CLEAR, 0xffffffff);
+@@ -428,8 +388,8 @@
+ 	wr(GENI_OUTPUT_CTRL, 0x7f);
+ 	wr(GENI_FORCE_DEFAULT, 1);
+ 	wr(GENI_DMA_MODE_EN, rd(GENI_DMA_MODE_EN) & ~1u);
+-	wr(GENI_RX_WATERMARK, fifo_depth - 3);
+-	wr(GENI_RX_RFR_WATERMARK, fifo_depth - 2);
++	wr(GENI_RX_WATERMARK, rx_fifo_depth - 3);
++	wr(GENI_RX_RFR_WATERMARK, rx_fifo_depth - 2);
+ 	wr(GENI_TX_WATERMARK, 0);
+ 	/* the status bits we poll follow these enables; the interrupt itself stays masked at the GIC */
+ 	wr(SE_IRQ_EN, rd(SE_IRQ_EN) | 0xf);
+@@ -441,7 +401,9 @@
+ 	wr(SPI_CPHA, 0);
+ 	wr(SPI_CPOL, 0);
+ 	wr(SPI_DEMUX_OUTPUT_INV, 0);
+-	wr(SPI_TRANS_CFG, rd(SPI_TRANS_CFG) & ~2u);
++    /* spi-msm-geni, the driver in REC, defines CS_TOGGLE at bit0.
++     * GPIO19 controls the physical CS so the post-clock hold is exact. */
++	wr(SPI_TRANS_CFG, rd(SPI_TRANS_CFG) & ~1u);
+ 	wr(SPI_DELAY_COUNTERS, 0);
+ 	wr(GENI_TX_PACKING_CFG0, 0x0007f8fe);
+ 	wr(GENI_TX_PACKING_CFG1, 0x000ffefe);
+@@ -453,117 +415,55 @@
+ 	divider = (se_source_hz + hz - 1) / hz;
+ 	wr(GENI_CLK_SEL, se_clock_select & 7);
+ 	wr(GENI_SER_M_CLK_CFG, (divider ? divider : 1) << 4 | 1);
++    if (rd(SPI_CPHA)!=0 || rd(SPI_CPOL)!=0 || rd(SPI_LOOPBACK)!=0 ||
++        rd(SPI_WORD_LEN)!=4 || (rd(SPI_TRANS_CFG)&1u) || (rd(GENI_DMA_MODE_EN)&1u) ||
++        rd(GENI_TX_PACKING_CFG0)!=0x0007f8fe || rd(GENI_TX_PACKING_CFG1)!=0x000ffefe ||
++        rd(GENI_RX_PACKING_CFG0)!=0x0007f8fe || rd(GENI_RX_PACKING_CFG1)!=0x000ffefe ||
++        rd(GENI_BYTE_GRAN)!=0 || (rd(GENI_SER_M_CLK_CFG)&0xfff1u)!=((divider?divider:1)<<4|1u)) {
++        return "the SPI mode/packing/clock configuration did not latch";
++    }
+ 	return NULL;
+ }
+ 
+-static void
+-geni_drain(uint8_t *rx, uint32_t length, uint32_t *received)
+-{
+-	uint32_t status = rd(GENI_RX_FIFO_STATUS), words = status & 0x01ffffff, bytes = words * 4;
+-	if (words > fifo_depth) return; /* inaccessible/bad status must not cause an unbounded MMIO drain */
+-
+-	if (status & 0x80000000u) {
+-		uint32_t valid = status >> 28 & 7;
+-
+-		if (valid && valid < 4) {
+-			bytes -= 4 - valid;
+-		}
+-	}
+-	for (uint32_t i = 0; i < words; i++) {
+-		uint32_t word = rd(GENI_RX_FIFO);
+-
+-		for (int j = 0; j < 4 && bytes; j++, bytes--) {
+-			if (*received < length) {
+-				if (rx) {
+-					rx[*received] = (uint8_t)(word >> (8 * j));
+-				}
+-				(*received)++;
+-			}
+-		}
+-	}
+-}
+-
+-static void
+-geni_recover(void)
+-{
+-	wr(GENI_M_CMD_CTRL, 1u << 2);
+-	for (int i = 0; i < 2000 && !(rd(GENI_M_IRQ_STATUS) & M_CMD_CANCEL); i++) {
+-		sleep_us(100);
+-	}
+-	if (!(rd(GENI_M_IRQ_STATUS) & M_CMD_CANCEL)) {
+-		wr(GENI_M_CMD_CTRL, 1u << 1);
+-		for (int i = 0; i < 2000 && !(rd(GENI_M_IRQ_STATUS) & M_CMD_ABORT); i++) {
+-			sleep_us(100);
+-		}
+-	}
+-	for (int i = 0; i < 64 && (rd(GENI_RX_FIFO_STATUS) & 0x01ffffff); i++) {
+-		(void)rd(GENI_RX_FIFO);
+-	}
+-	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
+-}
+-
+-/* One transfer with the chip selected throughout: `length` bytes out (zeros without tx) and as many in. */
++static uint32_t geni_read_io(void *context, unsigned offset) {
++    (void)context;return rd(se+offset);
++}
++static void geni_write_io(void *context, unsigned offset, uint32_t value) {
++    (void)context;wr(se+offset,value);
++}
++static uint64_t geni_now_io(void *context) {
++    (void)context;uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;
++}
++static void geni_delay_io(void *context, unsigned us) {
++    (void)context;sleep_us(us);
++}
++static void geni_select_io(void *context, bool selected) {
++    (void)context;gpio_set(PIN_CS,!selected);
++}
++
+ static bool
+ geni_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
+ {
+-	static unsigned complaints;
+-	uint32_t sent = 0, received = 0, status = 0;
+-	uint64_t deadline;
+-
+-	for (int i = 0; rd(GENI_STATUS) & 1; i++) {
+-		if (i > 2000) {
+-			geni_recover();
+-			break;
+-		}
+-		sleep_us(100);
+-	}
+-	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
+-	wr(SPI_TX_TRANS_LEN, length);
+-	wr(SPI_RX_TRANS_LEN, length);
+-	wr(GENI_M_CMD0, SPI_FULL_DUPLEX);
+-	clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
+-	while (mach_absolute_time() < deadline) {
+-		while (sent < length && (rd(GENI_TX_FIFO_STATUS) & 0x0fffffff) + 1 < fifo_depth) {
+-			uint32_t word = 0;
+-
+-			for (int j = 0; j < 4 && sent < length; j++, sent++) {
+-				word |= (uint32_t)(tx ? tx[sent] : 0) << (8 * j);
+-			}
+-			wr(GENI_TX_FIFO, word);
+-		}
+-		status = rd(GENI_M_IRQ_STATUS);
+-		geni_drain(rx, length, &received);
+-		if (status & M_ERRORS) {
+-			break;
+-		}
+-		if (status & M_CMD_DONE) {
+-			geni_drain(rx, length, &received);
+-			wr(GENI_M_IRQ_CLEAR, status);
+-			if (received == length) {
+-				return true;
+-			}
+-			break;
+-		}
+-	}
+-	if (complaints++ < 8) {
+-		printf("goodix: SPI transfer of %u bytes failed: status %#x, sent %u, received %u\n", length, status, sent,
+-		    received);
+-	}
+-	geni_recover();
+-	return false;
++    const DitingGeniSpiIo io={NULL,geni_read_io,geni_write_io,geni_now_io,geni_delay_io,geni_select_io};
++    const DitingGeniSpiResult result=diting_geni_spi_transfer(&io,&geni_state,tx,rx,length);
++    static unsigned complaints;
++    if (result!=DitingGeniSpiOk && complaints++<8)
++        printf("Diting touch: SPI fail result=%u length=%u irq=%x sent=%u rx=%u retained=%u\n",
++            (unsigned)result,length,geni_state.status,geni_state.sent,geni_state.received,geni_state.retained);
++    return result==DitingGeniSpiOk;
+ }
+ 
+ /* ---- SPI by hand, on the same pins ----------------------------------------------------------------- */
+ 
+-static unsigned bitbang_in, bitbang_out;
+-
+-static void
++
++
++static bool
+ bitbang_init(void)
+ {
+-	gpio_output(PIN_CS, true, PULL_NONE, 6);
+-	gpio_output(PIN_CLK, false, PULL_NONE, 6);
+-	gpio_output(bitbang_out, false, PULL_NONE, 6);
+-	gpio_configure(bitbang_in, 0, PULL_NONE, 2, false);
++	return gpio_output(PIN_CS, true, PULL_NONE, 6) &&
++        gpio_output(PIN_CLK, false, PULL_NONE, 6) &&
++        gpio_output(PIN_MOSI, false, PULL_NONE, 6) &&
++        gpio_configure(PIN_MISO, 0, PULL_NONE, 2, false);
+ }
+ 
+ static bool
+@@ -574,15 +474,18 @@
+ 		uint8_t out = tx ? tx[i] : 0, in = 0;
+ 
+ 		for (int bit = 7; bit >= 0; bit--) {
+-			gpio_set(bitbang_out, out >> bit & 1);
++			gpio_set(PIN_MOSI, out >> bit & 1);
++			sleep_us(1);
+ 			gpio_set(PIN_CLK, true);
+-			in = (uint8_t)(in << 1 | gpio_get(bitbang_in));
++			sleep_us(1);
++			in = (uint8_t)(in << 1 | gpio_get(PIN_MISO));
+ 			gpio_set(PIN_CLK, false);
+ 		}
+ 		if (rx) {
+ 			rx[i] = in;
+ 		}
+ 	}
++	sleep_us(10);
+ 	gpio_set(PIN_CS, true);
+ 	return true;
+ }
+@@ -666,13 +569,16 @@
+ 	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+ }
+ 
+-static void
++static bool
+ touch_reset(void)
+ {
+ 	gpio_set(PIN_RESET, false);
+-	sleep_ms(2);
++    if (rd(GPIO_IO(PIN_RESET))&2u) return false;
++	sleep_ms(st61y?10:2);
+ 	gpio_set(PIN_RESET, true);
+-	sleep_ms(100);
++    if (!(rd(GPIO_IO(PIN_RESET))&2u)) return false;
++	if (!st61y) sleep_ms(100);
++    return true;
+ }
+ 
+ /* Is the chip there and running its firmware? Finds where it keeps the touch report. */
+@@ -840,65 +746,205 @@
+ }
+ 
+ 
+-/* No firmware upload, FocalTech strap scan, GPU or other Redwood subsystem. */
++/* ---- ST61Y initialization and delta FIFO ------------------------------------------------------- */
++
++static DitingSt61yState st_state;
++static DitingSt61yInfo st_info;
++
++static void
++touch_checkpoint(const char *phase, uint32_t first, uint32_t second)
++{
++    static unsigned records;
++    if (records++>=64) return;
++    char line[192];
++    const int n=snprintf(line,sizeof(line),"DITING TOUCH: %s first=%x second=%x\n",phase,first,second);
++#if XNU_DITING_RAMOOPS_CONSOLE
++    extern void diting_ramoops_diagnostic_write(const char *,int);
++    if (n>0) diting_ramoops_diagnostic_write(line,n<(int)sizeof(line)?n:(int)sizeof(line)-1);
++#else
++    (void)n;
++#endif
++    printf("%s",line);
++}
++
++static bool st_read_io(void *context,uint8_t opcode,unsigned address_bytes,uint32_t address,
++                       uint8_t *data,unsigned length) {
++    (void)context;
++    return diting_st61y_read_wire(spi_transfer,opcode,address_bytes,address,data,length,
++                                  spi_tx,spi_rx,sizeof(spi_tx));
++}
++static bool st_write_io(void *context,const uint8_t *data,unsigned length) {
++    (void)context;return length && length<=GOODIX_MAX_READ && spi_transfer(data,NULL,length);
++}
++static bool st_reset_io(void *context) {
++    (void)context;
++    /* A lost GENI command retains its owner; resetting the chip does not
++     * authorize overwriting that command or changing its SPI pins. */
++    if (spi_transfer==geni_transfer) {
++        const DitingGeniSpiIo io={NULL,geni_read_io,geni_write_io,geni_now_io,geni_delay_io,geni_select_io};
++        if (!diting_geni_spi_reap(&io,&geni_state) || (rd(GENI_STATUS)&DITING_GENI_ACTIVE)) return false;
++    }
++    return touch_reset();
++}
++static uint64_t st_now_io(void *context) {
++    return geni_now_io(context)/1000;
++}
++static void st_sleep_io(void *context,unsigned ms) {
++    (void)context;sleep_ms(ms);
++}
++static void st_emit_io(void *context,unsigned type,unsigned id,uint32_t x,uint32_t y) {
++    (void)context;
++    diting_touch_post(type,id,x,y);
++    if (type!=DitingSt61yUp) {seen.touches++;seen.last_x=x;seen.last_y=y;}
++    static unsigned shown;
++    if (shown++<12) touch_checkpoint(type==DitingSt61yDown?"ST61Y DOWN":
++        type==DitingSt61yMove?"ST61Y MOVE":"ST61Y UP",(id<<16)|x,y);
++}
++
++static bool
++st_start(void)
++{
++    const DitingSt61yIo io={NULL,st_read_io,st_write_io,st_reset_io,st_now_io,st_sleep_io};
++    st_state.max_x=max_x;st_state.max_y=max_y;st_state.flip=flip;
++    for (unsigned attempt=0;attempt<3;attempt++) {
++        uint8_t last[8]={0};
++        const DitingSt61yResult result=diting_st61y_start(&io,&st_info,last);
++        if (result==DitingSt61yOk) {
++            printf("Diting touch: ST61Y firmware=%04x config=%04x protocol=%02x sensor=%ux%u, input=%ux%u\n",
++                st_info.firmware,st_info.config,st_info.protocol,st_info.sensor_x,st_info.sensor_y,max_x,max_y);
++            touch_checkpoint("ST61Y scan submitted",st_info.firmware,st_info.protocol);
++            return true;
++        }
++        printf("Diting touch: ST61Y init attempt=%u FAIL %s, last=%02x %02x %02x %02x %02x %02x %02x %02x\n",
++            attempt+1,diting_st61y_reason(result),last[0],last[1],last[2],last[3],last[4],last[5],last[6],last[7]);
++        touch_checkpoint(diting_st61y_reason(result),le32(last),le32(last+4));
++        if (result==DitingSt61yIdentity || result==DitingSt61ySysInfo) break;
++        sleep_ms(20);
++    }
++    return false;
++}
++
++enum st_poll_result {ST_POLL_OK,ST_POLL_FAILED,ST_POLL_RESTART};
++
++static enum st_poll_result
++st_poll(void)
++{
++    const DitingSt61yIo io={NULL,st_read_io,st_write_io,st_reset_io,st_now_io,st_sleep_io};
++    DitingSt61yPollReport report={0};
++    seen.polls++;
++    const DitingSt61yPollResult result=diting_st61y_poll(&io,&st_state,st_emit_io,NULL,&report);
++    if (report.events) seen.reports++;
++    seen.bad+=report.invalid;
++    if (result==DitingSt61yPollError || result==DitingSt61yPollReset) {
++        touch_checkpoint(result==DitingSt61yPollError?"ST61Y controller error":"ST61Y unexpected reset",
++                         le32(report.last),le32(report.last+4));
++        return ST_POLL_RESTART;
++    }
++    if (report.invalid) touch_checkpoint("ST61Y invalid event",le32(report.last),le32(report.last+4));
++    if (result==DitingSt61yPollBus || result==DitingSt61yPollInvalid) return ST_POLL_FAILED;
++    return ST_POLL_OK;
++}
++
++static void
++release_contacts(void)
++{
++    if (st61y) diting_st61y_release(&st_state,st_emit_io,NULL);
++    else for (unsigned id=0;id<GOODIX_MAX_TOUCHES;id++) if (contact[id].down) {
++        contact[id].down=false;diting_touch_post(DITING_TOUCH_UP,id,contact[id].x,contact[id].y);
++    }
++}
++
+ static bool
+ bring_up(void)
+ {
+-    gpio_output(PIN_RESET,true,PULL_UP,6);
+-    gpio_configure(PIN_INT,0,PULL_UP,6,false);
+-    if (clocks_on()) {
+-        const char *problem=geni_spi_init(4000000);
+-        if (!problem) {
+-            gpio_configure(PIN_MISO,1,PULL_NONE,6,false);
+-            gpio_configure(PIN_MOSI,1,PULL_NONE,6,false);
+-            gpio_configure(PIN_CLK,1,PULL_NONE,6,false);
+-            gpio_configure(PIN_CS,1,PULL_NONE,6,false);
+-            spi_transfer=geni_transfer;
+-            if (goodix_probe(false)) return true;
+-            if (io_supply_on()) { touch_reset();if (goodix_probe(true)) return true; }
+-        } else printf("Diting touch: GENI unavailable: %s; use GPIO SPI\n",problem);
+-    }
+-    /* Only the two known data pins can exchange direction; no arbitrary scan. */
+-    spi_transfer=bitbang_transfer;
+-    for (unsigned attempt=0;attempt<2;attempt++) {
+-        bitbang_in=pins[attempt];bitbang_out=pins[1-attempt];bitbang_init();
+-        if (goodix_probe(false)) return true;
+-        if (attempt==0 && io_supply_on()) {touch_reset();if (goodix_probe(true)) return true;}
+-    }
+-    return false;
++    /* Only the known input strap selects a protocol. No opcode/pin scan. */
++    if (!gpio_configure(PIN_ID,0,PULL_NONE,2,false)) {
++        touch_checkpoint("FAIL selector pin configuration",PIN_ID,rd(GPIO_CFG(PIN_ID)));return false;
++    }
++    st61y=gpio_get(PIN_ID);
++    for (unsigned i=0;i<3;i++) {
++        sleep_ms(2);
++        if (gpio_get(PIN_ID)!=st61y) {touch_checkpoint("unstable controller selector",PIN_ID,rd(GPIO_IO(PIN_ID)));return false;}
++    }
++    touch_checkpoint(st61y?"selector ST61Y":"selector GT9916S",PIN_ID,st61y);
++    if (!gpio_output(PIN_RESET,false,PULL_UP,8) || !gpio_configure(PIN_INT,0,PULL_UP,8,false)) {
++        touch_checkpoint("FAIL reset/IRQ pin configuration",rd(GPIO_CFG(PIN_RESET)),rd(GPIO_CFG(PIN_INT)));return false;
++    }
++    if (!io_supply_on()) {touch_checkpoint("FAIL ldoc2/AVDD request",vdd_mv,rd(GPIO_IO(PIN_AVDD)));return false;}
++    touch_checkpoint("ldoc2/AVDD requested",vdd_mv,rd(GPIO_IO(PIN_AVDD)));
++    if (!clocks_on()) {touch_checkpoint("FAIL QUP0 clocks",rd(GCC_VOTE),rd(GCC_QUP0_SE4_CBCR));return false;}
++    touch_checkpoint("QUP0 clocks",rd(GCC_VOTE),rd(GCC_QUP0_S_AHB_CBCR));
++    /* A firmware transaction is not ours to cancel, even for GPIO fallback. */
++    if (rd(GENI_STATUS)&DITING_GENI_ACTIVE) {touch_checkpoint("FAIL inherited SPI transaction",rd(GENI_STATUS),rd(GENI_M_IRQ_STATUS));return false;}
++    const char *problem=geni_spi_init(4000000);
++    if (!problem) {
++        if (!gpio_configure(PIN_MISO,PIN_FUNCTION_SPI,PULL_NONE,6,false) ||
++            !gpio_configure(PIN_MOSI,PIN_FUNCTION_SPI,PULL_NONE,6,false) ||
++            !gpio_configure(PIN_CLK,PIN_FUNCTION_SPI,PULL_NONE,6,false) ||
++            !gpio_output(PIN_CS,true,PULL_NONE,6)) {
++            touch_checkpoint("FAIL SPI pin configuration",rd(GPIO_CFG(PIN_MISO)),rd(GPIO_CFG(PIN_CS)));return false;
++        }
++        spi_transfer=geni_transfer;
++    } else {
++        printf("Diting touch: GENI unavailable: %s; GPIO SPI on the measured pins\n",problem);
++        if (!bitbang_init()) {touch_checkpoint("FAIL GPIO SPI pin configuration",PIN_CLK,PIN_MISO);return false;}
++        spi_transfer=bitbang_transfer;
++    }
++    touch_checkpoint(spi_transfer==geni_transfer?"GENI FIFO selected":"GPIO SPI selected",
++                     rd(GENI_FW_REVISION_RO),rd(SE_HW_PARAM_0));
++    if (st61y) return st_start();
++    if (!touch_reset()) return false;
++    if (!goodix_probe(true)) return false;
++    const uint8_t clear=0;
++    return goodix_write(touch_address,&clear,1);
+ }
+ 
+ static void
+ touch_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+     tlmm=ml_io_map(TLMM_PHYS,TLMM_SIZE);gcc=ml_io_map(GCC_PHYS,GCC_SIZE);
+-    se=ml_io_map(SE_PHYS,SE_SIZE);rsc=ml_io_map(RSC_PHYS,RSC_SIZE);
+-    cmd_db=ml_io_map_wcomb(CMD_DB_PHYS,CMD_DB_SIZE);
+-    if (!tlmm || !gcc || !se || !rsc || !cmd_db || !bring_up()) {
+-        printf("Diting touch: Goodix initialization failed; normal UI boot continues\n");
++    se=ml_io_map(SE_PHYS,SE_SIZE);cmd_db=ml_io_map_wcomb(CMD_DB_PHYS,CMD_DB_SIZE);
++    if (!tlmm || !gcc || !se || !cmd_db) {
++        touch_checkpoint("SKIP MMIO mapping failed",tlmm!=0,se!=0);
+         thread_terminate(current_thread());return;
+     }
+-    /* A readable firmware identity does not mean the controller is scanning:
+-     * Android/REC may leave it in sleep or gesture mode. Diting's vendor
+-     * brl_resume() resets this already identified Berlin controller. Resume
+-     * before publishing input, and require the real firmware/report ABI again.
+-     * No firmware upload or fabricated contacts are used. */
+-    touch_reset();
+-    if (!goodix_probe(true)) {
+-        printf("Diting touch: controller did not resume after reset; SKIP\n");
++    if (!bring_up()) {
++        touch_checkpoint("FAIL initialization; normal UI boot continues",st61y,geni_state.retained);
+         thread_terminate(current_thread());return;
+     }
+-    const uint8_t clear=0;
+-    if (!goodix_write(touch_address,&clear,1)) {
+-        printf("Diting touch: cannot acknowledge resumed report; SKIP\n");
++    if (!diting_touch_device_ready()) {
++        touch_checkpoint("FAIL input device publication",0,0);
+         thread_terminate(current_thread());return;
+     }
+-    if (!diting_touch_device_ready()) {thread_terminate(current_thread());return;}
+-    printf("Diting touch: Berlin-D ready, SPI 0x%llx GPIO reset=%u irq=%u, axes %ux%u\n",
+-        se_phys,PIN_RESET,PIN_INT,max_x,max_y);
+-    unsigned idle=0;
++    touch_checkpoint("input node published",max_x,max_y);
++    printf("Diting touch: %s initialized, SPI 0x%llx reset=%u irq=%u AVDD=%u, input=%ux%u\n",
++        st61y?"ST61Y":"Berlin-D",se_phys,PIN_RESET,PIN_INT,PIN_AVDD,max_x,max_y);
++    unsigned idle=0,failures=0,restarts=0;
++    uint64_t report_deadline=st_now_io(NULL)+60000;
+     for (;;) {
+-        if (!gpio_get(PIN_INT) || ++idle>=10) {idle=0;goodix_poll();}
++        if (!gpio_get(PIN_INT) || ++idle>=10) {
++            idle=0;
++            if (st61y) {
++                const uint32_t touches_before=seen.touches;
++                const enum st_poll_result poll_result=st_poll();
++                /* Only real DOWN/MOVE input replenishes the recovery budget. */
++                if (seen.touches!=touches_before) restarts=0;
++                if (poll_result==ST_POLL_OK) failures=0;
++                else if (poll_result==ST_POLL_RESTART || ++failures>=3) {
++                    release_contacts();
++                    if (++restarts>3 || !st_start()) {
++                        touch_checkpoint("FAIL input stopped; normal UI continues",failures,geni_state.retained);
++                        thread_terminate(current_thread());return;
++                    }
++                    failures=0;
++                }
++            } else goodix_poll();
++        }
++        if (st_now_io(NULL)>=report_deadline) {
++            touch_checkpoint("input statistics polls/reports",seen.polls,seen.reports);
++            touch_checkpoint("input statistics contacts/bad",seen.touches,seen.bad);
++            report_deadline=st_now_io(NULL)+60000;
++        }
+         sleep_ms(8);
+     }
+ }
+@@ -908,7 +954,13 @@
+ {
+     uint32_t enabled=0;thread_t thread;
+     if (!PE_parse_boot_argn("diting_touch",&enabled,sizeof(enabled)) || !enabled) return;
+-    if (!configuration()) {printf("Diting touch: missing/incompatible Diting DT; SKIP\n");return;}
++    if (!configuration()) {touch_checkpoint("SKIP missing/incompatible Diting DT",0,0);return;}
++    PE_parse_boot_argn("touch_flip",&flip,sizeof(flip));flip&=3;
+     if (kernel_thread_start(touch_thread,NULL,&thread)==KERN_SUCCESS) thread_deallocate(thread);
+-}
+-#endif /* DITING */
++    else touch_checkpoint("FAIL input worker creation",0,0);
++}
++#else
++#if defined(DITING)
++void diting_goodix_init(void) {}
++#endif
++#endif /* DITING and built-in touch */

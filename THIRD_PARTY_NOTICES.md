@@ -9,6 +9,9 @@ This repository is an unofficial, independent hardware port. It is not affiliate
 - uefi-diting / the Diting firmware package: derived from EDK2, Project Mu, and Silicium-ACPI; those licenses apply. The EDK II build tree is not vendored here; `platform-firmware/ditingPkg` carries the device package.
 - Linux GPL-2.0 components: the ath11k/MHI/QMI bodies compiled from the pinned Linux source tree are GPL-2.0. metal2vulkan, Mesa, and Turnip components carry their own GPL/LGPL/MIT licenses.
 - Project Mu, EDK2, and other build-time dependencies keep their upstream licenses.
+- `drivers/DitingTouch` implements the ST61Y wire protocol independently without Linux dependencies,
+  under BSD-2-Clause-Patent. The protocol/register reference revisions are recorded in its README;
+  the XNU producer retains its original APSL notice. No vendor touch firmware is distributed.
 
 ## Apple restore assets
 
@@ -17,7 +20,7 @@ This repository is an unofficial, independent hardware port. It is not affiliate
 ## Vendor / device firmware
 
 - The board firmware blobs listed in `proprietary-files.txt` (Qualcomm ADSP/modem/QCA6490 `amss`, `amss20`, `m3`, `regdb`; Adreno 730 GMU/ZAP/SQE; NXP TFA9873 `tfa98xx.cnt`; Goodix touch firmware; Xiaomi device firmware) are the property of their respective vendors. They are extracted by the user from their own device or local firmware, are not stored or redistributed by this repository, and must not be committed or attached to public artifacts.
-- Qualcomm, NXP, Goodix, and Xiaomi firmware is used only on the user's own hardware under the vendors' terms.
+- Qualcomm, NXP, STMicroelectronics, Goodix, and Xiaomi firmware is used only on the user's own hardware under the vendors' terms.
 
 ## No warranty
 

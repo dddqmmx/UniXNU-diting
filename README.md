@@ -18,6 +18,10 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 实测 RAM banks，WLAN 普通供电、BDF 功放选择及共享 RPMh/AOP 交易按厂商契约修正。
 长期稳定性、Wi-Fi 联网、音频和 Metal 功能仍需本轮实机验收。
 
+本机 Recovery 已确认触控器为 **ST61Y**；旧驱动使用 Goodix 协议。
+[services186](migration/ipados18/services186-st61y-touch.md) 接入真实协议、供电与共享时钟投票，
+主机测试和完整内核链接通过，候选仍待实机触控验收。
+
 见 [services185 修复与验收记录](migration/ipados18/services185-bdf-power-boot.md) 和
 [任务交接入口](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
 
@@ -37,8 +41,8 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 
 ## 组件与来源
 
-`drivers/` 是社区 Diting SM8475 实现（A730 / QCA6490 / SM8475 UFS 等）的子模块，本设备复用其
-板级代码。组件 ID 保持 `DitingPlatform24` 以保留来源、ABI 与验证记录；不要把它标成上游
+`drivers/` 保留社区 Diting SM8475 实现（A730 / QCA6490 / SM8475 UFS 等）与来源声明，板级
+源码已收编进本仓库。组件 ID 保持 `DitingPlatform24` 以保留来源、ABI 与验证记录；不要把它标成上游
 A740/WCN7850 实现。Diting 的板级配置在 `board.toml`、`dts/diting.dts` 和 `drivers/`。
 
 ## 构建

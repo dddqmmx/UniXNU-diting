@@ -3,6 +3,15 @@ set -euo pipefail
 trap 'echo "build-xnu-ipados18.sh: line $LINENO: $BASH_COMMAND failed" >&2' ERR
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
+# The built-in Diting touch producer always uses the shared resource owner.
+DITING_NATIVE_DRIVER_SOURCE=${DITING_NATIVE_DRIVER_SOURCE:-$ROOT}
+export DITING_NATIVE_DRIVER_SOURCE
+for header in DitingSt61yProtocol.h DitingGeniSpi.h; do
+  test -f "$DITING_NATIVE_DRIVER_SOURCE/drivers/DitingTouch/$header" || {
+    echo "missing Diting touch dependency: $header" >&2; exit 1;
+  }
+done
+
 
 # Resolve the Adreno firmware once, before any compile. Explicit environment wins, then
 # the device repository's local.toml [diting_build] entry, then its staged default. The
@@ -324,11 +333,13 @@ if [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
 fi
 if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-power-native.py" --tree "$ROOT"
-elif [ "${XNU_NATIVE_UFS:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
-  # The UFS transport takes the shared SMMU lease from DitingPlatformResources; build that
-  # one object when the full power/audio archive is not selected.
+else
+  # Touch, UFS and the other clients use this one shared owner even when
+  # POWER/BACKLIGHT/WIFI/ADRENO/NATIVE_UFS are all disabled.
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-power-native.py" --tree "$ROOT" --resources-only
 fi
+POWER_ARCHIVE=$ROOT/build/diting-power/libDitingPower.a
+test -f "$POWER_ARCHIVE"
 if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-smmu4k.py" --tree "$ROOT"
 fi
@@ -1036,6 +1047,8 @@ PY_BINDINGS
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/boot-progress/libBootProgress.a"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/boot-progress/libBootProgress.a"
   fi
+  KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
+  KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $POWER_ARCHIVE"
   KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
   EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$KERNEL_ARCHIVE_DEPENDENCIES")
@@ -1095,12 +1108,8 @@ PY_RAM_BLOCK_BINDINGS
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
     PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
   fi
-  if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
-    POWER_ARCHIVE=$ROOT/build/diting-power/libDitingPower.a
-    test -f "$POWER_ARCHIVE"
-    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
-    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $POWER_ARCHIVE"
-  fi
+  PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
+  PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $POWER_ARCHIVE"
   if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "$DITING_ADRENO_PLATFORM" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
     SMMU4K_ARCHIVE=$ROOT/build/diting-smmu4k/libDitingSmmu4K.a
     test -f "$SMMU4K_ARCHIVE"
@@ -1115,6 +1124,10 @@ PY_RAM_BLOCK_BINDINGS
   fi
   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$PLATFORM_ARCHIVES")
   EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$PLATFORM_DEPENDENCIES")
+fi
+if [ "$ARM_DT_PLATFORM" != 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
+  EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=-L$KERNEL_SDKROOT/usr/local/lib/kernel -lfirehose_kernel -Wl,-force_load,$POWER_ARCHIVE")
+  EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$POWER_ARCHIVE")
 fi
 python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-aes/libNativeAES.a}" \
   "${XNU_NATIVE_VIRTIO_BLOCK:-0}" "${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/native-virtio-block/libNativeVirtioBlock.a}" \
@@ -1189,6 +1202,17 @@ if not stamp.exists() or stamp.read_text() != identity:
     'value': sys.argv[1],
 }, indent=2) + '\n')
 PY_GLOBAL_FLAGS
+TOUCH_FLAGS="-DXNU_DITING_TOUCH_BUILTIN=1 -DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE -I$DITING_NATIVE_DRIVER_SOURCE/drivers/DitingTouch -I$DITING_NATIVE_DRIVER_SOURCE/drivers/DitingPower"
+EXTRA_MAKE_ARGS+=("diting_goodix.o_CFLAGS_ADD=$TOUCH_FLAGS")
+python3 - "$TOUCH_FLAGS" <<'PY_TOUCH_FLAGS'
+from pathlib import Path
+import sys
+root = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING')
+stamp = root / '.diting-touch-flags'
+if not stamp.exists() or stamp.read_text() != sys.argv[1]:
+    (root / 'bsd/DEVELOPMENT/diting_goodix.o').unlink(missing_ok=True)
+    stamp.write_text(sys.argv[1])
+PY_TOUCH_FLAGS
 python3 - "${EXTRA_MAKE_ARGS[@]}" <<'PY_OBJECT_FLAGS'
 import sys
 seen = set()

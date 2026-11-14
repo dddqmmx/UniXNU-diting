@@ -5,6 +5,7 @@
  * Rail names, QUP5, NXP parameters and addresses are Diting REC DT values.
  * Included inside DitingUsb after Map; no dependence on a WLAN consumer.
  */
+#include "../DitingPower/DitingGccVotes.h"
 static Map usbDb,usbPhy,usbRepeaterBus,usbPins;
 static GeniI2c repeater;
 static uint64_t phyNow() {
@@ -59,21 +60,20 @@ static bool prepareBoardPhy() {
  }
  // QUP0 SE5 is shared on Diting. Reuse its I2C microcode and leave all other
  // engines/pins alone: the Type-C switch is another device on this bus.
- gcc.w(0x62008,gcc.r(0x62008)|(1u<<6)|(1u<<7)|(1u<<15));
+ if(!diting_gcc_vote_update((1u<<6)|(1u<<7)|(1u<<15),0))return phyFail("QUP5 GCC vote did not latch");
  const unsigned qupClocks[]={0x27004u,0x27008u,0x27610u};
  for(unsigned off:qupClocks) {
-  // BRANCH_HALT_VOTED: HWCG may keep CLK_OFF set while idle. The branch
-  // opens on a bus request, as on the working Diting amp QUP owner. Requiring
-  // CLK_OFF=0 rejects a valid 0x80000002 AHB clock (seen in REC).
+  // Only M/S AHB have HWCG bit1. The SE5 branch has no HWCG override.
+  const bool hwcg=off==0x27004u||off==0x27008u;
   bool available=false;
   const uint64_t end=phyNow()+100;
-  do{unsigned value=gcc.r(off);if(!(value&(1u<<31))||(value&2u)){available=true;break;}IOSleep(1);}while(phyNow()<end);
+  do{if(diting_gcc_branch_ready(gcc.r(off),hwcg)){available=true;break;}IOSleep(1);}while(phyNow()<end);
   if(!available){IOLog("DitingUSB: QUP clock off=%x value=%x vote=%x\n",off,gcc.r(off),gcc.r(0x62008));return phyFail("repeater QUP clock did not run");}
  }
  if((gcc.r(0x62008)&((1u<<6)|(1u<<7)|(1u<<15)))!=((1u<<6)|(1u<<7)|(1u<<15)))return phyFail("QUP5 vote did not latch");
  if(!usbRepeaterBus.open(0x994000,0x4000))return phyFail("QUP5 mapping");
  // Never steal a firmware transaction or replace the I2C microcode.
- if(usbRepeaterBus.r(0x40)&3u)return phyFail("QUP5 transaction still active");
+ if(usbRepeaterBus.r(0x40)&((1u<<0)|(1u<<12)))return phyFail("QUP5 transaction still active");
  if(((usbRepeaterBus.r(GENI_FW_REVISION)>>8)&255)!=GENI_PROTO_I2C)return phyFail("QUP5 is not running the I2C firmware");
  // Diting DT/cape pinctrl: QUP5 on GPIO206/207, function1, pull-up/2mA.
  // The USB firmware stop can restore those pads to GPIO; retain all other

@@ -12,6 +12,7 @@
 #include <pexpert/pexpert.h>
 #include <libkern/c++/OSData.h>
 #include "DitingLowDma.h"
+#include "DitingGccVotes.h"
 extern "C" {
 #include "ShengAdsp.h"
 #include "ShengGpr.h"
@@ -124,7 +125,7 @@ void pin(unsigned n,unsigned config,int high){
  pins.w(reg,config);
  if(high>=0)pins.w(reg+4,high?2:0);
 }
-bool setupBus(){if(!gcc.open(0x100000,0xa0000)||!pins.open(0xf100000,0xd0000))return false;gcc.w(0x62008,gcc.r(0x62008)|(15u<<18)|(1u<<27));const unsigned gates[]={0x3314cu,0x33140u,0x28004u,0x28008u,0x28610u};for(unsigned o:gates){uint64_t end=nowMs()+100;while((gcc.r(o)&(1u<<31))&&!(gcc.r(o)&2u)&&nowMs()<end)IOSleep(1);if((gcc.r(o)&(1u<<31))&&!(gcc.r(o)&2u))return false;}
+bool setupBus(){if(!gcc.open(0x100000,0xa0000)||!pins.open(0xf100000,0xd0000))return false;if(!diting_gcc_vote_update((15u<<18)|(1u<<27),0))return false;const unsigned gates[]={0x3314cu,0x33140u,0x28004u,0x28008u,0x28610u};for(unsigned o:gates){const bool hwcg=o==0x28004u||o==0x28008u;uint64_t end=nowMs()+100;while(!diting_gcc_branch_ready(gcc.r(o),hwcg)&&nowMs()<end)IOSleep(1);if(!diting_gcc_branch_ready(gcc.r(o),hwcg))return false;}
  // Diting's i2c@a94000 pinctrl-0 is qupv3_se13_i2c_active: GPIO48/49,
  // qup13 mux1, pull-up / 2mA. GPIO52/53 mux2 selects QSPI, not this bus.
  const unsigned i2cPins[]={48,49};for(unsigned n:i2cPins)pin(n,3u|(1u<<2),-1);

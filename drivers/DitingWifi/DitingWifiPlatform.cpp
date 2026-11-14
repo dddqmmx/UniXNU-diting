@@ -229,7 +229,7 @@ bool coldLink() {
  // vote. Park on the real TCXO parent with the branch disabled before
  // resetting the core. Do not clock an uninitialized PHY from its output.
  checkpoint("GCC and GDSC","PCIe0","RUNNING",0x17b004);
- gcc.w(0x62008,gcc.r(0x62008)&~(1u<<4));
+ if(!diting_gcc_vote_update(0,1u<<4))return fail("PCIe PIPE vote did not clear");
  gcc.w(0x7b060,(gcc.r(0x7b060)&~3u)|2u);
  // This votable GDSC also has a separate APSS collapse vote. It is at
  // 0x162128 bit0 in Diting's live DT, not Sheng's 0x152020 register.
@@ -251,7 +251,7 @@ bool coldLink() {
  if(!wait(gcc,0,1u<<31,1u<<31,100))return fail("PCIe refgen GPLL0 did not lock");
  gcc.w(0x7b04c,(1u<<8)|11u);gcc.w(0x7b048,gcc.r(0x7b048)|1);
  if(!wait(gcc,0x7b064,1,0,20)||!wait(gcc,0x7b048,1,0,20))return fail("PCIe clock source update timeout");
- gcc.w(0x62008,gcc.r(0x62008)|0x3f); // PIPE is running from TCXO here.
+ if(!diting_gcc_vote_update(0x3f,0))return fail("PCIe GCC votes did not latch"); // PIPE is running from TCXO here.
  // Diting's clock-names lists BOTH aggregate NoC branches (IDs 8 and 9),
  // plus DDRSS SF TBU and PHY rate-change. gcc-waipio.c maps aggregate1
  // to vote bit11, not Sheng's SM8550 cnoc clock. Do not omit this path.
@@ -346,12 +346,12 @@ bool coldLink() {
    parf.w(0x1b0,parf.r(0x1b0)&~(1u<<8));pin(94,1u|1u<<9,0);
    pin(80,1u|1u<<9,0);IOSleep(150);
    gcc.w(0x7b060,(gcc.r(0x7b060)&~3u)|2u);
-   gcc.w(0x62008,gcc.r(0x62008)&~(1u<<4));
+   if(!diting_gcc_vote_update(0,1u<<4))return fail("PCIe retry PIPE vote did not clear");
    reset(0x7c01c);
    phy.w(0x200,1);phy.w(0x244,0);phy.w(kDitingPciePhyPowerDown,0);IODelay(1000);
    gcc.w(0x7b060,gcc.r(0x7b060)&~3u);
    for(const auto &e:kDitingWifiPhy){phy.w(e.off,e.value);if(e.delay)IODelay(e.delay);}
-   IODelay(1000);gcc.w(0x62008,gcc.r(0x62008)|(1u<<4));
+   IODelay(1000);if(!diting_gcc_vote_update(1u<<4,0))return fail("PCIe retry PIPE vote did not latch");
    if(!wait(phy,kDitingPciePhyStatus,kDitingPciePhyStatusMask,0,200))
     return fail("PCIe native PHY restart not ready");
    enableWlan();

@@ -6,6 +6,9 @@
 > [任务交接](交接-2026-11-14-services180-黑屏自动重启.md)。下方 Pong 路径、设备身份
 > 与运行记录属于继承的迁移历史，不作为本轮 Diting 的实机证据。
 
+触控器已由本机 Recovery 确认为 ST61Y。[services186](services186-st61y-touch.md)
+修正协议、资源和共享投票，主机测试与内核链接通过，实机触控验收待完成。
+
 工作分支：`ipados18`。源码目录：`/Volumes/PongDev/source/UniXNU-pong-ipados18`。
 
 目标是第七代 iPad Wi-Fi 型号 iPad7,11 / J171 的 **iPadOS 18.7.10（22H374）**，物理设备仍是 Nothing Phone (2) / SM8475。使用该 restore 的 arm64 内核组件，公开内核源码为 `xnu-11417.140.69` / Darwin 24.6.0。原厂内核的完整版本字符串是 `11417.140.69.706.66~1/RELEASE_ARM64_T8010`；公开源码不包含其全部闭源维护修改。

@@ -10,6 +10,9 @@ iPadOS 18.7.10 / 22H374 / Darwin 24.6.0，八核。
 
 本轮源码归档提交：`97bcaf9aeb87d805c068e95b7128c05120aa8005`。
 
+后续触屏修正见 [services186](services186-st61y-touch.md)：本机 Recovery 确认 ST61Y，
+旧 Goodix 协议不匹配。services185 的进入系统观察保留；候选结果独立记录。
+
 ## 供电根因与修正
 
 [services184 取证](services184-rpmh-minidump.md) 的三条同轮 pmsg 均停在提前直接使能
