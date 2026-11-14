@@ -39,5 +39,5 @@ live DT 同时列出 ST 与 GT9916S；GPIO119 原始高电平选择 ST，低电�
 [NothingOSS SM8475](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/tree/c402fcdb3a1523d10b15ef1123bced45456f7592)。
 本目录为无 Linux 依赖的独立协议实现，许可证见 `LICENSE`。XNU 基础生产者保留 APSL 声明。
 
-services185 已进入系统，但触屏无响应。services186 的主机验证与实机结果见
+services186 已进入系统，用户确认点按、滑动及熄屏后亮屏触控恢复正常；双指手势尚未测试。主机验证与实机结果见
 [本轮记录](../../migration/ipados18/services186-st61y-touch.md)，不能用主机测试代替触控验收。

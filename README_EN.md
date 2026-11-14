@@ -10,11 +10,13 @@ Format 2 device support for Redmi K50 Ultra, codename **diting**, Qualcomm **SM8
 
 ## Current device status (2026-11-14)
 
-The user confirmed services185 entered the system. The display continues to update and physical buttons respond,
-but touch is not working. The phone's Recovery identifies an ST61Y controller; the old producer used Goodix commands.
+The user confirmed services186 entered the system with working taps, swipes and touch after a screen-off/on cycle. The phone's Recovery identifies
+an ST61Y controller; the old producer used Goodix commands.
 [services186](migration/ipados18/services186-st61y-touch.md) adds the matching protocol, shared GCC/RPMh ownership
-and recovery handling. Host tests, native kernel linking and eight-CPU packaging passed; device touch acceptance is pending.
-Persistent boot_b is still services185 and userdata was not updated.
+and recovery handling. Host tests, native kernel linking and eight-CPU packaging passed, followed by real system
+entry, basic touch acceptance and screen-off/on touch recovery. Two-finger gestures have not been tested. Persistent boot_b is services186;
+userdata was not updated and the services185 rollback image is retained.
+Long-term stability, Wi-Fi connectivity, audio and Metal still require acceptance on this build.
 
 ## Historical progress inherited from Pong
 

@@ -13,16 +13,16 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 
 ## 当前状态（2026-11-14）
 
-**services185 已进入系统，用户确认触屏不工作。** 当前持久 boot_b 和最近临时启动镜像
-均为 services185，保持八核；本轮没有更新 userdata。新固件与 DarwinBoot24 使用本机
+**services186 已进入系统，用户确认触屏点按、滑动及熄屏后亮屏触控恢复正常。** 当前持久 boot_b 和最近临时启动镜像
+均为 services186，保持八核；本轮没有更新 userdata。services185 镜像保留作回退。新固件与 DarwinBoot24 使用本机
 实测 RAM banks，WLAN 普通供电、BDF 功放选择及共享 RPMh/AOP 交易按厂商契约修正。
 长期稳定性、Wi-Fi 联网、音频和 Metal 功能仍需本轮实机验收。
 
 本机 Recovery 已确认触控器为 **ST61Y**；旧驱动使用 Goodix 协议。
 [services186](migration/ipados18/services186-st61y-touch.md) 接入真实协议、供电与共享时钟投票，
-主机测试和完整内核链接通过，候选仍待实机触控验收。
+主机测试、完整内核链接与八核打包通过，基本触控及亮屏恢复已通过实机观察；双指手势尚未测试。
 
-见 [services185 修复与验收记录](migration/ipados18/services185-bdf-power-boot.md) 和
+见 [services186 修复与验收记录](migration/ipados18/services186-st61y-touch.md) 和
 [任务交接入口](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
 
 ### 历史状态（2026-11-11）

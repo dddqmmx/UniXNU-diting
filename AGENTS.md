@@ -1,10 +1,10 @@
-> services186 接续：本机 Recovery 已确认 ST61Y，而旧内核使用 Goodix 协议。新真实协议、GPIO119选择、ldoc2/AVDD、GENI完整FIFO与10us CS保持、复位恢复和共享GCC投票已实现；7项host测试、日志关闭编译模式、完整内核与八核打包通过。候选尚未部署，boot_b/运行系统仍services185；触控未验收。当前缓存 services169/tree/.cache/xnu-work 已对应services186。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。候选已准备后方可请求Fastboot实机验证；保留services185回退，不为重复读旧日志重启。
+> 当前 Linux 会话状态（2026-11-14）：services186 已稀疏写 boot_b 并临时启动，用户确认进系统、触屏点按与滑动正常，熄屏后亮屏触控恢复正常。保持八核，未更新 userdata；services185 镜像保留回退。双指手势尚未测试，长期稳定及其他外围未覆盖。手机留在系统供观察。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。源码 4d478a5 已推送；7 项 host 测试、两个日志关闭编译模式、完整内核和八核打包通过；缓存 services169/tree/.cache/xnu-work 对应 services186。
 
-> 当前 Linux 会话状态（2026-11-14）：services185 已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。持久 boot_b=services185，保持八核，本轮未更新 userdata。手机留在系统供观察；不要为重复取证主动重启或重刷。长期稳定性和各外围功能尚未验收。当前入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md) 和[任务交接](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)；其余较早记录为历史状态。
+> services185 历史状态（2026-11-14，后由 services186 替换）：当轮已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。保持八核，未更新 userdata；长期稳定性和各外围功能未验收。历史入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md)；最新状态见[任务交接](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
 
 # Diting probe policy
 
-> 当前状态以本文开头的 services185 记录为准。`D:\ai\diting\交接-2026-11-11-准备用户态.md` 与 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md` 是历史路线。下方带日期的段落是历史实机与构建记录。
+> 当前状态以本文开头的 services186 记录为准。`D:\ai\diting\交接-2026-11-11-准备用户态.md` 与 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md` 是历史路线。下方带日期的段落是历史实机与构建记录。
 
 - Optional probes must record PASS, FAIL, SKIP or RUNNING and return to the normal boot path. Never terminate boot with panic, halt or an unbounded loop to display a probe result.
 - On failed prerequisites, log the reason and skip dependent MMIO/DMA work. Do not fabricate successful services, media or hardware resources to keep boot moving.
@@ -896,8 +896,8 @@ work is the boot itself, not the inputs.
 - services184 三条同轮 pmsg 均停在提前使能 smpe3 后。Nothing CNSS2 的普通 regulator list 不含 IPA；services185 按最终 ELF/BIN BDF 响应可选 host_bdf_data bit0 选择功放：外置不配置 S3E，内置用 64 字节 AOP wlan_pdc 消息，缺失 TLV 保留默认状态。普通电源保持厂商 consumer 顺序，仅显式 provider init-mode 才写模式。
 - WLAN 与 ADSP 共用 AOSS QMP owner；超时不清空邮箱、不伪造 ACK，真实 AOP 清零后才能消费迟到完成。POWER/BACKLIGHT 独立归档与链接条件已同步两套构建入口。
 - services185 原生驱动编译、完整内核链接和八核打包通过；07:42 稀疏写 boot_b 两块全 OKAY（4.670 秒），临时启动 OKAY（2.459 秒）。用户先确认“进系统了”，随后报告触屏不工作。进入系统是实机观察；Wi-Fi 功放响应、联网、PCM、GPU 和长期稳定性不能据此标为通过。
-- 触屏旧轮日志已显示 `goodix: clocks stay off`、全零固件版本与 Goodix 初始化失败；这是 services184 证据，不能冒充 services185 日志。当前先定位 Goodix 初始化/事件链，保留正常启动和真实硬件成功条件。
-- 本地状态、构建和用户观察分别保存在 `diting-work/{build,logs/diting,tmp}/services185`。`services169/tree/.cache/xnu-work` 现对应 services185，不能作 services169 原始对象。用户已明确要求提交和推送本轮更改及文档状态；所有私有输入和产物留在本地。
+- 触屏旧轮日志已显示 `goodix: clocks stay off`、全零固件版本与 Goodix 初始化失败；这是 services184 证据，不能冒充 services185 日志。当时先定位 Goodix 初始化/事件链，后由 services186 修正 ST61Y 协议。
+- 本地状态、构建和用户观察分别保存在 `diting-work/{build,logs/diting,tmp}/services185`。`services169/tree/.cache/xnu-work` 当时对应 services185，现已对应 services186，不能作 services169 原始对象。用户已明确要求提交和推送更改及文档状态；所有私有输入和产物留在本地。
 
 # 2026-11-14 services186 ST61Y 接续
 
@@ -906,4 +906,4 @@ work is the boot itself, not the inputs.
 - 触屏使用共享RPMh owner的ldoc2请求与GPIO71 AVDD；touch/WLAN/USB/audio用共享GCC62008 RMW/readback锁，AHB HWCG与core/core2x/SE的halt判定区分。
 - 真实事件高nibble、LE16 super-resolution、多指状态、空FIFO、丢失批次释放和复位后立即恢复已实现。错误初始化/超时保持有界并返回正常UI；不刷触控firmware、不校准/写OTP或工厂数据。
 - 7项host协议/资源测试、两套shell语法和workflow预检通过；ramoops关闭的resources-only archive和touch对象实际编译无未定义诊断引用，完整内核及八核打包通过。新增18个z前缀的增量XNU patch已追加series，未重写0001聚合补丁。
-- 实机候选101183488字节，继续services182 FD/template和33792字节loader，新hardware DTB只作本轮资源输入。boot_b/运行系统仍services185；services186尚未部署/触控未验收。只推送源码/测试/配置/记录，所有原始日志、firmware/restore和产物本地保存。
+- 实机镜像101183488字节，继续services182 FD/template和33792字节loader，新hardware DTB只作本轮资源输入。09:27稀疏写boot_b并临时boot全部OKAY；当前boot_b/运行系统为services186，用户确认进系统、点按与滑动正常，熄屏后亮屏触控恢复正常；双指手势尚未测试。只推送源码/测试/配置/记录，所有原始日志、firmware/restore和产物本地保存。

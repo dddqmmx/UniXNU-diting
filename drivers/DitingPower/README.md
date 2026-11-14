@@ -58,7 +58,7 @@ SID1801 的 DMA 映射，尚未完成 graph。services46 合并官方 power.md
 
 ## 当前实机状态（2026-11-14）
 
-services185 已由用户确认进入系统，随后报告触屏不工作。共享 RPMh 的 10 个 host 场景、
+services186 已由用户确认进入系统，触屏点按、滑动及熄屏后亮屏触控恢复正常。此前共享 RPMh 的10个host场景、
 QMP 的 8 个 host 场景和完整原生内核构建通过；本轮 PAS、PCM 播放、充电状态与背光
 操作尚未验收。见 [services185](../../migration/ipados18/services185-bdf-power-boot.md)。
 

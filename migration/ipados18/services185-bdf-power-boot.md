@@ -4,14 +4,14 @@
 iPadOS 18.7.10 / 22H374 / Darwin 24.6.0，八核。
 
 **用户确认“进系统了”，随后报告触屏不工作，并确认画面仍更新、实体按键有反应。**
-当前持久 boot_b 与最近临时启动镜像均为 services185。初次进入系统已通过实机观察，
+本轮部署时持久 boot_b 与临时启动镜像均为 services185，后已被 services186 替换。进入系统已通过实机观察，
 触屏未通过；长期稳定性、Wi-Fi 联网、PCM 音频和 Metal 功能尚未完成本轮验收。
 用户要求提交并推送本轮更改和文档状态。
 
 本轮源码归档提交：`97bcaf9aeb87d805c068e95b7128c05120aa8005`。
 
 后续触屏修正见 [services186](services186-st61y-touch.md)：本机 Recovery 确认 ST61Y，
-旧 Goodix 协议不匹配。services185 的进入系统观察保留；候选结果独立记录。
+旧 Goodix 协议不匹配。services186 现已由用户确认进系统、点按与滑动正常，熄屏后亮屏触控恢复正常；双指手势尚未测试。services185 历史观察保留。
 
 ## 供电根因与修正
 
@@ -64,15 +64,15 @@ smpe3 后。Nothing CNSS2 的普通启动 regulator list **不包含 vdd-wlan-ip
 尚未取回 services185 的 BDF 功放响应或网络功能日志，不记录虚构的 Wi-Fi 成功。
 用户要求跳过镜像哈希、镜像审计和设备镜像回读，本轮保留 `--skip-image-verification`。
 
-## 触屏后续
+## 触屏问题与后续（历史时点）
 
-当前 Goodix 生产者仍由 `bsd/dev/diting_goodix.c` 经 `/dev/diting-touch` 向用户态
+services185 的 Goodix 生产者由 `bsd/dev/diting_goodix.c` 经 `/dev/diting-touch` 向用户态
 `userland/touch.c` 送真实事件。旧轮 kmsg 已记录时钟未打开、固件版本全零和初始化
 失败，优先核对本机 QUP0 SE4 时钟、GPIO/SPI、供电共享所有权及实际报告状态。
 这些旧日志不等于已取得 services185 的触屏根因；实体按键有效也不证明触屏服务已发布。
 
-手机留在系统供观察，先做主机侧源码定位与可用的 USB 读取。不要为重复取旧日志主动
-重启或重刷当前可进入系统的镜像。若后续有驱动候选，独立编号并区分构建与实机结果。
+当时先保持系统运行并做主机侧源码定位与可用的 USB 读取。后续 services186 已完成
+ST61Y 修正和基本触控实测；当前入口见其独立记录，保留本轮历史观察。
 
 ## 本地入口
 
@@ -85,6 +85,6 @@ smpe3 后。Nothing CNSS2 的普通启动 regulator list **不包含 vdd-wlan-ip
 
 安装回执是在用户观察前生成，`hardware_boot_confirmed=false` 保留其原始含义；
 后续独立观察记录补充确认，不回写原始传输证据。构建缓存仍在
-`diting-work/build/services169/tree/.cache/xnu-work`，**现在对应 services185**。
+`diting-work/build/services169/tree/.cache/xnu-work`，本轮完成时对应 services185，**现在对应 services186**。
 本轮未写 userdata，取证 Recovery 未挂载 data/metadata/cache；所有私有输入、
 原始设备日志及产物留在本地。

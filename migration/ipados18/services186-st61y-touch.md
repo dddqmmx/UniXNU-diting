@@ -3,9 +3,14 @@
 日期：2026-11-14（Asia/Shanghai）。Redmi K50 Ultra / diting / SM8475，
 iPadOS 18.7.10 / 22H374 / Darwin 24.6.0，保持八核。
 
-**services185 已进入系统，用户确认触屏无响应，但画面持续更新、实体按键有效。**
-services186 已通过主机协议测试、完整原生内核链接、日志关闭配置编译与八核预链接/打包。
-本轮尚未部署，触控尚未实机验收，持久 boot_b 与运行系统仍为 services185。
+**services186 已进入系统，用户确认“触屏点按和滑动正常”。**
+本轮已通过主机协议测试、完整原生内核链接、日志关闭配置编译与八核预链接/打包，
+09:27稀疏写入boot_b并临时启动。当前持久boot_b与运行系统为services186，保持八核，
+未更新 userdata。用户随后确认熄屏→亮屏后的触控恢复正常，双指手势尚未测试；
+长期稳定性与其他外围未作本轮验收。
+
+源码归档并推送：`4d478a59fb9404e7689ef7843f44b9a9c54a31be`。
+services185的触屏失效与显示/按键正常观察仍保留为本轮修正的基线。
 
 ## 已确认的硬件
 
@@ -68,8 +73,20 @@ services178、services184 的本机 Recovery 日志一致报告 `TP is st 61y`�
   这是两个编译模式检查，不是所有配置组合的整机实测。
 - 最终完整原生内核链接通过：`build-20261114T011148Z.log`。实际触屏编译flags含
   `XNU_DITING_TOUCH_BUILTIN=1`、ramoops配置、两个驱动include目录和`-mno-implicit-float`。
-- 八核预链接/打包通过，候选101,183,488字节，loader33,792字节；设备结果待验证。本轮继续`--skip-image-verification`，不做镜像哈希、
+- 八核预链接/打包通过，候选101,183,488字节，loader33,792字节；基本点按和滑动已由用户确认。本轮继续`--skip-image-verification`，不做镜像哈希、
   审计或设备镜像回读。
+
+## 部署与实机结果
+
+- Fastboot核对diting、unlocked=yes、current-slot=b，boot_b=192MiB，候选101,183,488字节。
+- 部署完成UTC `2026-11-14T01:27:56.720376+00:00`，北京时间09:27。稀疏两块全部OKAY，
+  总5.060秒；随后临时boot Sending2.310秒、Booting0.113秒，总2.440秒。
+- 用户选择“已进系统，触屏点按和滑动正常”，随后选择“亮屏恢复正常，暂未测试双指”。
+  基本触控与熄屏→亮屏后的触控从真实系统界面完成验收；双指手势尚未测试，
+  长期稳定与 Wi-Fi/PCM/GPU 功能未作本轮验收。
+- `install-boot.{json,log}`保留原始命令回执，其`hardware_boot_confirmed=false`不回写。
+  后续用户观察独立保存在同目录`hardware-observation.json`，当前派生状态在`candidate.json`。
+- services185镜像保留为已确认可进入系统的回退；其触屏失效状态不包装成完整正常回退。
 
 ## 产物、源码与下一步
 
@@ -82,8 +99,8 @@ services178、services184 的本机 Recovery 日志一致报告 `TP is st 61y`�
   构建、协议和编译模式证据在`diting-work/logs/diting/services186/`。
 - 复用已部署的services182 FD/template与33,792字节DarwinBoot24；services185镜像保留作回退。
 
-候选完成后在Fastboot装入services186，分别验收进入系统、实际点按/滑动/抬起、多指与
-实体按键。若失败，读取本轮 `DITING TOUCH:` 日志定位阶段；不重复拿旧Goodix日志冒充本轮。
+保持 services186 在系统中供观察；有可缩放照片或网页时补验双指手势。
+只有新问题出现时再取本轮日志；不为重复读取旧日志重启已工作的系统。
 
 协议依据 [LineageOS fts_spi固定版本](https://github.com/LineageOS/android_kernel_xiaomi_sm8450/tree/eff4b40407a1b6f1b1ab84554cbb540bcb495175/drivers/input/touchscreen/fts_spi)
 与 [NothingOSS SM8475固定版本](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/tree/c402fcdb3a1523d10b15ef1123bced45456f7592)
