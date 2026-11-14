@@ -25,6 +25,16 @@ extern "C" void diting_cpu_first_boot_wait(processor_t);
 #endif
 extern "C" {
 volatile uint32_t armcpu_registered, armcpu_gic_ready;
+volatile uint32_t armcpu_start_phase;
+volatile int32_t armcpu_start_error;
+volatile uint32_t armcpu_init_phase[8];
+uint32_t diting_cpu_initialization_diagnostic(void)
+{
+  uint32_t state = 0;
+  for (unsigned i = 0; i < 8; i++)
+    state |= (armcpu_init_phase[i] & 15U) << (i * 4);
+  return state;
+}
 volatile uint64_t armcpu_timer_interrupts, armcpu_ipi_interrupts;
 volatile uint32_t armcpu_gic_boot[8], armcpu_gic_typer_probe[2], armcpu_gic_stride;
 volatile uint32_t armcpu_controller_attached, armcpu_controller_published;
@@ -261,12 +271,16 @@ IOService *ArmCpu::probe(IOService *provider, SInt32 *score)
 
 bool ArmCpu::prepareGic(void)
 {
+  armcpu_start_phase = 4;
   IOLog("ArmCpu: map GIC from DT\n");
-  if (!mapGic()) { IOLog("ArmCpu: GIC mapping/identity failed\n"); return false; }
+  if (!mapGic()) { armcpu_start_error = -3; IOLog("ArmCpu: GIC mapping/identity failed\n"); return false; }
+  armcpu_start_phase = 5;
   IOLog("ArmCpu: initialize distributor\n");
-  if (!initDistributor()) { IOLog("ArmCpu: distributor timeout\n"); return false; }
+  if (!initDistributor()) { armcpu_start_error = -4; IOLog("ArmCpu: distributor timeout\n"); return false; }
+  armcpu_start_phase = 6;
   IOLog("ArmCpu: wake boot redistributor\n");
-  if (!wakeRedistributor(true)) { IOLog("ArmCpu: boot redistributor not ready\n"); return false; }
+  if (!wakeRedistributor(true)) { armcpu_start_error = -5; IOLog("ArmCpu: boot redistributor not ready\n"); return false; }
+  armcpu_start_phase = 7;
   gDist=dist;gBootAffinity=affinity&0xff00ffffffULL;
   return true;
 }
@@ -274,14 +288,15 @@ bool ArmCpu::prepareGic(void)
 bool ArmCpu::start(IOService *provider)
 {
   auto reg = OSDynamicCast(OSData, provider->getProperty("reg"));
-  if (!reg || reg->getLength() != 4) return false;
+  if (!reg || reg->getLength() != 4) { armcpu_start_error = -1; return false; }
   uint32_t physical;
   memcpy(&physical, reg->getBytesNoCopy(), 4);
   int mapped = ml_get_cpu_number(physical);
-  if (mapped < 0 || mapped >= 8 || gCpus[mapped]) return false;
+  if (mapped < 0 || mapped >= 8 || gCpus[mapped]) { armcpu_start_error = -2; return false; }
   logicalId = static_cast<uint32_t>(mapped);
   bool isBoot = mapped == ml_get_boot_cpu_number();
   if (isBoot) {
+    armcpu_start_phase = 3;
     IOLog("ArmCpu: start boot CPU\n");
     if (!prepareGic()) return false;
   } else {
@@ -292,9 +307,10 @@ bool ArmCpu::start(IOService *provider)
     dist = boot->dist; redistBase = boot->redistBase; redistSize = boot->redistSize;
     affinity = physical;
   }
-  if (!IOCPU::start(provider)) return false;
+  if (!IOCPU::start(provider)) { armcpu_start_error = -6; return false; }
+  if (isBoot) armcpu_start_phase = 8;
   cpuName = OSSymbol::withCStringNoCopy("Diting ARM architectural CPU");
-  if (!cpuName) return false;
+  if (!cpuName) { armcpu_start_error = -7; return false; }
   ml_processor_info_t info = {};
   info.cpu_id = this;
   info.phys_id = physical;
@@ -304,6 +320,7 @@ bool ArmCpu::start(IOService *provider)
   perfmon_interrupt_handler_func pmi = nullptr;
   kern_return_t status = ml_processor_register(&info, &machProcessor, &ipi_handler, &pmi);
   if (status != KERN_SUCCESS) {
+    armcpu_start_error = -8;
     IOLog("ArmCpu: CPU %u registration failed %d\n", logicalId, status);
     return false;
   }
@@ -316,6 +333,7 @@ bool ArmCpu::start(IOService *provider)
     registerService();
     return true;
   }
+  armcpu_start_phase = 9;
 
   // Register every processor before waking any of them.
   OSIterator *iter = provider->getProvider()->getChildIterator(gIOServicePlane);
@@ -346,6 +364,7 @@ bool ArmCpu::start(IOService *provider)
   armcpu_controller_attached = 1;
   controller->registerCPUInterruptController();
   armcpu_controller_published = 1;
+  armcpu_start_phase = 10;
   for (unsigned i=0; i<ml_get_cpu_count(); i++) {
     ArmCpu *cpu = gCpus[i];
     cpu->controller = controller;
@@ -354,6 +373,7 @@ bool ArmCpu::start(IOService *provider)
                                       &ArmCpu::dispatch, nullptr) != kIOReturnSuccess)
       panic("ArmCpu: IRQ handler registration failed for CPU %u", i);
   }
+  armcpu_start_phase = 11;
 #if DITING_DARWIN_MAJOR >= 24
   // Darwin 24 separates first boot from processor_start(), and invokes
   // initCPU() during processor_boot(). All vectors must exist beforehand.
@@ -362,6 +382,7 @@ bool ArmCpu::start(IOService *provider)
   for (unsigned i=0; i<ml_get_cpu_count(); i++) {
     if (gCpus[i] != this) diting_cpu_first_boot(gCpus[i]->machProcessor);
   }
+  armcpu_start_phase = 12;
   for (unsigned i=0; i<ml_get_cpu_count(); i++) {
     diting_cpu_first_boot_wait(gCpus[i]->machProcessor);
     IOLog("ArmCpu: CPU %u first boot completed\n", i);
@@ -371,7 +392,9 @@ bool ArmCpu::start(IOService *provider)
     IOLog("ArmCpu: CPU %u PAC features ISAR1=%#llx ISAR2=%#llx SCTLR=%#llx address=%u generic=%u key-access=not-probed\n",
         i,isar1,isar2,armcpu_pac_features[i][2],address,generic);
   }
+  armcpu_start_phase = 13;
   ml_cpu_init_completed();
+  armcpu_start_phase = 14;
 #else
   initCPU(true);
   psci_smp_init();
@@ -387,6 +410,7 @@ bool ArmCpu::start(IOService *provider)
   // IOKit may now expand its matching worker pool. A firmware-rejected
   // secondary remains offline; it must not leave the pool in bootstrap mode.
   diting_cpu_startup_finished(controller);
+  armcpu_start_phase = 15;
   registerService();
   uint64_t ctl, cval, now, frequency, daif;
   __asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(ctl));
@@ -403,12 +427,15 @@ bool ArmCpu::start(IOService *provider)
   DitingCpuPolicy::start();
   IOLog("ArmCpu: all registered CPUs available; idle preference X2, A710, A510 (no affinity binding)\n");
 #endif
+  armcpu_start_phase = 16;
   return true;
 }
 
 void ArmCpu::initCPU(bool boot)
 {
   (void)boot; // XNU passes true for the first initialization of each CPU.
+  if (logicalId >= 8) panic("ArmCpu: invalid initialization CPU %u", logicalId);
+  armcpu_init_phase[logicalId] = 1;
   if(logicalId<8) {
     uint64_t isar1,isar2,sctlr;
     __asm__ volatile("mrs %0, id_aa64isar1_el1":"=r"(isar1));
@@ -417,20 +444,30 @@ void ArmCpu::initCPU(bool boot)
     armcpu_pac_features[logicalId][0]=isar1;armcpu_pac_features[logicalId][1]=isar2;
     armcpu_pac_features[logicalId][2]=sctlr;
   }
+  armcpu_init_phase[logicalId] = 2;
   if (logicalId != static_cast<uint32_t>(ml_get_boot_cpu_number())) {
     if (!wakeRedistributor(true)) panic("ArmCpu: CPU %u redistributor did not wake", logicalId);
   }
   if (!interruptInstalled) {
     // ml_install_interrupt_handler writes the *current* CPU's cpu_data.
     // Installing secondary handlers from the boot CPU overwrites its handler.
+    armcpu_init_phase[logicalId] = 3;
     controller->enableCPUInterrupt(this);
     interruptInstalled = true;
   }
+  armcpu_init_phase[logicalId] = 4;
   enableGic();
+  armcpu_init_phase[logicalId] = 5;
   enableCPUTimeBase(true);
+  armcpu_init_phase[logicalId] = 6;
   setCPUState(kIOCPUStateRunning);
-  psci_smp_cpu_running();
+  armcpu_init_phase[logicalId] = 7;
+  armcpu_init_phase[logicalId] = 8;
   signalCPU(this); // cpu_signal_handler lifts SIGPdisabled on the local CPU.
+  armcpu_init_phase[logicalId] = 9;
+  // Publish success only after every local initialization step has returned.
+  // processor_boot's separate wait still establishes scheduler completion.
+  psci_smp_cpu_running();
 }
 
 void ArmCpu::dispatch(void *target, void *, void *, int)
@@ -561,6 +598,7 @@ const OSSymbol *ArmCpu::getCPUName(void)
 
 extern "C" bool diting_cpu_start(IOService *platform)
 {
+  armcpu_start_phase = 1;
   OSIterator *iter = platform->getChildIterator(gIOServicePlane);
   if (!iter) return false;
   bool started = false;
@@ -572,6 +610,7 @@ extern "C" bool diting_cpu_start(IOService *platform)
         !reg || reg->getLength() != 4) continue;
     uint32_t physical; memcpy(&physical, reg->getBytesNoCopy(), 4);
     if (ml_get_cpu_number(physical) != ml_get_boot_cpu_number()) continue;
+    armcpu_start_phase = 2;
     ArmCpu *cpu = new ArmCpu;
     started = cpu && cpu->init() && cpu->attach(nub) && cpu->start(nub);
     break;

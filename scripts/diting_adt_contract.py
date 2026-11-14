@@ -47,7 +47,7 @@ def parse_adt(blob):
     return nodes
 
 
-def audit_adt(blob, *, require_manifest=True, boot_manifest=None):
+def audit_adt(blob, *, require_manifest=True, boot_manifest=None, expected_cpus=None):
     nodes = parse_adt(blob)
     chosen = nodes['/chosen']
     manifest = nodes['/chosen/manifest-properties']
@@ -159,8 +159,11 @@ def audit_adt(blob, *, require_manifest=True, boot_manifest=None):
                  if path.rsplit('/', 1)[0] == '/cpus' and
                  path.rsplit('/', 1)[1].startswith('cpu') and
                  path.rsplit('/', 1)[1] != 'cpu-map']
-    if cpu_paths != ['/cpus/cpu0']:
-        raise ValueError('Diting single-core ADT must expose only /cpus/cpu0')
+    cpu_paths.sort()
+    cpu_count = len(cpu_paths)
+    if (not 1 <= cpu_count <= 8 or cpu_paths != [f'/cpus/cpu{i}' for i in range(cpu_count)] or
+            (expected_cpus is not None and cpu_count != expected_cpus)):
+        raise ValueError('Diting ADT CPU nodes differ from the requested physical CPU count')
     cpu_phys_ids = set()
     boot_cpus = 0
     for path in cpu_paths:
@@ -177,6 +180,8 @@ def audit_adt(blob, *, require_manifest=True, boot_manifest=None):
             boot_cpus += 1
     if boot_cpus != 1 or struct.unpack('<I', nodes['/cpus/cpu0']['reg'])[0] != 0:
         raise ValueError('Diting ADT must mark CPU0 as its unique running boot CPU')
+    if cpu_phys_ids != {i << 8 for i in range(cpu_count)}:
+        raise ValueError('Diting ADT CPU affinities differ from the SM8475 hardware')
     return {'status': 'PASS', 'nodes': len(nodes),
             'adt_sha256': hashlib.sha256(blob).hexdigest(),
             'nonce_digest_bytes': 48, 'nonce_scope': 'development image',
@@ -186,7 +191,7 @@ def audit_adt(blob, *, require_manifest=True, boot_manifest=None):
             'amfi_only_platform_code': amfi_only_platform_code,
             'packed_data_ramdisk': packed_ramdisk,
             'system_volume_auth_blob_bytes': len(chosen['system-volume-auth-blob']) if 'system-volume-auth-blob' in chosen else 0,
-            'cpu_count': 1,
+            'cpu_count': cpu_count,
             'optional_identity_inputs': sorted(set(chosen) & {
                 'unique-chip-id', 'chip-id', 'board-id', 'boot-manifest-hash'}),
             'checks': ['ADT structure', 'Image4 mandatory inputs',

@@ -1,0 +1,15 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -938,6 +938,12 @@
+ 	// Enable NEON
+ 	mov		x0, #(CPACR_FPEN_ENABLE)
+ 	msr		CPACR_EL1, x0
++#if defined(DITING)
++	/* Linux clang can emit SIMD in the first C call (phystokv).
++	 * Synchronize the new FP access controls before executing it, not
++	 * only later when normal CPU initialization installs its context. */
++	isb		sy
++#endif
+ #endif
+ 
+ 	// Clear thread pointer

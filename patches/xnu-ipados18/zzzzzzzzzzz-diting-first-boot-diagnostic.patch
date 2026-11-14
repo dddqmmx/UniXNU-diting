@@ -1,0 +1,244 @@
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -902,6 +902,16 @@
+ 	splx(s);
+ }
+ 
++#if defined(DITING)
++/* One writer: processor_boot calls are serialized by the native CPU driver.
++ * The BSD-root panic reads only this software snapshot, without taking locks. */
++volatile uint32_t diting_cpu_first_boot_progress = 0xff00;
++#define DITING_FIRST_BOOT_STEP(step) \
++    (diting_cpu_first_boot_progress = ((uint32_t)processor->cpu_id << 8) | (step))
++#else
++#define DITING_FIRST_BOOT_STEP(step) ((void)0)
++#endif
++
+ LCK_GRP_DECLARE(processor_updown_grp, "processor_updown");
+ LCK_MTX_DECLARE(processor_updown_lock, &processor_updown_grp);
+ 
+@@ -910,6 +920,10 @@
+ 	processor_t     processor,
+ 	bool            first_boot)
+ {
++#define DITING_STARTUP_STEP(step) do { \
++	if (first_boot) DITING_FIRST_BOOT_STEP(step); \
++} while (0)
++	DITING_STARTUP_STEP(20);
+ 	if (!processor->processor_booted && !first_boot) {
+ 		panic("processor %d not booted", processor->cpu_id);
+ 	}
+@@ -923,16 +937,21 @@
+ 
+ 	spl_t s = splsched();
+ 
++	DITING_STARTUP_STEP(21);
+ 	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
++	DITING_STARTUP_STEP(22);
+ 	assert(processor->processor_inshutdown || first_boot);
+ 	processor->processor_inshutdown = false;
+ 	assert(processor->processor_instartup == false);
+ 	processor->processor_instartup = true;
+ 	simple_unlock(&processor_start_state_lock);
+ 
++	DITING_STARTUP_STEP(23);
+ 	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
++	DITING_STARTUP_STEP(24);
+ 
+ 	pset_lock(pset);
++	DITING_STARTUP_STEP(25);
+ 
+ 	if (first_boot) {
+ 		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_NOT_BOOTED);
+@@ -951,11 +970,16 @@
+ 
+ 	splx(s);
+ 
++	DITING_STARTUP_STEP(26);
+ 	ml_cpu_power_enable(processor->cpu_id);
++	DITING_STARTUP_STEP(27);
+ 	ml_cpu_begin_state_transition(processor->cpu_id);
++	DITING_STARTUP_STEP(28);
+ 	ml_broadcast_cpu_event(CPU_BOOT_REQUESTED, processor->cpu_id);
+ 
++	DITING_STARTUP_STEP(29);
+ 	cpu_start(processor->cpu_id);
++	DITING_STARTUP_STEP(30);
+ 
+ 	s = splsched();
+ 	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+@@ -969,7 +993,9 @@
+ 	simple_unlock(&sched_available_cores_lock);
+ 	splx(s);
+ 
++	DITING_STARTUP_STEP(31);
+ 	ml_cpu_end_state_transition(processor->cpu_id);
++	DITING_STARTUP_STEP(32);
+ 	/*
+ 	 * Note: Because the actual wait-for-start happens sometime later,
+ 	 * this races with processor_up calling CPU_BOOTED.
+@@ -977,6 +1003,8 @@
+ 	 * confirms the CPU has booted.
+ 	 */
+ 	ml_broadcast_cpu_event(CPU_ACTIVE, processor->cpu_id);
++	DITING_STARTUP_STEP(33);
++#undef DITING_STARTUP_STEP
+ }
+ 
+ void
+@@ -1110,8 +1138,11 @@
+ processor_boot(
+ 	processor_t                     processor)
+ {
++	DITING_FIRST_BOOT_STEP(1);
+ 	lck_mtx_lock(&cluster_powerdown_lock);
++	DITING_FIRST_BOOT_STEP(2);
+ 	lck_mtx_lock(&processor_updown_lock);
++	DITING_FIRST_BOOT_STEP(3);
+ 
+ 	assert(!sched_is_in_sleep());
+ 	assert(!sched_is_cpu_init_completed());
+@@ -1129,28 +1160,38 @@
+ 	/*
+ 	 *	Create the idle processor thread.
+ 	 */
++	DITING_FIRST_BOOT_STEP(4);
+ 	if (processor->idle_thread == THREAD_NULL) {
+ 		idle_thread_create(processor, processor_start_thread);
+ 	}
+ 
++	DITING_FIRST_BOOT_STEP(5);
+ 	if (processor->processor_self == IP_NULL) {
+ 		ipc_processor_init(processor);
+ 	}
+ 
++	DITING_FIRST_BOOT_STEP(6);
+ 	if (processor == master_processor) {
+ 		processor->last_startup_reason = REASON_SYSTEM;
+ 
++		DITING_FIRST_BOOT_STEP(7);
+ 		ml_cpu_power_enable(processor->cpu_id);
++		DITING_FIRST_BOOT_STEP(8);
+ 
+ 		processor_t prev = thread_bind(processor);
++		DITING_FIRST_BOOT_STEP(9);
+ 		thread_block(THREAD_CONTINUE_NULL);
++		DITING_FIRST_BOOT_STEP(10);
+ 
+ 		cpu_start(processor->cpu_id);
++		DITING_FIRST_BOOT_STEP(11);
+ 
+ 		assert(processor->state == PROCESSOR_RUNNING);
+ 		processor_update_offline_state(processor, PROCESSOR_OFFLINE_RUNNING);
+ 
++		DITING_FIRST_BOOT_STEP(12);
+ 		thread_bind(prev);
++		DITING_FIRST_BOOT_STEP(13);
+ 	} else {
+ 		processor->last_startup_reason = REASON_SYSTEM;
+ 
+@@ -1158,14 +1199,21 @@
+ 		 * We don't wait for startup to finish, so all CPUs can start
+ 		 * in parallel.
+ 		 */
++		DITING_FIRST_BOOT_STEP(14);
+ 		processor_dostartup(processor, true);
++		DITING_FIRST_BOOT_STEP(15);
+ 	}
+ 
+ 	processor->processor_booted = true;
+ 
++	DITING_FIRST_BOOT_STEP(16);
+ 	lck_mtx_unlock(&processor_updown_lock);
++	DITING_FIRST_BOOT_STEP(17);
+ 	lck_mtx_unlock(&cluster_powerdown_lock);
+-}
++	DITING_FIRST_BOOT_STEP(18);
++}
++
++#undef DITING_FIRST_BOOT_STEP
+ 
+ /*
+  * Wake a previously booted processor from a temporarily powered off state.
+--- a/iokit/Kernel/IOCPU.cpp
++++ b/iokit/Kernel/IOCPU.cpp
+@@ -686,9 +686,23 @@
+ 	service->setProperty(gIOInterruptSpecifiersKey, specifier.get());
+ }
+ 
++#if defined(DITING)
++/* Each slot has exactly one writer: that CPU's enableCPUInterrupt call. */
++volatile uint32_t diting_cpu_interrupt_enable_progress[8];
++#endif
++
+ void
+ IOCPUInterruptController::enableCPUInterrupt(IOCPU *cpu)
+ {
++#if defined(DITING)
++	const unsigned cpu_number = cpu->getCPUNumber();
++#define DITING_IRQ_ENABLE_STEP(step) do { \
++	if (cpu_number < 8) diting_cpu_interrupt_enable_progress[cpu_number] = (step); \
++} while (0)
++#else
++#define DITING_IRQ_ENABLE_STEP(step) ((void)0)
++#endif
++	DITING_IRQ_ENABLE_STEP(1);
+ 	IOInterruptHandler handler = OSMemberFunctionCast(
+ 		IOInterruptHandler, this, &IOCPUInterruptController::handleInterrupt);
+ 
+@@ -696,14 +710,21 @@
+ 
+ 	ml_install_interrupt_handler(cpu, cpu->getCPUNumber(), this, handler, NULL);
+ 
++	DITING_IRQ_ENABLE_STEP(2);
+ 	IOTakeLock(vectors[0].interruptLock);
++	DITING_IRQ_ENABLE_STEP(3);
+ 	++enabledCPUs;
+ 
+ 	if (enabledCPUs == numCPUs) {
++		DITING_IRQ_ENABLE_STEP(4);
+ 		IOService::cpusRunning();
++		DITING_IRQ_ENABLE_STEP(5);
+ 		thread_wakeup(this);
+ 	}
++	DITING_IRQ_ENABLE_STEP(6);
+ 	IOUnlock(vectors[0].interruptLock);
++	DITING_IRQ_ENABLE_STEP(7);
++#undef DITING_IRQ_ENABLE_STEP
+ }
+ 
+ IOReturn
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1099,6 +1099,10 @@
+ #if defined(DITING)
+ extern "C" uint64_t diting_platform_startup_diagnostic(void)
+     __attribute__((weak_import));
++extern "C" uint32_t diting_cpu_initialization_diagnostic(void)
++    __attribute__((weak_import));
++extern "C" volatile uint32_t diting_cpu_first_boot_progress;
++extern "C" volatile uint32_t diting_cpu_interrupt_enable_progress[8];
+ #endif
+ 
+ void
+@@ -1119,10 +1123,18 @@
+ 	 * actual startup progress. No allocation, registry walk or hardware read. */
+ 	if (!pe && diting_platform_startup_diagnostic) {
+ 		uint64_t state = diting_platform_startup_diagnostic();
+-		panic("IOSecureBSDRoot: missing platform expert; platform=%u cpu=%u registered=%u gic=%u error=%d",
++		uint32_t firstboot = diting_cpu_first_boot_progress;
++		uint32_t init = diting_cpu_initialization_diagnostic ?
++		    diting_cpu_initialization_diagnostic() : 0;
++		uint32_t irq = 0;
++		for (unsigned i = 0; i < 8; i++) {
++			irq |= (diting_cpu_interrupt_enable_progress[i] & 15U) << (i * 4);
++		}
++		panic("IOSecureBSDRoot: missing platform expert; platform=%u cpu=%u registered=%u gic=%u error=%d firstboot=%u/%u init=%#x irq=%#x",
+ 		    (unsigned)(state & 255), (unsigned)((state >> 8) & 255),
+ 		    (unsigned)((state >> 16) & 255), (unsigned)((state >> 24) & 255),
+-		    (int32_t)(state >> 32));
++		    (int32_t)(state >> 32), (firstboot >> 8) & 255, firstboot & 255,
++		    init, irq);
+ 	}
+ #endif
+ 	assert(pe);

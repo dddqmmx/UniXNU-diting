@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm python3-venv mono-complete llvm lld
+          sudo apt-get install -y -qq build-essential uuid-dev iasl nasm python3-venv mono-complete llvm lld device-tree-compiler
           # Ubuntu ships versioned llvm tools; BootShim's Makefile calls the bare names.
           for t in llvm-objcopy llvm-objdump llvm-readelf clang clang++; do
             if ! command -v "$t" >/dev/null 2>&1; then
@@ -90,14 +90,20 @@ jobs:
               print("AdvancedLoggerLib inserted")
           PY
           cp -r ../device/platform-firmware/ditingPkg Platforms/Xiaomi/ditingPkg
-          # build_uefi.py packs Resources/DTBs/<device>.dtb into the volume.
+          # Generate both the FDF-embedded tree and boot image input from the
+          # same board source; never copy a stale 12 GiB generated DTB.
           mkdir -p Resources/DTBs
-          cp ../device/platform-firmware/ditingPkg/FdtBlob/sm8475-xiaomi-diting.dtb Resources/DTBs/diting.dtb
+          UNIXNU_DEVICE="$GITHUB_WORKSPACE/device" UNIXNU_UEFI="$PWD" \
+            python3 ../device/scripts/build-diting-hardware-dtb.py --output Resources/DTBs/diting.dtb
+          python3 ../device/scripts/check-firmware-memory.py Resources/DTBs/diting.dtb \
+            Platforms/Xiaomi/ditingPkg/Library/MemoryMapLib/MemoryMapLib.c
           # build_uefi.py runs mkbootimg with --ramdisk Resources/ramdisk; the volume build
           # does not need payload contents, but the file must exist.
           : > Resources/ramdisk
           cp ../device/platform-firmware/diting.toml Resources/Configs/diting.toml
           git apply ../device/platform-firmware/darwin-boot-diting.patch
+          git apply ../device/platform-firmware/diting-ramoops-pmsg.patch
+          git apply ../device/platform-firmware/diting-keypad-unused-state.patch
           # A failed first LocateProtocol used to stick for the life of the driver,
           # so DarwinBoot's later DEBUG_ERROR lines never reached the buffer.
           python3 - <<'PY'
@@ -158,18 +164,12 @@ jobs:
           python3 ../device/platform-firmware/seed-ext-deps.py \
             ../device/platform-firmware/vendor \
             .
-          # Retry the build itself. A seeded ext_dep is not downloaded again.
-          for attempt in 1 2 3; do
-            if python3 build_uefi.py -d diting; then
-              break
-            fi
-            echo "firmware build attempt $attempt failed; retrying"
-            sleep 30
-          done
+          # A compiler failure must fail this job even if a partial FD exists.
+          python3 build_uefi.py -d diting
           test -f Build/ditingPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd
           FD="Build/ditingPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd"
           [ -f "$FD" ] || { echo "missing firmware volume: $FD" >&2; exit 1; }
-          sha256sum "$FD"; ls -l "$FD"
+          ls -l "$FD"
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp "$FD" "$GITHUB_WORKSPACE/out/SILICIUM_UEFI.fd"
           # The macOS job packs the self-contained image and has no firmware tree.
@@ -231,10 +231,11 @@ jobs:
           mkdir -p Platforms/Xiaomi/ditingPkg
           cp -R ../device/platform-firmware/ditingPkg/. Platforms/Xiaomi/ditingPkg/
           mkdir -p Resources/DTBs
-          cp ../device/platform-firmware/ditingPkg/FdtBlob/sm8475-xiaomi-diting.dtb Resources/DTBs/diting.dtb
           : > Resources/ramdisk
           cp ../device/platform-firmware/diting.toml Resources/Configs/diting.toml
           git apply ../device/platform-firmware/darwin-boot-diting.patch
+          git apply ../device/platform-firmware/diting-ramoops-pmsg.patch
+          git apply ../device/platform-firmware/diting-keypad-unused-state.patch
       - name: tools
         run: |
           brew install dtc llvm lld cmake mtools

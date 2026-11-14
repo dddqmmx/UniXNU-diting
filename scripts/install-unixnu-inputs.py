@@ -8,6 +8,7 @@ before resolving (the same arrangement the NX769J port uses for its iOS 16 profi
 The step is idempotent: an identical file is left alone, a differing one stops the run.
 """
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -124,6 +125,10 @@ def main():
     added, present = install_components(unixnu)
     fix_prelink_info_extent(unixnu)
     fix_apple_cpu_match(unixnu)
+    module_spec = importlib.util.spec_from_file_location('diting_banked_dram', ROOT / 'scripts/patch-unixnu-banked-dram.py')
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    module.install(unixnu)
     print(json.dumps({'profile': profile, 'installed_at': str(target),
                       'components_added': added, 'components_present': present}, indent=2))
 

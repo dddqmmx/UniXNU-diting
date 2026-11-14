@@ -1,31 +1,29 @@
 {
   "format": "diting-sm8475-dram-v1",
-  "physical_bytes": 12884901888,
-  "source": "Diting REC /sys/firmware/fdt, capture services57a",
+  "physical_bytes": 8589934592,
+  "physical_capacity_kind": "nominal capacity of the 8 GiB Diting variant; distinct from the reported bank sum",
+  "reported_bank_bytes": 8337227776,
+  "source": "services181 root Recovery /sys/firmware/devicetree/base/memory/reg; corroborated by services169 live.dtb",
   "dram": [
     {
       "base": "0x80000000",
       "size": "0x6a000000"
     },
     {
-      "base": "0xf1400000",
-      "size": "0xec00000"
+      "base": "0xf4600000",
+      "size": "0xba00000"
     },
     {
       "base": "0x800000000",
-      "size": "0x39900000"
+      "size": "0x39700000"
     },
     {
-      "base": "0x839f00000",
+      "base": "0x839d00000",
       "size": "0x1e00000"
     },
     {
       "base": "0x840000000",
-      "size": "0xc0000000"
-    },
-    {
-      "base": "0x900000000",
-      "size": "0x180000000"
+      "size": "0x140000000"
     }
   ],
   "reserved": [
@@ -38,11 +36,6 @@
       "name": "xbl_dtlog_region@80600000",
       "base": "0x80600000",
       "size": "0x40000"
-    },
-    {
-      "name": "xbl_ramdump_region@80640000",
-      "base": "0x80640000",
-      "size": "0x1c0000"
     },
     {
       "name": "aop_image_region@80800000",
@@ -90,14 +83,9 @@
       "size": "0x4600000"
     },
     {
-      "name": "video_region@9FD00000",
-      "base": "0x9fd00000",
-      "size": "0x700000"
-    },
-    {
-      "name": "adsp_region@85700000",
+      "name": "video_region@85700000",
       "base": "0x85700000",
-      "size": "0x2800000"
+      "size": "0x700000"
     },
     {
       "name": "slpi_region@88000000",
@@ -155,14 +143,49 @@
       "size": "0x800000"
     },
     {
+      "name": "adsp_region@9fd00000",
+      "base": "0x9fd00000",
+      "size": "0x3100000"
+    },
+    {
+      "name": "xbl_ramdump_region@a6b80000",
+      "base": "0xa6b80000",
+      "size": "0x280000"
+    },
+    {
       "name": "xbl_sc_region@a6e00000",
       "base": "0xa6e00000",
       "size": "0x40000"
     },
     {
+      "name": "global_sync_region@a6f00000",
+      "base": "0xa6f00000",
+      "size": "0x100000"
+    },
+    {
+      "name": "ramoops@0xa7000000",
+      "base": "0xa7000000",
+      "size": "0x400000"
+    },
+    {
+      "name": "splash_region",
+      "base": "0xb8000000",
+      "size": "0x2b00000"
+    },
+    {
+      "name": "qheebsp_reserved_region@e0000000",
+      "base": "0xe0000000",
+      "size": "0x600000"
+    },
+    {
       "name": "cpusys_vm_region@e0600000",
       "base": "0xe0600000",
       "size": "0x400000"
+    },
+    {
+      "name": "hyp_reserved_region@e0a00000",
+      "base": "0xe0a00000",
+      "size": "0x100000"
     },
     {
       "name": "trust_ui_vm_qrtr@e55f3000",
@@ -193,80 +216,86 @@
       "name": "qtee_region@e9b00000",
       "base": "0xe9b00000",
       "size": "0x500000"
+    }
+  ],
+  "firmware_reserved": [
+    {
+      "name": "UEFI and ABL staging",
+      "base": "0xa7400000",
+      "size": "0x10c00000"
     },
     {
-      "name": "ramoops_region",
-      "base": "0x85200000",
-      "size": "0x400000"
+      "name": "kernel staging reserve",
+      "base": "0xbb000000",
+      "size": "0xc000000"
     },
     {
-      "name": "bootloader_log_region@A7605000",
-      "base": "0xa7605000",
-      "size": "0x8000"
-    },
-    {
-      "name": "splash_region",
-      "base": "0xb8000000",
-      "size": "0x2b00000"
+      "name": "low DXE boundary",
+      "base": "0xd5c00000",
+      "size": "0xa400000"
     }
   ],
   "allocatable": [
+    {
+      "base": "0x80640000",
+      "size": "0x1c0000"
+    },
     {
       "base": "0x808f4000",
       "size": "0xc000"
     },
     {
-      "base": "0x85600000",
-      "size": "0x100000"
+      "base": "0x85200000",
+      "size": "0x500000"
     },
     {
-      "base": "0x87f00000",
-      "size": "0x100000"
+      "base": "0x85e00000",
+      "size": "0x2200000"
     },
     {
       "base": "0x8b91c000",
       "size": "0xe4000"
     },
     {
-      "base": "0xa0400000",
-      "size": "0x6a00000"
+      "base": "0xa2e00000",
+      "size": "0x3d80000"
     },
     {
       "base": "0xa6e40000",
-      "size": "0x7c5000"
-    },
-    {
-      "base": "0xa760d000",
-      "size": "0x109f3000"
+      "size": "0xc0000"
     },
     {
       "base": "0xbab00000",
-      "size": "0x25b00000"
+      "size": "0x500000"
     },
     {
-      "base": "0xe0a00000",
-      "size": "0x4bf3000"
+      "base": "0xc7000000",
+      "size": "0xec00000"
+    },
+    {
+      "base": "0xe0b00000",
+      "size": "0x4af3000"
     },
     {
       "base": "0xe5700000",
       "size": "0x3100000"
     },
     {
-      "base": "0xf1400000",
-      "size": "0xec00000"
+      "base": "0xf4600000",
+      "size": "0xba00000"
     },
     {
       "base": "0x800000000",
-      "size": "0x39900000"
+      "size": "0x39700000"
     },
     {
-      "base": "0x839f00000",
+      "base": "0x839d00000",
       "size": "0x1e00000"
     },
     {
       "base": "0x840000000",
-      "size": "0x240000000"
+      "size": "0x140000000"
     }
   ],
-  "policy": "Intersect with current UEFI EfiConventionalMemory and claim each range; exclude firmware GOP at runtime; never reclaim BootServices/RuntimeServices or reserved descriptors"
+  "policy": "Intersect the measured banks minus fixed and firmware reservations with current write-back EfiConventionalMemory. Keep firmware descriptors and the GOP out of OS RAM. Do not reuse Android recovery allocations as firmware reservations."
 }

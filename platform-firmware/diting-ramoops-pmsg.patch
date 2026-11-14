@@ -1,0 +1,140 @@
+--- a/Platforms/Xiaomi/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c
++++ b/Platforms/Xiaomi/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.c
+@@ -410,15 +410,67 @@
+   DEBUG ((DEBUG_ERROR, "UNIXNURAMDISK: initrd block device 0x%lx size 0x%lx %r\n", Start, End - Start, Status));
+ }
+ 
+-//
+-// XNU keeps a console/panic mirror in reserved DRAM (patch
+-// zzzzz-pong-ramoops-minimal.patch): 12-byte header then a 2 MiB ring.
+-// A warm reset keeps the contents, so a panic is readable from here.
+-//
+-#define K60_RAMOOPS_BASE     0xA7000000ULL
+-#define K60_RAMOOPS_BYTES    0x00200000U
+-#define K60_RAMOOPS_HEADER   12U
+-#define K60_RAMOOPS_MAGIC    0x43474244U
++// XNU uses both halves of the device's 4 MiB reservation. Retention depends
++// on the reset path: dump validated records without claiming warm-reset safety.
++#define DITING_RAMOOPS_BASE     0xA7000000ULL
++#define DITING_RAMOOPS_BYTES    0x00200000U
++#define DITING_RAMOOPS_HEADER   12U
++#define DITING_RAMOOPS_MAGIC    0x43474244U
++#define DITING_RAMOOPS_TAIL     16384U
++
++STATIC
++VOID
++DumpRamoopsZone (
++  UINT64       Base,
++  CONST CHAR8  *Label,
++  BOOLEAN      WriteCursor
++  )
++{
++  volatile UINT32 *Header = (volatile UINT32 *)(UINTN)Base;
++  UINT32 Sig = Header[0], Start = Header[1], Size = Header[2];
++  UINT32 Capacity = DITING_RAMOOPS_BYTES - DITING_RAMOOPS_HEADER;
++  UINT32 Take, First;
++  CHAR8 Line[160];
++  UINTN Used = 0;
++
++  if (Sig != DITING_RAMOOPS_MAGIC || !Size) {
++    DEBUG ((DEBUG_ERROR, "%a: sig=0x%08x start=0x%x size=0x%x (no retained record)\n", Label, Sig, Start, Size));
++    return;
++  }
++  // Console start is the oldest byte; pmsg start is persistent_ram's next
++  // write cursor. The append-only XNU pmsg writer can finish at Capacity.
++  if (Size > Capacity || (WriteCursor ? Start > Capacity : Start >= Capacity)) {
++    DEBUG ((DEBUG_ERROR, "%a: invalid header start=0x%x size=0x%x\n", Label, Start, Size));
++    return;
++  }
++  Take = MIN (Size, DITING_RAMOOPS_TAIL);
++  First = WriteCursor ? (Start + Capacity - Take) % Capacity : (Start + Size - Take) % Capacity;
++  DEBUG ((DEBUG_ERROR, "%a: size=0x%x start=0x%x tail=0x%x\n", Label, Size, Start, Take));
++  for (UINT32 Index = 0; Index < Take; Index++) {
++    UINT32 Offset = (First + Index) % Capacity;
++    CHAR8 C = *(volatile CHAR8 *)(UINTN)(Base + DITING_RAMOOPS_HEADER + Offset);
++    if (C == '\r') { continue; }
++    if (C == '\n') {
++      if (Used) {
++        Line[Used] = '\0';
++        DEBUG ((DEBUG_ERROR, "%a| %a\n", Label, Line));
++        Used = 0;
++      }
++      continue;
++    }
++    if ((UINT8)C < 0x20 || (UINT8)C > 0x7e) { C = C == '\t' ? ' ' : '.'; }
++    Line[Used++] = C;
++    if (Used == sizeof (Line) - 1) {
++      Line[Used] = '\0';
++      DEBUG ((DEBUG_ERROR, "%a| %a\n", Label, Line));
++      Used = 0;
++    }
++  }
++  if (Used) {
++    Line[Used] = '\0';
++    DEBUG ((DEBUG_ERROR, "%a| %a\n", Label, Line));
++  }
++}
+ 
+ STATIC
+ VOID
+@@ -426,57 +478,9 @@
+   VOID
+   )
+ {
+-  volatile UINT32  *Header;
+-  UINT32           Sig;
+-  UINT32           Start;
+-  UINT32           Size;
+-  UINT32           Capacity;
+-  UINT32           Take;
+-  UINT32           Index;
+-  CHAR8            Line[160];
+-  UINTN            Used;
+-
+-  Header = (volatile UINT32 *)(UINTN)K60_RAMOOPS_BASE;
+-  Sig    = Header[0];
+-  Start  = Header[1];
+-  Size   = Header[2];
+-  if ((Sig != K60_RAMOOPS_MAGIC) || (Size == 0)) {
+-    DEBUG ((DEBUG_ERROR, "RAMOOPS: sig=0x%08x size=0x%x (no xnu log)\n", Sig, Size));
+-    return;
+-  }
+-
+-  Capacity = K60_RAMOOPS_BYTES - K60_RAMOOPS_HEADER;
+-  if ((Start >= Capacity) || (Size > Capacity)) {
+-    Start = 0;
+-    Size  = (Size > Capacity) ? Capacity : Size;
+-  }
+-
+-  Take = (Size > 4096) ? 4096 : Size;
+-  DEBUG ((DEBUG_ERROR, "RAMOOPS: size=0x%x start=0x%x, tail 0x%x\n", Size, Start, Take));
+-
+-  Used = 0;
+-  for (Index = 0; Index < Take; Index++) {
+-    UINT32  Offset;
+-    CHAR8   C;
+-
+-    Offset = (Start + Size - Take + Index) % Capacity;
+-    C      = *(volatile CHAR8 *)(UINTN)(K60_RAMOOPS_BASE + K60_RAMOOPS_HEADER + Offset);
+-    if ((C < 0x20) || (C > 0x7E)) {
+-      C = ((C == '\n') || (C == '\r') || (C == '\t')) ? ' ' : '.';
+-    }
+-
+-    Line[Used++] = C;
+-    if (Used == sizeof (Line) - 1) {
+-      Line[Used] = '\0';
+-      DEBUG ((DEBUG_ERROR, "RAMOOPS| %a\n", Line));
+-      Used = 0;
+-    }
+-  }
+-
+-  if (Used != 0) {
+-    Line[Used] = '\0';
+-    DEBUG ((DEBUG_ERROR, "RAMOOPS| %a\n", Line));
+-  }
++  // First exception/panic snapshots precede the busier console tail.
++  DumpRamoopsZone (DITING_RAMOOPS_BASE + DITING_RAMOOPS_BYTES, "PMSG", TRUE);
++  DumpRamoopsZone (DITING_RAMOOPS_BASE, "RAMOOPS", FALSE);
+ }
+ 
+ EFI_STATUS

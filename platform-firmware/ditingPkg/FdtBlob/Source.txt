@@ -1,2 +1,4 @@
-Diting 开发固件的 DTB 由 scripts/build-diting-fdt.py 从设备仓库的 dts/diting.dts 生成。
-该设备树仍有未完成的板级资源及未经实机验证的内存参数，生成文件不纳入 Git。
+Diting 固件的 DTB 由 scripts/build-diting-hardware-dtb.py 从 dts/diting.dts 生成。
+设置 UNIXNU_UEFI 时同步 FDF 内嵌路径，Resources/DTBs/diting.dtb 使用同一输入。
+当前 RAM 描述匹配 services181 取得的 8 GiB 本机五个区间；构建前检查实际区间和保留区。
+其余板级资源仍有待验证，生成 DTB 不纳入 Git。

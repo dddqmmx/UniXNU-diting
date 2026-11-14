@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 # Refuse Wi-Fi and backlight before any XNU compile when their trees are absent.
 # The later builders still refuse on their own; this only moves that refusal forward.
-if [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
+if [ "${XNU_DITING_POWER:-0}" = 1 ]; then
   if [ -z "${DITING_NATIVE_DRIVER_SOURCE:-}" ]; then
     echo 'refusing before compile: DITING_NATIVE_DRIVER_SOURCE is unset, so Wi-Fi and backlight inputs cannot be resolved' >&2
     exit 1
@@ -176,6 +176,15 @@ for relative, (digest, atime, mtime) in json.loads(Path('.cache/xnu-patch-times.
 PY_PATCH_TIMES
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
+XNU_HOST_MAKE_ARGS=()
+if [ "$(uname -s)" = Linux ]; then
+  python3 scripts/linux/prepare-xnu.py source
+  export PLATFORM=iPhoneOS HOST_CC="$CLT_PREFIX/bin/xnu-host-cc" MIGCOM="$CLT_PREFIX/libexec/migcom"
+  XNU_HOST_MAKE_ARGS=(TIGHTBEAMC=tightbeamc-not-supported BUILD_DSYM=0
+    MEMORY_SIZE="$(( $(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) ))"
+    SYSCTL_HW_PHYSICALCPU="$(nproc)" SYSCTL_HW_LOGICALCPU="$(nproc)"
+    LD_KERNEL_LIBS="$ROOT/.cache/fakeroot/usr/local/lib/kernel/libcc_kext.a")
+fi
 BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}
 if [ "$BOOT_PROGRESS" != 0 ] && [ "$BOOT_PROGRESS" != 1 ]; then
   echo 'XNU_BOOT_PROGRESS must be 0 or 1' >&2
@@ -210,9 +219,10 @@ if [ ! -d refer/libplatform/.git ]; then
 fi
 export KERNEL_SDKROOT=$ROOT/.cache/fakeroot
 mkdir -p "$KERNEL_SDKROOT/usr/local/include/kernel" "$ROOT/build/xnu/obj/EXPORT_HDRS/libsa"
-ditto refer/libplatform/include "$KERNEL_SDKROOT/usr/local/include"
-ditto refer/libplatform/private "$KERNEL_SDKROOT/usr/local/include"
-ditto refer/libplatform/private/platform "$KERNEL_SDKROOT/System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform"
+mkdir -p "$KERNEL_SDKROOT/System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform"
+cp -R refer/libplatform/include/. "$KERNEL_SDKROOT/usr/local/include/"
+cp -R refer/libplatform/private/. "$KERNEL_SDKROOT/usr/local/include/"
+cp -R refer/libplatform/private/platform/. "$KERNEL_SDKROOT/System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform/"
 if [ ! -d refer/libdispatch/.git ]; then
   git clone --depth 1 --branch "$LIBDISPATCH_TAG" https://github.com/apple-oss-distributions/libdispatch.git refer/libdispatch
 fi
@@ -238,7 +248,8 @@ if [ ! -f "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ] || \
     MACHINE_CONFIGS=DITING KERNEL_CONFIGS=DEVELOPMENT \
     RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
     MAKEJOBS=-j"${JOBS:-4}" OBJROOT="$ROOT/build/xnu/obj" \
-    SYMROOT="$ROOT/build/xnu/sym" DSTROOT="$KERNEL_SDKROOT"
+    SYMROOT="$ROOT/build/xnu/sym" DSTROOT="$KERNEL_SDKROOT" \
+    "${XNU_HOST_MAKE_ARGS[@]}"
   touch "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers"
 fi
 if [ "${XNU_ARM_DT_PLATFORM:-0}" = 1 ] && [ -n "${DITING_NATIVE_DRIVER_SOURCE:-}" ]; then
@@ -269,9 +280,9 @@ if [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-wifi-native.py" --tree "$ROOT" \
     --ath11k "$WIFI_BUILD/libDitingAth11k.a"
 fi
-if [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
+if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-power-native.py" --tree "$ROOT"
-elif [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
+elif [ "${XNU_NATIVE_UFS:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
   # The UFS transport takes the shared SMMU lease from DitingPlatformResources; build that
   # one object when the full power/audio archive is not selected, or the link has no
   # diting_smmu_lease_lock/diting_smmu_lease_unlock.
@@ -279,6 +290,9 @@ elif [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
 fi
 if [ ! -f "$KERNEL_SDKROOT/usr/local/lib/kernel/libfirehose_kernel.a" ]; then
   bash scripts/build-firehose.sh
+fi
+if [ "$(uname -s)" = Linux ]; then
+  python3 scripts/linux/prepare-xnu.py libs
 fi
 # The baseline builds the kernel; `all` also checks the Apple kext export ABI.
 EXTRA_MAKE_ARGS=()
@@ -397,6 +411,11 @@ if [ -d "$MOCKFS_OBJECT_DIR" ]; then
 fi
 EXTRA_MAKE_ARGS+=("ubc_subr.o_CFLAGS_ADD=-DXNU_NATIVE_CS_HASH_CACHE=$CS_HASH_CACHE_MODE")
 EXTRA_CFLAGS=${XNU_EXTRA_CFLAGS:--Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding}
+if [ "$(uname -s)" = Linux ]; then
+  # Match the kernel's FP ownership contract with upstream AArch64 clang.
+  # Include this in the existing flag stamp so cached objects are rebuilt.
+  EXTRA_CFLAGS="$EXTRA_CFLAGS -mno-implicit-float"
+fi
 OWNER_ROOT_PROBE=${XNU_VERIFIED_ROOT_PROBE:-0}
 if [ "$OWNER_ROOT_PROBE" != 0 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then
   echo 'XNU_VERIFIED_ROOT_PROBE must be 0 or 1' >&2
@@ -725,11 +744,24 @@ fi
 # exception-vector tracing hooks.
 EXTRA_MAKE_ARGS+=("start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=$NATIVE_ARCH_TIMER -DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
 EXTRA_MAKE_ARGS+=("arm_init.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE -DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE -DXNU_DITING_RAMOOPS_BASE=$DITING_RAMOOPS_BASE -mstrict-align -mgeneral-regs-only -march=armv8.1-a")
-EXTRA_MAKE_ARGS+=("arm_vm_init.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
+EXTRA_MAKE_ARGS+=("arm_vm_init.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE -mgeneral-regs-only")
+EXTRA_MAKE_ARGS+=("psci_smp.o_CFLAGS_ADD=-mgeneral-regs-only -DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE")
+# phystokv and the PSCI C-entry helpers run before a normal CPU context.
+# Use the same integer-register contract as arm_init, including Linux clang.
+python3 - <<'PY_BOOT_C_MODE'
+from pathlib import Path
+directory = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING')
+stamp = directory / '.diting-boot-c-scalar-mode'
+mode = 'arm_vm_init:psci_smp:general-regs-only-v1'
+if not stamp.exists() or stamp.read_text() != mode:
+    for name in ('arm_vm_init', 'psci_smp'):
+        (directory / 'osfmk/DEVELOPMENT' / (name + '.o')).unlink(missing_ok=True)
+    stamp.write_text(mode)
+PY_BOOT_C_MODE
 EXTRA_MAKE_ARGS+=("machine_routines.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
 EXTRA_MAKE_ARGS+=("serial_console.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE -DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE")
 EXTRA_MAKE_ARGS+=("kern_exit.o_CFLAGS_ADD=-DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE")
-EXTRA_MAKE_ARGS+=("debug.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
+EXTRA_MAKE_ARGS+=("debug.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE -DXNU_DITING_RAMOOPS_CONSOLE=$DITING_RAMOOPS_CONSOLE")
 EXTRA_MAKE_ARGS+=("counter_test.o_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
 EXTRA_MAKE_ARGS+=("IOStartIOKit.cpo_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
 EXTRA_MAKE_ARGS+=("OSRuntime.cpo_CFLAGS_ADD=-DXNU_DITING_EARLY_TRACE=$DITING_EARLY_TRACE")
@@ -739,9 +771,9 @@ from pathlib import Path
 import sys
 directory = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING')
 stamp = directory / '.diting-early-trace-mode'
-mode = ':'.join(sys.argv[1:]) + ':minimal-ramoops-v3'
+mode = ':'.join(sys.argv[1:]) + ':minimal-ramoops-v4-panic-snapshot'
 if not stamp.exists() or stamp.read_text() != mode:
-    for name in ('start', 'arm_init', 'arm_vm_init', 'machine_routines', 'startup', 'serial_console', 'debug'):
+    for name in ('start', 'arm_init', 'arm_vm_init', 'psci_smp', 'machine_routines', 'startup', 'serial_console', 'debug'):
         (directory / 'osfmk/DEVELOPMENT' / (name + '.o')).unlink(missing_ok=True)
     (directory / 'bsd/DEVELOPMENT/counter_test.o').unlink(missing_ok=True)
     (directory / 'bsd/DEVELOPMENT/kern_exit.o').unlink(missing_ok=True)
@@ -1010,7 +1042,7 @@ PY_RAM_BLOCK_BINDINGS
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
     PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
   fi
-  if [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ] || [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
+  if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
     POWER_ARCHIVE=$ROOT/build/diting-power/libDitingPower.a
     test -f "$POWER_ARCHIVE"
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
@@ -1116,7 +1148,7 @@ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iph
   DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,${UNIXNU_IOS_TARGET:-18.0}" \
   RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
   BUILD_LTO=0 BUILD_STATIC_LINK=0 BUILD_DSYM="${XNU_BUILD_DSYM:-0}" BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
-  RC_NONARCH_CFLAGS="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" \
+  RC_NONARCH_CFLAGS="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" "${XNU_HOST_MAKE_ARGS[@]}" \
   OBJROOT="$ROOT/build/xnu/ios-obj" SYMROOT="$ROOT/build/xnu/ios-sym" DSTROOT="$ROOT/build/xnu/ios-dst"
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$CRYPTO_BOOTSTRAP_MODE" = source ]; then
   python3 scripts/seal-source-crypto-kernel.py \

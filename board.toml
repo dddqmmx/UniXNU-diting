@@ -101,6 +101,9 @@ DITING_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE
 
 [payload]
 tools = true
+# Nominal capacity of the selected 8 GiB variant, separate from the
+# discontiguous live RAM bank sum and the owned 4 GiB bootstrap window.
+dram_size = 0x200000000
 # The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
 title = "Diting iPadOS 18.7.10"
 volume = "UNIXNU"
@@ -116,7 +119,7 @@ size_mib = 96
 kernel_args = [
   "-v",
   "keepsyms=1",
-  "cpus=1",
+  "cpus=8",
   "diting_allow_unauthenticated_root=1",
   "cs_enforcement_disable=1",
   "cs_library_val_enable=0",

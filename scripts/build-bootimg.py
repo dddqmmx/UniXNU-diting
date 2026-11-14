@@ -62,6 +62,8 @@ def main():
     parser.add_argument('--dtb', type=Path, help='Board DTB appended after the shim+volume (default Resources/DTBs/diting.dtb)')
     parser.add_argument('--shim', type=Path, help='Prebuilt BootShim.bin instead of compiling one')
     parser.add_argument('--mkbootimg', type=Path, help='mkbootimg.py path (default uefi/Resources/Scripts/mkbootimg.py)')
+    parser.add_argument('--skip-image-verification', action='store_true',
+                        help='skip output image audits, corruption controls and image hashes')
     args = parser.parse_args()
     uefi = args.uefi.resolve() if args.uefi else ROOT / 'Mu-Silicium'
     config_path = args.config if args.config else uefi / 'Resources/Configs/diting.toml'
@@ -90,22 +92,28 @@ def main():
         subprocess.run([sys.executable, str(mkbootimg),
                         '--header_version', '4', '--kernel', str(scratch / 'kernel'),
                         '--ramdisk', str(scratch / 'ramdisk'), '-o', str(image)], check=True)
-        data = image.read_bytes()
-        report = verify(data, combined, dtb, ramdisk)
-        # Ensure the verifier rejects changed payloads and truncated images.
-        bad = bytearray(data)
-        bad[4096 + 20] ^= 1
-        for candidate in (bytes(bad), data[:-1]):
-            try:
-                verify(candidate, combined, dtb, ramdisk)
-            except (ValueError, zlib.error):
-                continue
-            raise ValueError('Corruption control was incorrectly accepted')
+        if args.skip_image_verification:
+            report = {'header_version': 4, 'page_size': 4096,
+                      'kernel_bytes': len(kernel), 'ramdisk_bytes': len(ramdisk),
+                      'image_verification': 'skipped by request'}
+        else:
+            data = image.read_bytes()
+            report = verify(data, combined, dtb, ramdisk)
+            # Ensure the verifier rejects changed payloads and truncated images.
+            bad = bytearray(data)
+            bad[4096 + 20] ^= 1
+            for candidate in (bytes(bad), data[:-1]):
+                try:
+                    verify(candidate, combined, dtb, ramdisk)
+                except (ValueError, zlib.error):
+                    continue
+                raise ValueError('Corruption control was incorrectly accepted')
     shutil.copyfile(fd, out / 'SILICIUM_UEFI.fd')
-    report.update(image_bytes=len(data), image_sha256=digest(data),
-                  fd_bytes=len(firmware), fd_sha256=digest(firmware),
-                  dtb_sha256=digest(dtb), shim_bytes=len(shim), fd_base=hex(base),
+    report.update(image_bytes=image.stat().st_size,
+                  fd_bytes=len(firmware), shim_bytes=len(shim), fd_base=hex(base),
                   hardware_tested=False, xnu_kernel_included=False)
+    if not args.skip_image_verification:
+        report.update(image_sha256=digest(data), fd_sha256=digest(firmware), dtb_sha256=digest(dtb))
     (out / 'boot.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
     print(image)

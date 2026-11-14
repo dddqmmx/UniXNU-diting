@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import re
 import subprocess
+from diting_memory import DEFAULT_MEMORY_MAP, covered, load_memory_map
 
 
 def reserved_regions(dtb):
@@ -61,15 +62,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dtb", type=Path)
     parser.add_argument("memory_map", type=Path)
+    parser.add_argument("--ram-profile", type=Path, default=DEFAULT_MEMORY_MAP)
     parser.add_argument("--iomem", type=Path, help="可选的本机只读 /proc/iomem 快照")
     args = parser.parse_args()
     reserved, firmware = reserved_regions(args.dtb), firmware_regions(args.memory_map)
+    _, banks, _ = load_memory_map(args.ram_profile, args.dtb)
     if args.iomem:
         reserved += iomem_reserved(args.iomem)
     if not reserved or not firmware:
         raise SystemExit("没有识别到保留区或固件系统内存，无法比较")
     conflicts = []
-    for name, start, end in firmware:
+    for index, (name, start, end) in enumerate(firmware):
+        if not covered(start, end - start, banks):
+            raise ValueError(f"{name} 的 {start:#x}–{end:#x} 超出实测 RAM 区间")
+        for other, low, high in firmware[:index]:
+            if start < high and low < end:
+                conflicts.append((name, other, max(start, low), min(end, high)))
         for other, low, high in reserved:
             if start < high and low < end:
                 conflicts.append((name, other, max(start, low), min(end, high)))

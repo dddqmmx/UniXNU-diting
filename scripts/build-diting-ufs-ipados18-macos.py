@@ -13,6 +13,7 @@ import sys
 DEVICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEVICE / 'scripts'))
 import diting_paths
+from diting_build_host import require_host
 DEFAULT_TREE = diting_paths.build_tree(name='Diting-iPadOS18-native')
 DEVELOPER = diting_paths.developer_dir()
 
@@ -25,8 +26,7 @@ def main():
                         help='compile/link without source or archive digests')
     args = parser.parse_args()
     tree = args.tree.resolve()
-    if platform.system() != 'Darwin' or platform.machine() != 'x86_64':
-        raise SystemExit('This continuation uses the Intel macOS toolchain')
+    require_host()
     out = tree / 'build/native-ufs'
     out.mkdir(parents=True, exist_ok=True)
     subprocess.run([os.sys.executable, str(DEVICE/'scripts/prepare-ipados18-storage.py'), '--tree', str(tree)],check=True)

@@ -7,11 +7,13 @@ STATIC EFI_USBFN_IO_PROTOCOL *mUsbFunction;
 STATIC BOOLEAN mUsbStopped;
 STATIC BOOLEAN UsbRequested (CONST CHAR8 *Args)
 {
+  STATIC CONST CHAR8 Token[]="diting_usb=1";
+  CONST UINTN TokenBytes=sizeof(Token)-1;
   CONST CHAR8 *At=Args;
-  while((At=AsciiStrStr(At,"diting_usb=1"))!=NULL) {
+  while((At=AsciiStrStr(At,Token))!=NULL) {
     if((At==Args || At[-1]==' ' || At[-1]=='\t') &&
-       (At[10]==0 || At[10]==' ' || At[10]=='\t'))return TRUE;
-    At+=10;
+       (At[TokenBytes]==0 || At[TokenBytes]==' ' || At[TokenBytes]=='\t'))return TRUE;
+    At+=TokenBytes;
   }
   return FALSE;
 }

@@ -2,7 +2,7 @@
 """根据板级配置编译启动镜像使用的设备树。
 
 固件预处理在构建树中运行，输出位置由 board.toml 的 [bootimg] dtb 指定。
-UEFI 的 FDF 可能另行嵌入设备树；本脚本不会替换或验证那份固件输入。
+设置 UNIXNU_UEFI 时，同一份设备树也写入 Diting FDF 的内嵌路径。
 """
 import argparse
 import json
@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
 
 
 def dtc():
@@ -88,6 +89,8 @@ def main():
                         help='include directory as board.toml names it (device:/soc:/tree:); repeatable')
     parser.add_argument('--output', default=board.get('bootimg', {}).get('dtb', 'build/diting/diting.dtb'),
                         help='output, relative to the build tree')
+    parser.add_argument('--memory-map', type=Path, default=DEFAULT_MEMORY_MAP,
+                        help='RAM profile that the compiled hardware tree must match')
     args = parser.parse_args()
     source = resolve(device, tree, args.source)
     if not source.is_file():
@@ -108,6 +111,7 @@ def main():
     data = output.read_bytes()
     if data[:4] != b'\xd0\x0d\xfe\xed':
         raise SystemExit(f'{output} is not a flattened device tree')
+    memory, banks, _ = load_memory_map(args.memory_map, output)
     firmware_tree = None
     if board.get('firmware', {}).get('config') == 'diting' and os.environ.get('UNIXNU_UEFI'):
         firmware_tree = (Path(os.environ['UNIXNU_UEFI']) /
@@ -117,6 +121,8 @@ def main():
         firmware_tree.write_bytes(data)
     record = {'source': str(source), 'includes': [str(item) for item in directories],
               'output': str(output), 'bytes': len(data),
+              'nominal_physical_bytes': memory['physical_bytes'],
+              'reported_bank_bytes': sum(size for _, size in banks),
               'firmware_dtb': str(firmware_tree) if firmware_tree else None}
     output.with_suffix('.json').write_text(json.dumps(record, indent=2) + '\n')
 

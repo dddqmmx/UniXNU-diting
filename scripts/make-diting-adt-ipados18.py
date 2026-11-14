@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a minimal Apple device tree for Nothing Phone (2) Diting.
+"""Build an Apple device tree for Redmi K50 Ultra / Diting.
 
 The physical DRAM size is required input. Do not substitute the sum of Linux
 memory ranges or the DarwinBoot allocation window: XNU treats /chosen/dram-size
@@ -18,6 +18,7 @@ import time
 import importlib.util
 
 from diting_adt_contract import audit_adt
+from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,12 +109,14 @@ def empty_nvram_proxy():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=1,
+    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=8,
                         help='SM8475 CPU nodes, MPIDR 0x000 through 0x700')
     parser.add_argument('--output', type=Path, default=ROOT / 'build/diting/boot/kernel.macho.adt')
     parser.add_argument(
         '--dram-size', type=lambda value: int(value, 0), required=True,
         help='physical DRAM size from the target boot chain; not usable-range sum or window size')
+    parser.add_argument('--memory-map', type=Path, default=DEFAULT_MEMORY_MAP,
+                        help='RAM profile matching the target hardware banks and nominal capacity')
     parser.add_argument(
         '--window-size', type=lambda value: int(value, 0), default=None,
         help='optional DarwinBoot contiguous window, 256 MiB..8 GiB, aligned to 2 MiB')
@@ -144,8 +147,15 @@ def main():
         parser.error('userdata first and last LBA must be provided together')
     if args.userdata_first_lba is not None and not (0 < args.userdata_first_lba <= args.userdata_last_lba < 2**64):
         parser.error('invalid userdata LBA range')
-    if os.environ.get('DITING_HARDWARE_DTB'):
-        load_format2_hardware(os.environ['DITING_HARDWARE_DTB'])
+    hardware = os.environ.get('DITING_HARDWARE_DTB')
+    try:
+        memory, dram, allocatable = load_memory_map(args.memory_map, hardware)
+    except (OSError, ValueError, KeyError) as error:
+        parser.error(str(error))
+    if args.dram_size != memory['physical_bytes']:
+        parser.error('--dram-size differs from the selected RAM profile')
+    if hardware:
+        load_format2_hardware(hardware)
     if args.root_match_volume_uuid:
         try:
             args.root_match_volume_uuid = str(uuid.UUID(args.root_match_volume_uuid))
@@ -188,9 +198,9 @@ def main():
             int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
         ('diting-audio-dma', bytes(16)),
         ('darwinboot-memory-ranges', bytes(32 + 64 * 16)),
+        ('diting-dram-ranges', b''.join(struct.pack('<QQ', base, size) for base, size in dram)),
         ('diting-allocatable-ram', b''.join(
-            struct.pack('<QQ', int(bank['base'], 0), int(bank['size'], 0))
-            for bank in json.loads((ROOT / 'configs/diting-memory-sm8475.json').read_text())['allocatable'])),
+            struct.pack('<QQ', base, size) for base, size in allocatable)),
         ('display-rotation', struct.pack('<I', 0)),
         # Host UTC sampled for this temporary development boot. The platform
         # expert advances this software clock using the native arch timer.
@@ -339,7 +349,8 @@ def main():
     # nonce subsystem requires CHMH even when the chip initializer allows AMNM.
     if not args.skip_image_verification:
         audit_adt(tree, require_manifest=bool(args.root_match_volume_uuid),
-                  boot_manifest=args.boot_manifest.read_bytes() if args.boot_manifest else None)
+                  boot_manifest=args.boot_manifest.read_bytes() if args.boot_manifest else None,
+                  expected_cpus=args.cpus)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(tree)
     print(f'Diting ADT: {len(tree)} bytes; cpu_count={args.cpus}; dram={args.dram_size:#x}; '

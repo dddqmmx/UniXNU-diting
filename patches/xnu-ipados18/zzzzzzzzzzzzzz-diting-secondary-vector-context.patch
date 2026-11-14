@@ -1,0 +1,105 @@
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -82,6 +82,30 @@
+ struct diting_secondary_reset_record diting_secondary_reset[8]
+     __attribute__((aligned(64)));
+ _Static_assert(sizeof(struct diting_secondary_reset_record) == 64, "one cache line");
++
++/* Called before current_thread is installed: index from the actual MPIDR,
++ * not cpu_number(), and use no locks or other CPU-local state. */
++void diting_secondary_kernel_step(uint64_t step);
++void diting_secondary_install_kernel_vectors(void);
++
++void
++diting_secondary_kernel_step(uint64_t step)
++{
++	uint64_t mpidr = __builtin_arm_rsr64("MPIDR_EL1");
++	unsigned cpu = (mpidr >> 8) & 7U;
++	os_atomic_store(&diting_secondary_reset[cpu].step, step, release);
++	CleanPoC_DcacheRegion((vm_offset_t)&diting_secondary_reset[cpu],
++	    sizeof(diting_secondary_reset[cpu]));
++}
++
++void
++diting_secondary_install_kernel_vectors(void)
++{
++	extern char ExceptionVectorsBase[];
++	/* arm_init_cpu installed its current thread and cpu_data first. */
++	__builtin_arm_wsr64("VBAR_EL1", (uint64_t)ExceptionVectorsBase);
++	__builtin_arm_isb(ISB_SY);
++}
+ volatile uint32_t diting_cpu_start_progress = 0xff00;
+ #define DITING_CPU_START_STEP(step) \
+     (diting_cpu_start_progress = ((uint32_t)cpu << 8) | (step))
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -1008,12 +1008,8 @@
+ arm_init_tramp:
+ 	ARM64_JUMP_TARGET
+ #if defined(DITING)
+-	/* We are executing through cpu_ttep at KVA now. The ADRP produces a
+-	 * KVA here, so install the normal vectors without PA conversion. */
+-	adrp	x9, EXT(ExceptionVectorsBase)@page
+-	add		x9, x9, EXT(ExceptionVectorsBase)@pageoff
+-	msr		VBAR_EL1, x9
+-	isb		sy
++	/* Keep early vectors through phystokv and the C-entry prologue.
++	 * arm_init_cpu installs normal vectors after current_thread/cpu_data. */
+ 	DITING_RESET_STEP_CACHED 7
+ #endif
+ 	/* On a warm boot, the full kernel translation table is initialized in
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -715,6 +715,11 @@
+ 	cpu_data_t      *cpu_data_ptr,
+ 	uint64_t __unused hib_header_phys)
+ {
++#if defined(DITING)
++	extern void diting_secondary_kernel_step(uint64_t);
++	extern void diting_secondary_install_kernel_vectors(void);
++	diting_secondary_kernel_step(16);
++#endif
+ #if __ARM_PAN_AVAILABLE__
+ 	__builtin_arm_wsr("pan", 1);
+ #endif
+@@ -733,6 +738,10 @@
+ 
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
++#if defined(DITING)
++	diting_secondary_install_kernel_vectors();
++	diting_secondary_kernel_step(17);
++#endif
+ 
+ #if defined(GENERIC_PSCI_SMP)
+ 	extern void psci_smp_cpu_reached(uint32_t);
+@@ -776,6 +785,9 @@
+ 	cpu_machine_idle_init(FALSE);
+ 
+ 	cpu_init();
++#if defined(DITING)
++	diting_secondary_kernel_step(18);
++#endif
+ 
+ #ifdef  APPLETYPHOON
+ 	if ((cpus_defeatures & (0xF << 4 * cpu_data_ptr->cpu_number)) != 0) {
+@@ -805,6 +817,9 @@
+ 		commpage_update_timebase();
+ 	}
+ 	PE_init_cpu();
++#if defined(DITING)
++	diting_secondary_kernel_step(19);
++#endif
+ #if __arm64__
+ 	apt_msg_init_cpu();
+ #endif
+@@ -854,6 +869,9 @@
+ #endif
+ 
+ 
++#if defined(DITING)
++	diting_secondary_kernel_step(20);
++#endif
+ 	secondary_cpu_main(NULL);
+ }
+ 

@@ -23,7 +23,7 @@ def main():
   spec=importlib.util.spec_from_file_location('diting_fdt',ROOT/'scripts/prepare-diting-wifi.py')
   fdt=importlib.util.module_from_spec(spec);spec.loader.exec_module(fdt)
   nodes=fdt.fdt_nodes(Path(hardware).read_bytes())
-  host=next(v for v in nodes.values() if v.get('compatible')==b'qcom,pci-msm\0')
+  host=nodes[profile['source']['pcie']]
   phy=fdt.cells(host,'qcom,phy-sequence')
   if len(phy)%3:raise RuntimeError('Malformed selected Diting PHY sequence')
   profile['pcie']['phy_sequence']=[phy[i:i+3] for i in range(0,len(phy),3)]
@@ -37,14 +37,11 @@ def main():
   for key,pin in (('wlan-enable-gpios',80),('reset-gpios',94),('clkreq-gpios',95),('wake-gpios',96),('xo-clk-gpios',204)):
    if fdt.cells(host,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Diting pin mapping: '+key)
  header='struct DitingWifiPhyEntry {unsigned off,value,delay;};\nstatic constexpr DitingWifiPhyEntry kDitingWifiPhy[]={\n'+''.join('{%d,%d,%d},\n'%tuple(e) for e in profile['pcie']['phy_sequence'])+'};\n'
- header+='struct DitingWifiRail {const char *name;unsigned mv,maxMv,ppid,type,subtype;};\nstatic constexpr DitingWifiRail kDitingWifiRails[]={\n'
- for e in profile['rails']:
-  physical=e.get('physical',{})
-  ppid=(physical.get('spmi_slave',0)<<8)|physical.get('peripheral',0)
-  header+='{%s,%d,%d,%d,%d,%d},\n'%(json.dumps(e['resource']),(e['request'][0]+999)//1000,e['request'][1]//1000,ppid,physical.get('type',0),physical.get('subtype',0))
- for e in profile['pcie']['analogue_rails']:
-  header+='{%s,%d,%d,0,0,0},\n'%(json.dumps(e['resource']),(e['microvolts']+999)//1000,e['microvolts']//1000)
- header+='};\n'
+ if not hardware:raise RuntimeError('Select DITING_LIVE_DTB for the QCA6490 power contract')
+ from diting_wifi_power_contract import select_power_inputs, power_header
+ power=select_power_inputs(profile,nodes)
+ header+=power_header(power)
+ (out/'power-contract.json').write_text(json.dumps(power,indent=2)+'\n')
  domain=profile['pcie']['power_domain']
  if (domain['control'],domain['collapse_vote'],domain['collapse_bit'])!=(0x17b004,0x162128,0):raise RuntimeError('Diting PCIe0 power domain required')
  header+='static constexpr unsigned kDitingPcieCollapseVote=%du,kDitingPcieCollapseMask=%du;\n'%(domain['collapse_vote']-0x100000,1<<domain['collapse_bit'])

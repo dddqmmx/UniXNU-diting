@@ -13,6 +13,7 @@ from diting_native_inputs import build_env
 DEVICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEVICE / 'scripts'))
 import diting_paths
+from diting_build_host import require_host
 TREE = diting_paths.build_tree(name='Diting-iPadOS18-native')
 DEVELOPER = diting_paths.developer_dir()
 
@@ -23,8 +24,7 @@ def main():
     parser.add_argument('--skip-image-verification', action='store_true')
     args = parser.parse_args()
     tree = args.tree.resolve()
-    if platform.system() != 'Darwin' or platform.machine() != 'x86_64':
-        raise SystemExit('This continuation uses the Intel macOS toolchain')
+    require_host()
     out = tree / 'build/armdt-platform'
     out.mkdir(parents=True, exist_ok=True)
     source = DEVICE / 'drivers/ArmDTPlatform/ArmDTPlatform.cpp'

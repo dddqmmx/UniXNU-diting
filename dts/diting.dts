@@ -8,9 +8,17 @@
     xiaomi,miboard-id = <0x0a 0x00>;
     interrupt-parent = <&gic>;
 
-    /* 此节点供现有 ADT 生成器读取容量。原厂启动时内存并不连续；
-       当前单段声明是构建占位，实际内存范围和保留区仍需核实。 */
-    memory@80000000 { device_type = "memory"; reg = <0x0 0x80000000 0x3 0x0>; };
+    /* Actual banks of the 8 GiB Diting captured through Recovery's
+       unflattened live tree in services181. Their sum excludes holes;
+       nominal physical capacity is supplied separately by board.toml. */
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x6a000000>,
+              <0x0 0xf4600000 0x0 0x0ba00000>,
+              <0x8 0x00000000 0x0 0x39700000>,
+              <0x8 0x39d00000 0x0 0x01e00000>,
+              <0x8 0x40000000 0x1 0x40000000>;
+    };
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;

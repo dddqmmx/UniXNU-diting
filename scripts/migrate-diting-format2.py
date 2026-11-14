@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install the versioned SM8475 and 22H374 inputs in a main UniXNU checkout."""
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,10 @@ def install(unixnu, soc):
         raise RuntimeError('SM8475 source differs from the selected source pin')
     if not (unixnu / 'scripts/unixnu/profiles.py').is_file():
         raise RuntimeError('A main UniXNU checkout with format2 support is required')
+    spec = importlib.util.spec_from_file_location('diting_banked_dram', ROOT / 'scripts/patch-unixnu-banked-dram.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install(unixnu)
     profiles = ROOT / 'os-profiles'
     if not profiles.is_dir():
         raise RuntimeError('os-profiles/ is missing: the 22H374 profile ships there')

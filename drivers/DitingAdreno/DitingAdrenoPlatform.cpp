@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /* SM8475 cold GMU startup. No A740/Redwood platform owner or ready device.
  * All MMIO belongs to Diting's captured DT. This driver is the sole XNU owner
- * of the GPU SMMU and APSS DRV2 active TCS3 (no generic RPMh driver is linked).
+ * of the GPU SMMU; APSS DRV2 transactions use the shared board RPMh owner.
  * Do not steal a live master, a busy TCS or unrelated stream/context bank.
  */
 #include <IOKit/IOLib.h>
@@ -17,6 +17,7 @@
 #include "DitingAdrenoSmmu.h"
 #include "DitingAdrenoRegisters.h"
 #include "DitingAdrenoCp.h"
+#include "../DitingPower/DitingPlatformResources.h"
 
 extern "C" const uint8_t DitingAdrenoGmuFirmware[];
 extern "C" const size_t DitingAdrenoGmuFirmwareBytes;
@@ -24,7 +25,7 @@ extern "C" void diting_ramoops_diagnostic_write(const char *,int);
 namespace {
 struct Mapping {OSSharedPtr<IOMemoryMap> keep;uintptr_t cpu=0;size_t bytes=0;};
 struct Memory {IOBufferMemoryDescriptor *keep=nullptr;uint8_t *cpu=nullptr;uint64_t pa=0;size_t bytes=0;};
-static Mapping windows[DitingGpuWindowCount],gcc,rsc,db;
+static Mapping windows[DitingGpuWindowCount],gcc,db;
 static Memory cache,dummy,hfi,logmem,tables;
 static DitingClockState clocks;
 static DitingGpuGmuDevice gmu;
@@ -104,68 +105,14 @@ static unsigned retained_corner(const DitingPowerResource &rail)
 }
 static bool vote_parents(const DitingPowerInputs &in)
 {
-    // Diting live DT: APSS DRV2, TCS layout sleep0..2, active3..4, wake5..6.
-    // Only active TCS3 is leased here. Sleep/wake and other drivers are intact.
-    uint32_t caps=rd(rsc,0xc);
-    // DRV_NUM_TCS_SHIFT6 * Diting drv-id2. DT reserves eight TCSes including
-    // fast-path7. NCPT is the actual five-bit per-TCS command capacity.
-    unsigned count=(caps>>12)&63,ncpt=(caps>>27)&31;
-    if(count<8 || ncpt<2){record("SKIP APSS DRV2 capacity",1,caps,(uint64_t(count)<<32)|ncpt);return false;}
-    const size_t base=0xd00+3*0x2a0;
-    if(!rd(rsc,base+0x18)){record("SKIP active TCS3 busy",1,rd(rsc,base+0x14),rd(rsc,base+0x1c));return false;}
     uint32_t cx=retained_corner(in.cx);
     uint32_t mx=retained_corner(in.mx);
     if(cx==16 || mx==16){record("SKIP ARC AUX levels",1,cx,mx);return false;}
-    // Check active TCS4 as well: the AOP must never receive concurrent
-    // commands for the same ARC address. Preserve all foreign in-flight work.
-    const size_t other=0xd00+4*0x2a0;
-    if(!rd(rsc,other+0x18)) {
-        uint32_t enabled=rd(rsc,other+0x1c);
-        for(unsigned i=0;i<ncpt && i<16;i++)if(enabled&(1u<<i)) {
-            uint32_t address=rd(rsc,other+0x34+20*i);
-            if(address==in.mx.address || address==in.cx.address) {
-                record("SKIP conflicting active TCS4",1,address,enabled);return false;
-            }
-        }
-    }
-    // ARC commands use AUX indices (not the common corner number).
-    wr(rsc,0xd00,rd(rsc,0xd00)&~(1u<<3));
-    uint32_t control=rd(rsc,base+0x14)&~(1u<<24);
-    wr(rsc,base+0x14,control);
-    if(!poll(rsc,base+0x14,~0u,control,500)){record("FAIL TCS trigger clear",1,rd(rsc,base+0x14),control);return false;}
-    control&=~(1u<<16);wr(rsc,base+0x14,control);
-    if(!poll(rsc,base+0x14,~0u,control,500)){record("FAIL TCS enable clear",1,rd(rsc,base+0x14),control);return false;}
-    wr(rsc,base+0x1c,0);wr(rsc,0xd08,1u<<3);
-    if(!poll(rsc,0xd04,1u<<3,0,500)){record("FAIL stale TCS completion clear",1,rd(rsc,0xd04));return false;}
     const uint32_t addresses[]={in.mx.address,in.cx.address},values[]={mx,cx};
-    for(unsigned i=0;i<2;i++) {
-        wr(rsc,base+0x30+20*i,0x10108); // 8bytes, write, real response required.
-        wr(rsc,base+0x34+20*i,addresses[i]);wr(rsc,base+0x38+20*i,values[i]);
-    }
-    wr(rsc,base+0x10,3);wr(rsc,base+0x1c,3);
-    wr(rsc,base+0x14,1u<<16);
-    if(!poll(rsc,base+0x14,~0u,1u<<16,500)){record("FAIL TCS AMC enable",1,rd(rsc,base+0x14));return false;}
-    wr(rsc,base+0x14,(1u<<16)|(1u<<24));
-    // No XNU RSC IRQ handler is installed. The TCS3 IRQ is intentionally
-    // masked, so IRQ_STATUS is not a completion prerequisite. Require BOTH
-    // real commands ISSUED|COMPL and actual TCS idle, as the vendor's polled
-    // path observes hardware status rather than an enabled IRQ indication.
-    // A finished old transaction must never be mistaken for this one. See a
-    // fresh busy/incomplete transition OR a freshly cleared completion bit.
-    bool complete=false,progressed=false;uint32_t first=0,second=0,idle=0;
-    uint64_t began=microseconds();
-    for(unsigned n=0;n<10000 && microseconds()-began<100000;n++) {
-        first=rd(rsc,base+0x3c);second=rd(rsc,base+0x50);idle=rd(rsc,base+0x18);
-        bool commands=(first&0x10100)==0x10100 && (second&0x10100)==0x10100;
-        if(!commands || !idle)progressed=true;
-        if(commands && idle && (progressed || (rd(rsc,0xd04)&(1u<<3)))){complete=true;break;}
-        IODelay(10);
-    }
-    if(!complete){record("FAIL ARC completion",1,(uint64_t(first)<<32)|second,idle);return false;}
-    wr(rsc,base+0x1c,0);wr(rsc,0xd08,1u<<3);
-    // Clear only the completed transaction's trigger, matching vendor reclaim.
-    // Keep the acknowledged votes and parent resources retained.
-    wr(rsc,base+0x14,rd(rsc,base+0x14)&~(1u<<24));
+    // ARC commands remain actual AUX indices. The same lock now covers GPU,
+    // WLAN and ADSP through response/reclaim; no check-then-trigger race and
+    // no reuse of the DT's sleep TCS3/4 as active command slots.
+    if(!diting_rpmh_vote_many(addresses,values,2)){record("FAIL parent RPMh request",1,mx,cx);return false;}
     record("parent ARC votes acknowledged",0,mx,cx);
     return true;
 }
@@ -341,7 +288,7 @@ static void run(void *,wait_result_t)
     if(lock_max)power_level=0; // actual Diting DT900MHz and matching maximum BW
     if(power_level>=DitingAdrenoPowerLevelCount){record("SKIP invalid GPU power level",power_level);return;}
     record("startup requested; no accelerator published",0);
-    if(!map(gcc,0x100000,0x1f4200)||!map(rsc,0x17a20000,0x10000)||!map(db,0x80860000,0x20000))
+    if(!map(gcc,0x100000,0x1f4200)||!map(db,0x80860000,0x20000))
         {record("SKIP resource mapping",1);return;}
     DitingPowerInputs inputs={};auto input_status=DitingAdrenoReadPowerInputs(
         reinterpret_cast<const uint8_t *>(db.cpu),db.bytes,DitingAdrenoChipId,&inputs);

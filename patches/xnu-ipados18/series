@@ -6,3 +6,11 @@ zzzzzz-diting-runtime-rule-capacity.patch
 zzzzzzz-diting-frame-links.patch
 zzzzzzzz-diting-native-pac-keys.patch
 zzzzzzzzz-diting-exec-diagnostic.patch
+zzzzzzzzzz-diting-platform-diagnostic.patch
+zzzzzzzzzzz-diting-first-boot-diagnostic.patch
+zzzzzzzzzzzz-diting-secondary-start-failure.patch
+zzzzzzzzzzzzz-diting-secondary-mmu-handoff.patch
+zzzzzzzzzzzzzz-diting-secondary-vector-context.patch
+zzzzzzzzzzzzzzz-diting-secondary-fp-context-sync.patch
+zzzzzzzzzzzzzzzz-diting-secondary-bootstrap-vectors.patch
+zzzzzzzzzzzzzzzzz-diting-secondary-fault-publication.patch

@@ -1,0 +1,84 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -1014,8 +1014,13 @@
+ arm_init_tramp:
+ 	ARM64_JUMP_TARGET
+ #if defined(DITING)
+-	/* Keep early vectors through phystokv and the C-entry prologue.
+-	 * arm_init_cpu installs normal vectors after current_thread/cpu_data. */
++	/* The kernel pmap is active here. Use a KVA for the stack-free
++	 * early vectors: pmap_clear_user_ttb() later removes the V=P map.
++	 * Keep capture until CPU/timebase initialization has completed. */
++	adrp	x9, EXT(LowSecondaryExceptionVectorBase)@page
++	add		x9, x9, EXT(LowSecondaryExceptionVectorBase)@pageoff
++	msr		VBAR_EL1, x9
++	isb		sy
+ 	DITING_RESET_STEP_CACHED 7
+ #endif
+ 	/* On a warm boot, the full kernel translation table is initialized in
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -739,7 +739,7 @@
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+ #if defined(DITING)
+-	diting_secondary_install_kernel_vectors();
++	/* All architectural interrupts are still masked on this path. */
+ 	diting_secondary_kernel_step(17);
+ #endif
+ 
+@@ -777,12 +777,27 @@
+ #endif /* HIBERNATION */
+ 
+ #if __arm64__
++#if defined(DITING)
++	diting_secondary_kernel_step(21);
++#endif
+ 	wfe_timeout_init();
++#if defined(DITING)
++	diting_secondary_kernel_step(22);
++#endif
+ 	pmap_clear_user_ttb();
++#if defined(DITING)
++	diting_secondary_kernel_step(23);
++#endif
+ 	flush_mmu_tlb();
+ #endif
+ 
++#if defined(DITING)
++	diting_secondary_kernel_step(24);
++#endif
+ 	cpu_machine_idle_init(FALSE);
++#if defined(DITING)
++	diting_secondary_kernel_step(25);
++#endif
+ 
+ 	cpu_init();
+ #if defined(DITING)
+@@ -798,6 +813,9 @@
+ 	 * drivers use mach_absolute_time() to implement rate control
+ 	 */
+ 	cpu_timebase_init(FALSE);
++#if defined(DITING)
++	diting_secondary_kernel_step(26);
++#endif
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -816,9 +834,16 @@
+ 		PE_init_platform(TRUE, NULL);
+ 		commpage_update_timebase();
+ 	}
++#if defined(DITING)
++	diting_secondary_kernel_step(27);
++#endif
+ 	PE_init_cpu();
+ #if defined(DITING)
+ 	diting_secondary_kernel_step(19);
++	/* Install normal vectors before FIQ/timer context and scheduler entry.
++	 * The bootstrap capture never changes DAIF or reports CPU success. */
++	diting_secondary_install_kernel_vectors();
++	diting_secondary_kernel_step(28);
+ #endif
+ #if __arm64__
+ 	apt_msg_init_cpu();

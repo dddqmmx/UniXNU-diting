@@ -1,0 +1,31 @@
+--- a/Silicon/Qualcomm/QcomPkg/Library/K60KeypadDeviceLib/K60KeypadDeviceLib.c
++++ b/Silicon/Qualcomm/QcomPkg/Library/K60KeypadDeviceLib/K60KeypadDeviceLib.c
+@@ -86,10 +86,9 @@
+ //
+ // Auto-reset window. KeypadDxe polls at 50 Hz; warn at 50 s, reset at
+ // 60 s. The keypad starts polling during DXE, roughly 20 s before the
+-// menu appears, so this leaves about 40 s of visible menu time. Any key
+-// press cancels the countdown permanently (mKeyEverSeen).
++// menu appears. This fallback applies only when SPMI initialization failed;
++// ordinary key polling has no idle auto-reset.
+ //
+-#define AUTORESET_WARN_TICKS 2500u  /* 50 s */
+ #define AUTORESET_TICKS      3000u  /* 60 s */
+ 
+ typedef struct {
+@@ -102,7 +101,6 @@
+ STATIC UINT16   mPonApid     = SPMI_NO_APID;
+ STATIC UINT16   mGpioApid    = SPMI_NO_APID;
+ STATIC UINT32   mTicks       = 0;
+-STATIC BOOLEAN  mKeyEverSeen = FALSE;
+ STATIC BOOLEAN  mAutoResetDone = FALSE;
+ STATIC BOOLEAN  mInitDone    = FALSE;
+ 
+@@ -377,7 +375,6 @@
+ 
+     if (Down[k] && !B->Down) {
+       B->Down = TRUE;
+-      mKeyEverSeen = TRUE;
+ 
+       DEBUG ((
+         DEBUG_ERROR,

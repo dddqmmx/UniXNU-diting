@@ -16,6 +16,7 @@
 #include "BootVideo.h"
 #include "PackedRamdisk.h"
 #include "WindowSize.h"
+#include "MemoryRanges.h"
 
 #define WINDOW_SIZE  SIZE_256MB
 #define BLOCK_SIZE   SIZE_2MB
@@ -202,6 +203,7 @@ STATIC UINTN mAudioDmaOffset = MAX_UINTN;
 #define DITING_RAM_MAX 64
 #define DITING_RAM_WIRE_SIZE (32 + DITING_RAM_MAX * 16)
 STATIC UINTN mRamWireOffset = MAX_UINTN, mRamAllowedOffset = MAX_UINTN, mRamAllowedCount;
+STATIC UINTN mRamPhysicalOffset = MAX_UINTN, mRamPhysicalCount;
 typedef struct { UINT64 Start, Size; } DITING_RAM_BANK;
 
 STATIC
@@ -216,7 +218,7 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
   UINTN  Candidate;
   UINTN  TrustCandidate;
   UINTN  MemoryCandidate;
-  UINTN  AudioCandidate, RamCandidate, AllowedCandidate, AllowedCount;
+  UINTN  AudioCandidate, RamCandidate, AllowedCandidate, AllowedCount, PhysicalCandidate, PhysicalCount;
   CONST UINT8 *Name;
   UINTN  NameLength;
 
@@ -227,6 +229,7 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
   MemoryCandidate = MAX_UINTN;
   AudioCandidate = MAX_UINTN;
   RamCandidate = AllowedCandidate = MAX_UINTN; AllowedCount = 0;
+  PhysicalCandidate = MAX_UINTN; PhysicalCount = 0;
   if ((Depth > 64) || (Size - *Offset < 8)) { return FALSE; }
   Properties = U32 (Data + *Offset);
   Children = U32 (Data + *Offset + 4);
@@ -261,6 +264,12 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
       AllowedCandidate = *Offset;
       AllowedCount = Length / 16;
     }
+    if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "diting-dram-ranges") == 0) {
+      if ((mRamPhysicalOffset != MAX_UINTN) || (PhysicalCandidate != MAX_UINTN) ||
+          !Length || Length % 16 || Length / 16 > DITING_RAM_MAX) { return FALSE; }
+      PhysicalCandidate = *Offset;
+      PhysicalCount = Length / 16;
+    }
     if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "diting-audio-dma") == 0) {
       if ((AudioCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
       AudioCandidate = *Offset;
@@ -293,9 +302,11 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
     if ((Path != 1) || (mAudioDmaOffset != MAX_UINTN)) { return FALSE; }
     mAudioDmaOffset = AudioCandidate;
   }
-  if (RamCandidate != MAX_UINTN || AllowedCandidate != MAX_UINTN) {
-    if (Path != 1 || RamCandidate == MAX_UINTN || AllowedCandidate == MAX_UINTN) { return FALSE; }
+  if (RamCandidate != MAX_UINTN || AllowedCandidate != MAX_UINTN || PhysicalCandidate != MAX_UINTN) {
+    if (Path != 1 || RamCandidate == MAX_UINTN || AllowedCandidate == MAX_UINTN ||
+        PhysicalCandidate == MAX_UINTN) { return FALSE; }
     mRamWireOffset = RamCandidate; mRamAllowedOffset = AllowedCandidate; mRamAllowedCount = AllowedCount;
+    mRamPhysicalOffset = PhysicalCandidate; mRamPhysicalCount = PhysicalCount;
   }
   if (MemoryCandidate != MAX_UINTN) {
     if ((Path != 1) || (*WindowSize != 0)) { return FALSE; }
@@ -359,11 +370,76 @@ GetMap (EFI_MEMORY_DESCRIPTOR **Map, UINTN *Capacity, UINTN *Size, UINTN *Key, U
   return EFI_OUT_OF_RESOURCES;
 }
 
-// End of the run of EfiConventionalMemory that begins at Start: the UEFI map often lists physically
-// adjacent free ranges as separate descriptors, so extend over every descriptor that continues the run.
+STATIC
+EFI_STATUS
+ValidateRamList (CONST UINT8 *Tree, UINTN Offset, UINTN Count)
+{
+  UINT64 PreviousEnd = 0;
+  if (Offset == MAX_UINTN || !Count || Count > DITING_RAM_MAX) { return EFI_COMPROMISED_DATA; }
+  for (UINTN I = 0; I < Count; I++) {
+    UINT64 Base = U64 (Tree + Offset + I * 16);
+    UINT64 Bytes = U64 (Tree + Offset + I * 16 + 8);
+    if (!DarwinRamRangeValid (Base, Bytes) || (I && Base < PreviousEnd)) { return EFI_COMPROMISED_DATA; }
+    PreviousEnd = Base + Bytes;
+  }
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+ValidateDitingRam (CONST UINT8 *Tree)
+{
+  if (mRamWireOffset == MAX_UINTN ||
+      EFI_ERROR (ValidateRamList (Tree, mRamPhysicalOffset, mRamPhysicalCount)) ||
+      EFI_ERROR (ValidateRamList (Tree, mRamAllowedOffset, mRamAllowedCount))) { return EFI_COMPROMISED_DATA; }
+  for (UINTN I = 0; I < mRamAllowedCount; I++) {
+    UINT64 Cursor = U64 (Tree + mRamAllowedOffset + I * 16);
+    UINT64 End = Cursor + U64 (Tree + mRamAllowedOffset + I * 16 + 8);
+    for (UINTN J = 0; J < mRamPhysicalCount && Cursor < End; J++) {
+      UINT64 Base = U64 (Tree + mRamPhysicalOffset + J * 16);
+      UINT64 Stop = Base + U64 (Tree + mRamPhysicalOffset + J * 16 + 8);
+      if (Base > Cursor) { break; }
+      if (Stop > Cursor) { Cursor = MIN (Stop, End); }
+    }
+    if (Cursor != End) { return EFI_COMPROMISED_DATA; }
+  }
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+ValidateMemoryMap (EFI_MEMORY_DESCRIPTOR *Map, UINTN Size, UINTN Stride)
+{
+  if (!Map || !Size || Stride < sizeof (EFI_MEMORY_DESCRIPTOR) || Size % Stride) { return EFI_COMPROMISED_DATA; }
+  for (UINTN Offset = 0; Offset < Size; Offset += Stride) {
+    EFI_MEMORY_DESCRIPTOR *D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+    UINT64 End;
+    if (!D->NumberOfPages) { continue; }
+    if (!DarwinRamDescriptorEnd (D->PhysicalStart, D->NumberOfPages, &End)) { return EFI_COMPROMISED_DATA; }
+    for (UINTN Other = 0; Other < Offset; Other += Stride) {
+      EFI_MEMORY_DESCRIPTOR *P = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Other);
+      UINT64 PreviousEnd;
+      if (!P->NumberOfPages) { continue; }
+      if (!DarwinRamDescriptorEnd (P->PhysicalStart, P->NumberOfPages, &PreviousEnd) ||
+          (D->PhysicalStart < PreviousEnd && P->PhysicalStart < End)) { return EFI_COMPROMISED_DATA; }
+    }
+  }
+  return EFI_SUCCESS;
+}
+
+STATIC
+BOOLEAN
+UsableRamDescriptor (EFI_MEMORY_DESCRIPTOR *Descriptor, UINT64 *End)
+{
+  return Descriptor->Type == EfiConventionalMemory &&
+         (Descriptor->Attribute & EFI_MEMORY_WB) && !(Descriptor->Attribute & EFI_MEMORY_RUNTIME) &&
+         DarwinRamDescriptorEnd (Descriptor->PhysicalStart, Descriptor->NumberOfPages, End);
+}
+
+// Extend only over adjacent, valid write-back conventional descriptors.
 STATIC
 UINT64
-RunEnd (EFI_MEMORY_DESCRIPTOR *Map, UINTN Size, UINTN Stride, UINT64 Start, UINT64 End)
+RunEnd (EFI_MEMORY_DESCRIPTOR *Map, UINTN Size, UINTN Stride, UINT64 End)
 {
   EFI_MEMORY_DESCRIPTOR *Descriptor;
   UINTN                 Offset;
@@ -372,15 +448,14 @@ RunEnd (EFI_MEMORY_DESCRIPTOR *Map, UINTN Size, UINTN Stride, UINT64 Start, UINT
   do {
     Extended = FALSE;
     for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+      UINT64 DescriptorEnd;
       Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
-      if ((Descriptor->Type == EfiConventionalMemory) && (Descriptor->PhysicalStart == End) &&
-          (Descriptor->NumberOfPages != 0) && (Descriptor->NumberOfPages < (MAX_UINT64 - End) / EFI_PAGE_SIZE)) {
-        End += EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages);
+      if (Descriptor->PhysicalStart == End && UsableRamDescriptor (Descriptor, &DescriptorEnd)) {
+        End = DescriptorEnd;
         Extended = TRUE;
       }
     }
   } while (Extended);
-  (VOID)Start;
   return End;
 }
 
@@ -450,7 +525,8 @@ HandoffStage (CONST UINT64 Video[6], CONST CHAR16 *Text, UINT64 Status)
 
 STATIC
 EFI_STATUS
-AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address)
+AllocateWindow (CONST UINT8 *Tree, KERNEL *Kernel, UINT64 WindowSize,
+                CONST UINT64 Video[6], EFI_PHYSICAL_ADDRESS *Address)
 {
   EFI_MEMORY_DESCRIPTOR *Map;
   EFI_MEMORY_DESCRIPTOR *Descriptor;
@@ -465,26 +541,52 @@ AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address
   UINT64                BestStart;
   UINT64                BestBytes;
   UINT64                RunBytes;
+  UINT64                VideoBytes;
 
   *Address = 0;
   Map = NULL;
   Capacity = 0;
   BestStart = 0;
   BestBytes = 0;
+  Status = ValidateDitingRam (Tree);
+  if (EFI_ERROR (Status)) { return Status; }
+  if (Video[2] && Video[4] > MAX_UINT64 / Video[2]) { return EFI_COMPROMISED_DATA; }
+  VideoBytes = Video[2] * Video[4];
+  if (Video[0] > MAX_UINT64 - VideoBytes) { return EFI_COMPROMISED_DATA; }
   Status = GetMap (&Map, &Capacity, &Size, &Key, &Stride);
   if (EFI_ERROR (Status)) { if (Map != NULL) { FreePool (Map); } return Status; }
+  Status = ValidateMemoryMap (Map, Size, Stride);
+  if (EFI_ERROR (Status)) { FreePool (Map); return Status; }
   Status = EFI_OUT_OF_RESOURCES;
   for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
     Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
-    if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0)) { continue; }
-    End = RunEnd (Map, Size, Stride, Descriptor->PhysicalStart,
-                  Descriptor->PhysicalStart + EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages));
-    RunBytes = End - Descriptor->PhysicalStart;
-    if (RunBytes > BestBytes) { BestBytes = RunBytes; BestStart = Descriptor->PhysicalStart; }
-    Candidate = ALIGN_VALUE (Descriptor->PhysicalStart, BLOCK_SIZE) + (Kernel->Base & (BLOCK_SIZE - 1));
-    if ((Candidate < Descriptor->PhysicalStart) || (End < Candidate) || (End - Candidate < WindowSize)) { continue; }
-    Status = gBS->AllocatePages (AllocateAddress, EfiLoaderCode, EFI_SIZE_TO_PAGES (WindowSize), &Candidate);
-    if (!EFI_ERROR (Status)) { *Address = Candidate; break; }
+    if (!UsableRamDescriptor (Descriptor, &End)) { continue; }
+    End = RunEnd (Map, Size, Stride, End);
+    for (UINTN I = 0; I < mRamAllowedCount; I++) {
+      UINT64 Base = U64 (Tree + mRamAllowedOffset + I * 16);
+      UINT64 Bytes = U64 (Tree + mRamAllowedOffset + I * 16 + 8);
+      UINT64 Start = MAX (Descriptor->PhysicalStart, Base);
+      UINT64 Stop = MIN (End, Base + Bytes);
+      if (Start >= Stop) { continue; }
+      RunBytes = Stop - Start;
+      if (RunBytes > BestBytes) { BestBytes = RunBytes; BestStart = Start; }
+      if (!DarwinRamWindowCandidate (Start, Stop, Kernel->Base, WindowSize,
+                                    Video[0], VideoBytes, &Candidate)) { continue; }
+      UINT64 Requested = Candidate;
+      Status = gBS->AllocatePages (AllocateAddress, EfiLoaderCode, EFI_SIZE_TO_PAGES (WindowSize), &Candidate);
+      if (!EFI_ERROR (Status)) {
+        if (Candidate != Requested) {
+          gBS->FreePages (Candidate, EFI_SIZE_TO_PAGES (WindowSize));
+          FreePool (Map);
+          return EFI_COMPROMISED_DATA;
+        }
+        *Address = Candidate;
+        DEBUG ((DEBUG_ERROR, "DARWINBOOT24: primary RAM 0x%lx+0x%lx within 0x%lx..0x%lx\n",
+                Candidate, WindowSize, Start, Stop));
+        break;
+      }
+    }
+    if (*Address) { break; }
   }
   if (EFI_ERROR (Status)) {
     CHAR16 Line[96];
@@ -511,22 +613,14 @@ EFI_STATUS
 ClaimDitingRam (CONST UINT8 *Tree, EFI_MEMORY_DESCRIPTOR *Map, UINTN MapSize, UINTN Stride,
               DITING_RAM_BANK *Owned, UINTN *Count, CONST UINT64 Video[6])
 {
-  UINTN Offset, I, J;
+  UINTN Offset, I;
   UINT64 PoolStart = 0, PoolEnd = 0, Largest = 0;
   UINTN Skipped = 0;
   EFI_STATUS Status;
   if (mRamWireOffset == MAX_UINTN || mRamAllowedOffset == MAX_UINTN) { return EFI_SUCCESS; }
   // Validate the complete contract before taking ownership of any pages.
-  if (Stride < sizeof (EFI_MEMORY_DESCRIPTOR) || !Stride || MapSize % Stride) { return EFI_COMPROMISED_DATA; }
-  for (I = 0; I < mRamAllowedCount; I++) {
-    UINT64 Base = U64 (Tree + mRamAllowedOffset + I * 16);
-    UINT64 Bytes = U64 (Tree + mRamAllowedOffset + I * 16 + 8);
-    if (!Bytes || Base > MAX_UINT64 - Bytes || ((Base | Bytes) & EFI_PAGE_MASK)) { return EFI_COMPROMISED_DATA; }
-    for (J = 0; J < I; J++) {
-      UINT64 Other = U64 (Tree + mRamAllowedOffset + J * 16);
-      UINT64 OtherBytes = U64 (Tree + mRamAllowedOffset + J * 16 + 8);
-      if (Base < Other + OtherBytes && Other < Base + Bytes) { return EFI_COMPROMISED_DATA; }
-    }
+  if (EFI_ERROR (ValidateDitingRam (Tree)) || EFI_ERROR (ValidateMemoryMap (Map, MapSize, Stride))) {
+    return EFI_COMPROMISED_DATA;
   }
   // The qualified FD's DXE heap is below 4 GiB. Do not drain that heap or
   // repurpose low device/uncached aliases while firmware drivers still run.
@@ -534,13 +628,13 @@ ClaimDitingRam (CONST UINT8 *Tree, EFI_MEMORY_DESCRIPTOR *Map, UINTN MapSize, UI
   // be made by firmware callbacks before ExitBootServices has completed.
   for (Offset = 0; Offset + Stride <= MapSize; Offset += Stride) {
     EFI_MEMORY_DESCRIPTOR *D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
-    if (D->Type != EfiConventionalMemory || !(D->Attribute & EFI_MEMORY_WB) ||
-        !D->NumberOfPages || D->NumberOfPages > (MAX_UINT64 - D->PhysicalStart) / EFI_PAGE_SIZE) { continue; }
+    UINT64 End;
+    if (!UsableRamDescriptor (D, &End)) { continue; }
     for (I = 0; I < mRamAllowedCount; I++) {
       UINT64 Base = U64 (Tree + mRamAllowedOffset + I * 16);
       UINT64 Bytes = U64 (Tree + mRamAllowedOffset + I * 16 + 8);
       UINT64 Start = MAX (MAX (Base, D->PhysicalStart), 0x100000000ULL);
-      UINT64 Stop = MIN (Base + Bytes, D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages));
+      UINT64 Stop = MIN (Base + Bytes, End);
       if (Stop > Start && Stop - Start > Largest) { Largest = Stop - Start; PoolEnd = Stop; }
     }
   }
@@ -549,9 +643,7 @@ ClaimDitingRam (CONST UINT8 *Tree, EFI_MEMORY_DESCRIPTOR *Map, UINTN MapSize, UI
   for (Offset = 0; Offset + Stride <= MapSize; Offset += Stride) {
     EFI_MEMORY_DESCRIPTOR *D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
     UINT64 End;
-    if (D->Type != EfiConventionalMemory || !(D->Attribute & EFI_MEMORY_WB) || !D->NumberOfPages ||
-        D->NumberOfPages > (MAX_UINT64 - D->PhysicalStart) / EFI_PAGE_SIZE) { continue; }
-    End = D->PhysicalStart + EFI_PAGES_TO_SIZE (D->NumberOfPages);
+    if (!UsableRamDescriptor (D, &End)) { continue; }
     for (I = 0; I < mRamAllowedCount; I++) {
       UINT64 Base = U64 (Tree + mRamAllowedOffset + I * 16);
       UINT64 Bytes = U64 (Tree + mRamAllowedOffset + I * 16 + 8);
@@ -706,8 +798,8 @@ Boot (
   RamdiskOffset = MAX_UINTN;
   TrustCacheOffset = MAX_UINTN;
   mAudioDmaOffset = MAX_UINTN;
-  mRamWireOffset = mRamAllowedOffset = MAX_UINTN;
-  mRamAllowedCount = 0;
+  mRamWireOffset = mRamAllowedOffset = mRamPhysicalOffset = MAX_UINTN;
+  mRamAllowedCount = mRamPhysicalCount = 0;
   WindowSize = 0;
   KeepPacked = FALSE;
   Stage = L"PARSE ADT";
@@ -741,7 +833,7 @@ Boot (
   if (EFI_ERROR (Status)) { goto Fail; }
   Stage = L"PRIMARY RAM";
   DiagDrawVideo (Stage, 0, Video);
-  Status = AllocateWindow (&Kernel, WindowSize, &Address);
+  Status = AllocateWindow (Tree, &Kernel, WindowSize, Video, &Address);
   if (EFI_ERROR (Status)) { goto Fail; }
   // Reserve real conventional low RAM for the DSP's 32-bit period buffer.
   // This allocation follows the owned XNU window, so they cannot overlap.

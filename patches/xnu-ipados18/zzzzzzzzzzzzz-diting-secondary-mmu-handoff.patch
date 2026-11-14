@@ -1,0 +1,150 @@
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -160,6 +160,32 @@
+ 	}
+ }
+ 
++#if defined(DITING)
++/* start.s restores cpu_ttep, not the static bootstrap TTBR1. These tables
++ * are allocated by arm_vm_init/pmap, outside the Mach-O static segments.
++ * Publish the existing tables to PoC before the cache-off core walks them.
++ * Only table descriptors are followed; block/leaf mappings are never data
++ * to clean here. Depth and entry count are bounded by the board's geometry. */
++_Static_assert(ARM_TT_ROOT_SHIFT == ARM_TT_L1_SHIFT, "Diting uses an L1 root");
++static unsigned
++diting_clean_start_tables(pmap_paddr_t physical, unsigned level)
++{
++	tt_entry_t *table = (tt_entry_t *)phystokv(physical);
++	unsigned pages = 1;
++	if (level < 3) {
++		for (unsigned i = 0; i < TTE_PGENTRIES; i++) {
++			tt_entry_t entry = os_atomic_load(&table[i], acquire);
++			if ((entry & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) ==
++			    (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
++				pages += diting_clean_start_tables(entry & ARM_TTE_TABLE_MASK, level + 1);
++			}
++		}
++	}
++	CleanPoC_DcacheRegion((vm_offset_t)table, ARM_PGBYTES);
++	return pages;
++}
++#endif
++
+ /*
+  * Start a registered processor: the platform's half of cpu_start(). Waits until the core has
+  * joined the scheduler, and says what became of it if it has not: on a phone the log is all
+@@ -173,6 +199,9 @@
+ 	uint64_t entry = ml_static_vtop((vm_offset_t)&LowResetVectorBase);
+ 	uint64_t now, deadline;
+ 	int64_t status;
++#if defined(DITING)
++	unsigned table_pages;
++#endif
+ 
+ 	/*
+ 	 * What that core reads with its MMU off: the code and the page tables of start.s, and what
+@@ -197,6 +226,9 @@
+ 			CleanPoC_DcacheRegion((vm_offset_t)cpu_datap(other), sizeof(cpu_data_t));
+ 		}
+ 	}
++#if defined(DITING)
++	table_pages = diting_clean_start_tables(cpu_ttep, 1);
++#endif
+ 	__builtin_arm_dsb(DSB_SY);
+ 
+ 	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
+@@ -247,10 +279,10 @@
+ 		    cpu, diting_secondary_reset[cpu].step, stage,
+ 		    f->mpidr, f->esr, f->elr, f->far, f->lr);
+ 	}
+-	panic("Diting CPU%d start timeout: reset=%llu kernel=%u MPIDR=%#llx handler=%#llx TTBR1=%#llx entry=%#llx waited=%ds",
++	panic("Diting CPU%d start timeout: reset=%llu kernel=%u MPIDR=%#llx handler=%#llx TTBR1=%#llx entry=%#llx tables=%u waited=%ds",
+ 	    cpu, diting_secondary_reset[cpu].step, stage,
+ 	    diting_secondary_reset[cpu].mpidr, diting_secondary_reset[cpu].handler,
+-	    diting_secondary_reset[cpu].ttep, entry, PSCI_SMP_START_SECONDS);
++	    diting_secondary_reset[cpu].ttep, entry, table_pages, PSCI_SMP_START_SECONDS);
+ #endif
+ 	if (psci_smp_start_fault.valid != 0) {
+ 		struct psci_smp_start_fault *f = &psci_smp_start_fault;
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -118,12 +118,19 @@
+ 	str		x10, [x9]
+ 	dsb		sy
+ .endmacro
++.macro DITING_RESET_STEP_CACHED step
++	DITING_RESET_STEP \step
++	dc		cvac, x9
++	dsb		sy
++.endmacro
+ .macro DITING_RESET_VALUE reg, offset
+ 	DITING_RESET_SLOT
+ 	str		\reg, [x9, #\offset]
+ 	dsb		sy
+ .endmacro
+ #else
++.macro DITING_RESET_STEP_CACHED step
++.endmacro
+ .macro DITING_RESET_STEP step
+ .endmacro
+ .macro DITING_RESET_VALUE reg, offset
+@@ -875,6 +882,12 @@
+ 	MSR_TTBR1_EL1_X0
+ 1:
+ 
++#if defined(DITING)
++	/* Keep the physical early vectors until the secondary has reached KVA.
++	 * A fault while enabling the MMU must not use the normal vectors before
++	 * the CPU has installed its current thread / cpu_data context. */
++	cbnz	x21, Lditing_keep_secondary_vectors
++#endif
+ 	// Set up the exception vectors
+ #if __ARM_KERNEL_PROTECT__
+ 	/* If this is not the first reset of the boot CPU, the alternate mapping
+@@ -892,6 +905,10 @@
+ 1:
+ 	MSR_VBAR_EL1_X0
+ 
++#if defined(DITING)
++Lditing_keep_secondary_vectors:
++#endif
++
+ #if HAS_APPLE_PAC
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+@@ -900,6 +917,11 @@
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
++#if defined(DITING)
++	cbz		x21, Lditing_mmu_trace_done
++	DITING_RESET_STEP_CACHED 6
++Lditing_mmu_trace_done:
++#endif
+ 
+ #if !VMAPPLE
+ 	MOV64	x1, SCTLR_EL1_DEFAULT
+@@ -985,6 +1007,15 @@
+ 	.align 2
+ arm_init_tramp:
+ 	ARM64_JUMP_TARGET
++#if defined(DITING)
++	/* We are executing through cpu_ttep at KVA now. The ADRP produces a
++	 * KVA here, so install the normal vectors without PA conversion. */
++	adrp	x9, EXT(ExceptionVectorsBase)@page
++	add		x9, x9, EXT(ExceptionVectorsBase)@pageoff
++	msr		VBAR_EL1, x9
++	isb		sy
++	DITING_RESET_STEP_CACHED 7
++#endif
+ 	/* On a warm boot, the full kernel translation table is initialized in
+ 	 * addition to the bootstrap tables. The layout is as follows:
+ 	 *
+@@ -1021,6 +1052,7 @@
+ 	bl		EXT(phystokv)
+ 
+ 	mov		lr, x19
++	DITING_RESET_STEP_CACHED 9
+ 
+ 	/* Return to arm_init() */
+ 	ret

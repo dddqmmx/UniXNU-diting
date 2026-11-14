@@ -1,7 +1,29 @@
 """Locate Diting's retained CDC interface even when USB uses the iOS UDID."""
 import glob
+from pathlib import Path
 import plistlib
 import subprocess
+import sys
+
+def _linux_usb_nodes():
+    devices={}
+    for tty in Path('/sys/class/tty').glob('ttyACM*'):
+        interface=(tty/'device').resolve()
+        try:
+            if ((interface/'bInterfaceClass').read_text().strip(),
+                (interface/'bInterfaceSubClass').read_text().strip())!=('02','02'):
+                continue
+            device=next(p for p in interface.parents if (p/'idVendor').is_file())
+            serial=(device/'serial').read_text().strip()
+            identity=((device/'idVendor').read_text().strip(),
+                      (device/'idProduct').read_text().strip())
+            if identity!=('05ac','12a8') and not (identity==('ffff','0128') and serial=='DITING-SM8475'):
+                continue
+        except (OSError,StopIteration):
+            continue
+        node=devices.setdefault(str(device),{'USB Serial Number':serial,'IORegistryEntryChildren':[]})
+        node['IORegistryEntryChildren'].append({'IOCalloutDevice':'/dev/'+tty.name})
+    return list(devices.values())
 
 def _nodes(value):
     if isinstance(value,dict):
@@ -11,6 +33,8 @@ def _nodes(value):
         for child in value:yield from _nodes(child)
 
 def phone_usb_nodes():
+    if sys.platform.startswith('linux'):
+        return _linux_usb_nodes()
     try:
         root=plistlib.loads(subprocess.check_output(
             ['/usr/sbin/ioreg','-a','-r','-c','IOUSBHostDevice','-l','-w','0'],timeout=5))
@@ -33,7 +57,7 @@ def serial_ports():
     for node in phone_usb_nodes():
         for item in _nodes(node):
             port=item.get('IOCalloutDevice')
-            if isinstance(port,str) and port.startswith('/dev/cu.usbmodem'):ports.append(port)
+            if isinstance(port,str) and port.startswith(('/dev/cu.usbmodem','/dev/ttyACM')):ports.append(port)
     return sorted(set(ports))
 
 def native_serial():

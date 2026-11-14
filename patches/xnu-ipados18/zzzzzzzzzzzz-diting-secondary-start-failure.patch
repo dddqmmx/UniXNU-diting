@@ -1,0 +1,262 @@
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -73,6 +73,22 @@
+ } psci_smp_start_fault __attribute__((aligned(64)));
+ _Static_assert(sizeof(struct psci_smp_start_fault) == 64, "one cache line");
+ 
++#if defined(DITING)
++/* One cache line per core, written by that core while its MMU is off.
++ * SM8475's DT numbers CPUs by MPIDR Affinity1 (0x000 through 0x700). */
++struct diting_secondary_reset_record {
++	uint64_t step, mpidr, handler, ttep, reserved[4];
++};
++struct diting_secondary_reset_record diting_secondary_reset[8]
++    __attribute__((aligned(64)));
++_Static_assert(sizeof(struct diting_secondary_reset_record) == 64, "one cache line");
++volatile uint32_t diting_cpu_start_progress = 0xff00;
++#define DITING_CPU_START_STEP(step) \
++    (diting_cpu_start_progress = ((uint32_t)cpu << 8) | (step))
++#else
++#define DITING_CPU_START_STEP(step) ((void)0)
++#endif
++
+ static uint32_t psci_smp_cpu_stage[MAX_CPUS];   /* PSCI_SMP_CPU_*, by cpu number */
+ static uint32_t psci_smp_started;               /* a bit per core that CPU_ON was granted for */
+ 
+@@ -165,7 +181,12 @@
+ 	 * every processor, which the reset vector goes through looking for its own.
+ 	 * Clean, not flush: the processors that are running keep using all of it.
+ 	 */
++	DITING_CPU_START_STEP(44);
+ 	psci_smp_start_fault.valid = 0;
++#if defined(DITING)
++	/* Clear only this core's record. No other core shares its cache line. */
++	bzero(&diting_secondary_reset[cpu], sizeof(diting_secondary_reset[cpu]));
++#endif
+ 	psci_smp_clean_segment("__TEXT");
+ 	psci_smp_clean_segment("__DATA_CONST");
+ 	psci_smp_clean_segment("__TEXT_EXEC");
+@@ -179,19 +200,30 @@
+ 	__builtin_arm_dsb(DSB_SY);
+ 
+ 	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
++	DITING_CPU_START_STEP(45);
+ 	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
++	DITING_CPU_START_STEP(46);
+ 	if (status != 0) {
+ 		os_atomic_store(&psci_smp_cpu_stage[cpu], 0, release);
+ 		printf("psci: cpu %d (MPIDR 0x%x) was not started: the firmware answers %lld (%s)\n",
+ 		    cpu, phys_id, status, psci_error(status));
++#if defined(DITING)
++		/* Darwin 24 requires every registered CPU to boot. The void
++		 * PE_cpu_start_internal forwarder discards startCPU's return value;
++		 * report the real failure here before later cores overwrite it. */
++		panic("Diting CPU%d CPU_ON failed: MPIDR=%#x status=%lld (%s) entry=%#llx",
++		    cpu, phys_id, status, psci_error(status), entry);
++#endif
+ 		return KERN_FAILURE;
+ 	}
+ 	os_atomic_or(&psci_smp_started, 1u << cpu, relaxed);
+ 
++	DITING_CPU_START_STEP(47);
+ 	clock_interval_to_deadline(PSCI_SMP_START_SECONDS, NSEC_PER_SEC, &deadline);
+ 	do {
+ 		stage = os_atomic_load(&psci_smp_cpu_stage[cpu], acquire);
+ 		if (stage >= PSCI_SMP_CPU_RUNNING) {
++			DITING_CPU_START_STEP(48);
+ 			return KERN_SUCCESS;
+ 		}
+ 		/* memory, not this processor's copy of it */
+@@ -203,6 +235,23 @@
+ 		now = mach_absolute_time();
+ 	} while (now < deadline);
+ 
++#if defined(DITING)
++	DITING_CPU_START_STEP(49);
++	/* A cache-off secondary writes directly to memory. Fetch that record
++	 * here, before panic; panic itself takes no hardware/registry reads. */
++	FlushPoC_DcacheRegion((vm_offset_t)&diting_secondary_reset[cpu],
++	    sizeof(diting_secondary_reset[cpu]));
++	if (psci_smp_start_fault.valid != 0) {
++		struct psci_smp_start_fault *f = &psci_smp_start_fault;
++		panic("Diting CPU%d early exception: reset=%llu kernel=%u MPIDR=%#llx ESR=%#llx ELR=%#llx FAR=%#llx LR=%#llx",
++		    cpu, diting_secondary_reset[cpu].step, stage,
++		    f->mpidr, f->esr, f->elr, f->far, f->lr);
++	}
++	panic("Diting CPU%d start timeout: reset=%llu kernel=%u MPIDR=%#llx handler=%#llx TTBR1=%#llx entry=%#llx waited=%ds",
++	    cpu, diting_secondary_reset[cpu].step, stage,
++	    diting_secondary_reset[cpu].mpidr, diting_secondary_reset[cpu].handler,
++	    diting_secondary_reset[cpu].ttep, entry, PSCI_SMP_START_SECONDS);
++#endif
+ 	if (psci_smp_start_fault.valid != 0) {
+ 		struct psci_smp_start_fault *f = &psci_smp_start_fault;
+ 		uint64_t to_virtual = gVirtBase - gPhysBase;
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -100,6 +100,36 @@
+  *	x20 - Boot args pointer
+  *	x21 - CPU data pointer
+  */
++#if defined(DITING)
++/* These records occupy individual cache lines and are cleaned before CPU_ON.
++ * Keep this macro before LowResetVectorBase so its executable offset is stable.
++ * Uses only x9-x11; no stack, calls or MMU assumptions. */
++.macro DITING_RESET_SLOT
++	adrp	x9, EXT(diting_secondary_reset)@page
++	add		x9, x9, EXT(diting_secondary_reset)@pageoff
++	mrs		x10, MPIDR_EL1
++	ubfx	x11, x10, #8, #3
++	add		x9, x9, x11, lsl #6
++.endmacro
++.macro DITING_RESET_STEP step
++	DITING_RESET_SLOT
++	str		x10, [x9, #8]
++	mov		x10, #\step
++	str		x10, [x9]
++	dsb		sy
++.endmacro
++.macro DITING_RESET_VALUE reg, offset
++	DITING_RESET_SLOT
++	str		\reg, [x9, #\offset]
++	dsb		sy
++.endmacro
++#else
++.macro DITING_RESET_STEP step
++.endmacro
++.macro DITING_RESET_VALUE reg, offset
++.endmacro
++#endif
++
+ 	.text
+ 	.align 12
+ 	.globl EXT(LowResetVectorBase)
+@@ -154,6 +184,8 @@
+ 
+ 
+ 
++	DITING_RESET_STEP 1
++
+ 	// Process reset handlers
+ 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
+ 	add		x19, x19, EXT(ResetHandlerData)@pageoff
+@@ -177,6 +209,7 @@
+ 	b.eq	Lskip_cpu_reset_handler				// Not found
+ 	b		Lcheck_cpu_data_entry	// loop
+ Lfound_cpu_data_entry:
++	DITING_RESET_STEP 2
+ 
+ #ifdef APPLEEVEREST
+ 	/*
+@@ -189,6 +222,7 @@
+ 	adrp	x20, EXT(const_boot_args)@page
+ 	add		x20, x20, EXT(const_boot_args)@pageoff
+ 	ldr		x0, [x21, CPU_RESET_HANDLER]		// Call CPU reset handler
++	DITING_RESET_VALUE x0, 16
+ 	cbz		x0, Lskip_cpu_reset_handler
+ 
+ 	// Validate that our handler is one of the two expected handlers
+@@ -215,8 +249,10 @@
+ 	msr		TPIDR_EL1, x13
+ #endif /* __ARM_KERNEL_PROTECT__ */
+ 
++	DITING_RESET_STEP 3
+ 	blr		x0
+ Lskip_cpu_reset_handler:
++	DITING_RESET_STEP 8
+ 	b		.									// Hang if the handler is NULL or returns
+ 
+ 	.align 3
+@@ -414,6 +450,8 @@
+ 	MSR_VBAR_EL1_X0
+ #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+ 
++	DITING_RESET_STEP 4
++
+ 	// x20 set to BootArgs phys address
+ 	// x21 set to cpu data phys address
+ 
+@@ -832,6 +870,8 @@
+ 	adrp	x0, EXT(cpu_ttep)@page
+ 	add		x0, x0, EXT(cpu_ttep)@pageoff
+ 	ldr		x0, [x0]
++	DITING_RESET_VALUE x0, 24
++	DITING_RESET_STEP 5
+ 	MSR_TTBR1_EL1_X0
+ 1:
+ 
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -871,9 +871,18 @@
+ }
+ #endif
+ 
++#if defined(DITING)
++extern volatile uint32_t diting_cpu_start_progress;
++#define DITING_CPU_START_STEP(step) \
++    (diting_cpu_start_progress = ((uint32_t)cpu << 8) | (step))
++#else
++#define DITING_CPU_START_STEP(step) ((void)0)
++#endif
++
+ void
+ cpu_start(int cpu)
+ {
++	DITING_CPU_START_STEP(40);
+ 	cpu_data_t *cpu_data_ptr = CpuDataEntries[cpu].cpu_data_vaddr;
+ 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, cpu_data_ptr);
+ 
+@@ -907,7 +916,9 @@
+ 		    ml_make_pcpu_base_and_cpu_number((vm_address_t)cpu_data_ptr - __PERCPU_ADDR(cpu_data),
+ 		    cpu_data_ptr->cpu_number);
+ 
++		DITING_CPU_START_STEP(41);
+ 		configure_coresight_registers(cpu_data_ptr);
++		DITING_CPU_START_STEP(42);
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
+@@ -942,11 +953,13 @@
+ #endif
+ #endif /* CONFIG_SPTM */
+ 
++		DITING_CPU_START_STEP(43);
+ 		PE_cpu_start_internal(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
+ 
+ 	}
+ }
+ 
++#undef DITING_CPU_START_STEP
+ 
+ void
+ cpu_timebase_init(boolean_t from_boot)
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1102,6 +1102,7 @@
+ extern "C" uint32_t diting_cpu_initialization_diagnostic(void)
+     __attribute__((weak_import));
+ extern "C" volatile uint32_t diting_cpu_first_boot_progress;
++extern "C" volatile uint32_t diting_cpu_start_progress;
+ extern "C" volatile uint32_t diting_cpu_interrupt_enable_progress[8];
+ #endif
+ 
+@@ -1124,17 +1125,18 @@
+ 	if (!pe && diting_platform_startup_diagnostic) {
+ 		uint64_t state = diting_platform_startup_diagnostic();
+ 		uint32_t firstboot = diting_cpu_first_boot_progress;
++		uint32_t cpustart = diting_cpu_start_progress;
+ 		uint32_t init = diting_cpu_initialization_diagnostic ?
+ 		    diting_cpu_initialization_diagnostic() : 0;
+ 		uint32_t irq = 0;
+ 		for (unsigned i = 0; i < 8; i++) {
+ 			irq |= (diting_cpu_interrupt_enable_progress[i] & 15U) << (i * 4);
+ 		}
+-		panic("IOSecureBSDRoot: missing platform expert; platform=%u cpu=%u registered=%u gic=%u error=%d firstboot=%u/%u init=%#x irq=%#x",
++		panic("IOSecureBSDRoot: missing platform expert; platform=%u cpu=%u registered=%u gic=%u error=%d firstboot=%u/%u init=%#x irq=%#x cpustart=%u/%u",
+ 		    (unsigned)(state & 255), (unsigned)((state >> 8) & 255),
+ 		    (unsigned)((state >> 16) & 255), (unsigned)((state >> 24) & 255),
+ 		    (int32_t)(state >> 32), (firstboot >> 8) & 255, firstboot & 255,
+-		    init, irq);
++		    init, irq, (cpustart >> 8) & 255, cpustart & 255);
+ 	}
+ #endif
+ 	assert(pe);

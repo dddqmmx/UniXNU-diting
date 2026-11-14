@@ -6,6 +6,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
 import diting_paths
+from diting_memory import DEFAULT_MEMORY_MAP
 from emit_prelink import emit,COALESCED
 from native_prelink import arm64_image,macho,plan
 
@@ -18,6 +19,11 @@ def main():
  p.add_argument('--cpus',type=int,choices=range(1,9),default=8,
                 help='actual Diting CPU nodes; use --cpus 1 for isolated bring-up')
  p.add_argument('--window-size',type=lambda s:int(s,0),default=0x100000000)
+ p.add_argument('--memory-map',type=Path,default=DEFAULT_MEMORY_MAP)
+ p.add_argument('--loader',type=Path,default=ROOT/'mac-build/darwinboot24/DarwinBoot24.efi')
+ p.add_argument('--template',type=Path,default=None)
+ p.add_argument('--hardware-dtb',type=Path,default=None,
+                help='packaging tree override; preserves the recorded kernel build input')
  p.add_argument('--kernel-arg',action='append',default=[])
  a=p.parse_args()
  if (a.output_dir/'diting-xnu-initial.img').exists():raise SystemExit('Existing boot image retained; choose another --output-dir before prelinking')
@@ -60,6 +66,7 @@ def main():
  # every package; rebuilding must not silently drop these opt-in paths.
  opts+=['diting_ram_banks=1','launchd_unsecure_cache=1','diting_wifi=1','diting_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
  if report['settings'].get('XNU_DITING_BACKLIGHT')=='1':opts+=['diting_backlight=1']
+ if report['settings'].get('XNU_DITING_POWER')=='1':opts+=['diting_usb=1','diting_usb_mux=1','diting_usb_iphone=1']
  # PE_parse_boot_argn can select the first duplicate. Apply command-line
  # overrides before packaging so there is exactly one value per named key.
  for value in a.kernel_arg:
@@ -67,7 +74,8 @@ def main():
    key=item.split('=',1)[0]
    opts=[old for old in opts if old.split('=',1)[0]!=key]
    opts.append(item)
- cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(ROOT/'mac-build/darwinboot24/DarwinBoot24.efi'),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification']
+ cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(a.loader),'--memory-map',str(a.memory_map),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification']
+ if a.template is not None:cmd+=['--template',str(a.template)]
  auth=ROOT/'out/ipados18/system-volume-auth-blob.bin'
  if auth.is_file():
   cmd+=['--system-volume-auth-blob',str(auth)]
@@ -79,9 +87,11 @@ def main():
  (a.output_dir/'system-volume-auth-blob.json').write_text(json.dumps(auth_record,indent=2)+'\n')
  cmd+=['--kernel-arg='+v for v in opts]
  env=dict(os.environ)
- if report.get('schema_version')==2:
-  hardware=Path(report['hardware_dtb'])
+ if a.hardware_dtb is not None or report.get('schema_version')==2:
+  hardware=a.hardware_dtb or Path(report['hardware_dtb'])
   if not hardware.is_file():raise RuntimeError('Compiled format2 hardware DTB required')
   env['DITING_HARDWARE_DTB']=str(hardware)
+  report['packaging_hardware_dtb']=str(hardware.resolve())
+  result.write_text(json.dumps(report,indent=2)+'\n')
  subprocess.run(cmd,check=True,env=env)
 if __name__=='__main__':main()

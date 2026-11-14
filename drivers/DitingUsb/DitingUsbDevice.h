@@ -334,7 +334,12 @@ static bool initialize() {
  if(muxEnabled){device[4]=0;device[8]=0xac;device[9]=5;device[10]=0xa8;device[11]=0x12;}
  bridgeStarted=mach_absolute_time();
  resetEndpoints();if(failed)return false;
- core.w(DWC3_DEVTEN,0xf);log.open(0x85200000,0x200000);
+ core.w(DWC3_DEVTEN,0xf);
+#if defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
+ // Mirror the kernel's configured reserved console, with the same Normal
+ // non-cacheable mapping as its writer. Never read another board's reserve.
+ log.open(XNU_DITING_RAMOOPS_BASE,0x200000,kIOMapWriteCombineCache);
+#endif
  // Diting uses an external PMIC/Type-C session detector. RUN_STOP without
  // the Qualcomm glue's VBUS override starts the core but never attaches.
  // Wait for a real PMIC cable report in the worker before asserting it.

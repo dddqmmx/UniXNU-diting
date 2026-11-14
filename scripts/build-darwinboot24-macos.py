@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--edk2', type=Path, default=diting_paths.mu_basecore())
     parser.add_argument('--package', type=Path, default=diting_paths.unixnu_package())
     parser.add_argument('--output-dir', type=Path, default=diting_paths.work_root() / 'build/Diting-DarwinBoot24')
+    parser.add_argument('--artifact-dir', type=Path, help='directory for the loader and build receipt')
     parser.add_argument('--llvm', type=Path, default=diting_paths.llvm_toolchain())
     args = parser.parse_args()
     if args.llvm is None:
@@ -55,7 +56,7 @@ def main():
         print('\n'.join(log.read_text(errors='replace').splitlines()[-35:]))
         raise SystemExit(result.returncode)
     binary = workspace / 'build/DarwinBoot/RELEASE_CLANGPDB/AARCH64/DarwinBoot24.efi'
-    artifact = DEVICE / 'mac-build/darwinboot24'
+    artifact = args.artifact_dir.resolve() if args.artifact_dir else DEVICE / 'mac-build/darwinboot24'
     artifact.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(binary, artifact / binary.name)
     shutil.copyfile(log, artifact / 'build.log')

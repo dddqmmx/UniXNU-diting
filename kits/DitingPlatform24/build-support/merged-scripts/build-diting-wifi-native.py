@@ -15,6 +15,9 @@ def main():
  p.add_argument('--tree',type=Path,required=True)
  p.add_argument('--ath11k',type=Path)
  p.add_argument('--firmware',type=Path,default=input_path('wifi_firmware'))
+ p.add_argument('--firmware-source',choices=('recovery','local'),
+                default=os.environ.get('DITING_WIFI_FIRMWARE_SOURCE','recovery'),
+                help='local accepts explicitly supplied firmware without an active-slot recovery capture')
  a=p.parse_args();out=a.tree/'build/diting-wifi';out.mkdir(parents=True,exist_ok=True)
  if a.ath11k is None:a.ath11k=a.tree/'build/diting-ath11k/libDitingAth11k.a'
  shared=input_path('wifi_shared')
@@ -26,7 +29,7 @@ def main():
   spec=importlib.util.spec_from_file_location('diting_fdt',ROOT/'scripts/prepare-diting-wifi.py')
   fdt=importlib.util.module_from_spec(spec);spec.loader.exec_module(fdt)
   nodes=fdt.fdt_nodes(Path(hardware).read_bytes())
-  host=next(v for v in nodes.values() if v.get('compatible')==b'qcom,pci-msm\0')
+  host=nodes[profile['source']['pcie']]
   phy=fdt.cells(host,'qcom,phy-sequence')
   if len(phy)%3:raise RuntimeError('Malformed selected Diting PHY sequence')
   profile['pcie']['phy_sequence']=[phy[i:i+3] for i in range(0,len(phy),3)]
@@ -40,14 +43,11 @@ def main():
   for key,pin in (('wlan-enable-gpios',80),('reset-gpios',94),('clkreq-gpios',95),('wake-gpios',96),('xo-clk-gpios',204)):
    if fdt.cells(host,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Diting pin mapping: '+key)
  header='struct DitingWifiPhyEntry {unsigned off,value,delay;};\nstatic constexpr DitingWifiPhyEntry kDitingWifiPhy[]={\n'+''.join('{%d,%d,%d},\n'%tuple(e) for e in profile['pcie']['phy_sequence'])+'};\n'
- header+='struct DitingWifiRail {const char *name;unsigned mv,maxMv,ppid,type,subtype;};\nstatic constexpr DitingWifiRail kDitingWifiRails[]={\n'
- for e in profile['rails']:
-  physical=e.get('physical',{})
-  ppid=(physical.get('spmi_slave',0)<<8)|physical.get('peripheral',0)
-  header+='{%s,%d,%d,%d,%d,%d},\n'%(json.dumps(e['resource']),(e['request'][0]+999)//1000,e['request'][1]//1000,ppid,physical.get('type',0),physical.get('subtype',0))
- for e in profile['pcie']['analogue_rails']:
-  header+='{%s,%d,%d,0,0,0},\n'%(json.dumps(e['resource']),(e['microvolts']+999)//1000,e['microvolts']//1000)
- header+='};\n'
+ if not hardware:raise RuntimeError('Select DITING_LIVE_DTB for the QCA6490 power contract')
+ from diting_wifi_power_contract import select_power_inputs, power_header
+ power=select_power_inputs(profile,nodes)
+ header+=power_header(power)
+ (out/'power-contract.json').write_text(json.dumps(power,indent=2)+'\n')
  domain=profile['pcie']['power_domain']
  if (domain['control'],domain['collapse_vote'],domain['collapse_bit'])!=(0x17b004,0x162128,0):raise RuntimeError('Diting PCIe0 power domain required')
  header+='static constexpr unsigned kDitingPcieCollapseVote=%du,kDitingPcieCollapseMask=%du;\n'%(domain['collapse_vote']-0x100000,1<<domain['collapse_bit'])
@@ -70,16 +70,22 @@ def main():
  provenance_path=a.firmware.parent/'local-inputs.json'
  provenance=json.loads(provenance_path.read_text())
  source=provenance.get('source',{})
- if (source.get('product','').lower()!='diting' or source.get('capture')!='REC read-only active modem'
+ if Path(provenance['firmware_directory']).resolve()!=a.firmware.resolve():
+  raise RuntimeError('Firmware provenance directory does not match the selected input')
+ if a.firmware_source=='local':
+  if source.get('capture')!='external local directory':
+   raise RuntimeError('Local firmware mode requires external local directory provenance')
+ elif (source.get('product','').lower()!='diting' or source.get('capture')!='REC read-only active modem'
      or source.get('slot') not in ('_a','_b')
      or source.get('partition')!='/dev/block/by-name/modem'+source['slot']
-     or Path(provenance['firmware_directory']).resolve()!=a.firmware.resolve()):
+     ):
   raise RuntimeError('Capture actual active-slot Diting firmware with prepare-diting-wifi.py first')
  # Embed radio payloads and board data only, never capture metadata/debug databases.
  fw=sorted(f for f in a.firmware.iterdir() if f.is_file() and
            (f.name in ('amss.bin','amss20.bin','m3.bin','regdb.bin') or
             re.fullmatch(r'bdwlan(?:g|[0-9a-f]{2})?\.(?:elf|e[0-9a-f]{2})',f.name)))
  if not all((a.firmware/n).is_file() for n in ('amss.bin','amss20.bin','m3.bin','regdb.bin')):raise RuntimeError('Actual Diting modem firmware required')
+ if not any(f.name.startswith('bdwlan') and f.stat().st_size for f in fw):raise RuntimeError('QCA6490 board data required')
  entries=[];at=(8+len(fw)*40+4095)&~4095
  for f in fw:
   name=f.name.encode();size=f.stat().st_size
@@ -130,6 +136,6 @@ def main():
  obj=out/'DitingWifiFirmware.o';subprocess.run(['xcrun','clang','-target','arm64-apple-ios18.0','-c',str(asm),'-o',str(obj)],env=env,check=True);objects.append(obj)
  archive=out/'libDitingWifiNative.a';archive.unlink(missing_ok=True)
  subprocess.run(['xcrun','libtool','-static','-o',str(archive),str(a.ath11k),*map(str,objects)],env=env,check=True)
- (out/'build-report.json').write_text(json.dumps(dict(board='Diting SM8475 QCA6490',guest='22H374',backend='Linux v7.0.14 ath11k',archive=str(archive),firmware_from_REC=str(a.firmware),firmware_files=len(entries),firmware_bytes=pack.stat().st_size,image_verification='skipped by request',runtime_observed=False),indent=2)+'\n')
+ (out/'build-report.json').write_text(json.dumps(dict(board='Diting SM8475 QCA6490',guest='22H374',backend='Linux v7.0.14 ath11k',archive=str(archive),firmware_directory=str(a.firmware),firmware_source=source,firmware_mode=a.firmware_source,firmware_files=len(entries),firmware_bytes=pack.stat().st_size,image_verification='skipped by request',runtime_observed=False),indent=2)+'\n')
  print(archive)
 if __name__=='__main__':main()

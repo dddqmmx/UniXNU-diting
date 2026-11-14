@@ -1,0 +1,33 @@
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1097,6 +1097,11 @@ IORamDiskBSDRoot(void)
+ 	return false;
+ }
+ 
++#if defined(DITING)
++extern "C" uint64_t diting_platform_startup_diagnostic(void)
++    __attribute__((weak_import));
++#endif
++
+ void
+ IOSecureBSDRoot(const char * rootName)
+ {
+@@ -1109,6 +1114,17 @@ IOSecureBSDRoot(const char * rootName)
+ 	assert(matching);
+ 	pe = (IOPlatformExpert *) IOService::waitForMatchingService(matching, 30ULL * kSecondScale);
+ 	matching->release();
++#if defined(DITING)
++	/* Preserve the fatal missing-platform invariant, with the native driver's
++	 * actual startup progress. No allocation, registry walk or hardware read. */
++	if (!pe && diting_platform_startup_diagnostic) {
++		uint64_t state = diting_platform_startup_diagnostic();
++		panic("IOSecureBSDRoot: missing platform expert; platform=%u cpu=%u registered=%u gic=%u error=%d",
++		    (unsigned)(state & 255), (unsigned)((state >> 8) & 255),
++		    (unsigned)((state >> 16) & 255), (unsigned)((state >> 24) & 255),
++		    (int32_t)(state >> 32));
++	}
++#endif
+ 	assert(pe);
+ 	// Returns kIOReturnNotPrivileged is the root device is not secure.
+ 	// Returns kIOReturnUnsupported if "SecureRootName" is not implemented.

@@ -108,7 +108,7 @@ def describe(data, pci):
     gpio = {name: cells(wlan, name)[1] for name in
             ('wlan-en-gpio', 'qcom,bt-en-gpio', 'qcom,sw-ctrl-gpio', 'qcom,xo-clk-gpio')}
     gpio.update(perst=cells(host, 'perst-gpio')[1], wake=cells(host, 'wake-gpio')[1])
-    return dict(format='diting-qca6490-board-v1', board='diting', soc='SM8475', pci=pci,
+    profile = dict(format='diting-qca6490-board-v1', board='diting', soc='SM8475', pci=pci,
         radio='QCA6490', driver_family='ath11k', transport='PCIe/MHI/QRTR',
         source=dict(wlan=wlan_path, pcie=host_path, input='REC /sys/firmware/fdt and PCI sysfs'),
         pcie=dict(index=rc, regions=regions, gpio=gpio, analogue_rails=analogue,
@@ -137,6 +137,9 @@ def describe(data, pci):
                       board_data='select from actual QMI chip/board ID; no default variant'),
         readiness=dict(board_inputs=True, ath11k_backend=False, darwin24_apple80211=False,
                        firmware_boot_observed=False, scan_observed=False, link_observed=False))
+    from diting_wifi_power_contract import select_power_inputs
+    profile['power_sequence']=select_power_inputs(profile,nodes)
+    return profile
 
 
 def main():

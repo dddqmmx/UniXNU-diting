@@ -13,9 +13,11 @@ import shutil
 import struct
 import subprocess
 import sys
+import tomllib
 import zlib
 
 from diting_adt_contract import audit_adt
+from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE = Path(__file__).resolve().parents[1]
@@ -25,7 +27,10 @@ import diting_paths
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=1)
+    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=8)
+    parser.add_argument('--memory-map', type=Path, default=DEFAULT_MEMORY_MAP)
+    parser.add_argument('--dram-size', type=lambda value: int(value, 0), default=None,
+                        help='nominal capacity; defaults to the selected RAM profile')
     parser.add_argument('--kernel', type=Path, default=DEVICE / 'out/ipados18/kernel/mach.development.diting')
     parser.add_argument('--result', type=Path, default=DEVICE / 'out/ipados18/kernel/DITING_BUILD_RESULT.json')
     parser.add_argument('--loader', type=Path, default=DEVICE / 'mac-build/darwinboot24/DarwinBoot24.efi')
@@ -37,6 +42,10 @@ def main():
     parser.add_argument('--kernel-arg', action='append', default=[])
     parser.add_argument('--verbose-console', action='store_true',
                         help='opt in to -v screen text; default keeps the graphical boot path')
+    parser.add_argument('--boot-timeout', type=int, default=3,
+                        help='menu countdown in seconds; negative waits for input')
+    parser.add_argument('--tools', action=argparse.BooleanOptionalAction, default=None,
+                        help='include firmware log tools; defaults to board.toml [payload] tools')
     parser.add_argument('--ufs', '--ufs-probe', dest='ufs_probe', action='store_true')
     parser.add_argument('--root-match-volume-uuid', default=None)
     parser.add_argument('--development-debug', action='store_true')
@@ -47,8 +56,16 @@ def main():
     parser.add_argument('--packed-data-ramdisk', action='store_true',
                         help='publish the supplied Data seed as PackedRAMDisk')
     parser.add_argument('--skip-image-verification', action='store_true',
-                        help='skip image hashes and the single-core ADT audit; the Android boot container is still checked')
+                        help='skip image hashes and the output ADT audit; the Android boot container is still checked')
     args = parser.parse_args()
+    board = tomllib.loads((DEVICE / 'board.toml').read_text())
+    tools_enabled = (bool(board.get('payload', {}).get('tools', False))
+                     if args.tools is None else args.tools)
+    memory, _, _ = load_memory_map(args.memory_map, os.environ.get('DITING_HARDWARE_DTB'))
+    if args.dram_size is None:
+        args.dram_size = memory['physical_bytes']
+    if args.dram_size != memory['physical_bytes']:
+        parser.error('--dram-size differs from the selected RAM profile')
     if not 0x10000000 <= args.window_size <= 0x200000000 or args.window_size % 0x200000:
         parser.error('--window-size must be 256 MiB..8 GiB, aligned to 2 MiB')
     if args.packed_data_ramdisk != (args.data_ramdisk is not None):
@@ -119,6 +136,12 @@ def main():
     values = [v for value in args.kernel_arg for v in value.split() if v != '-v']
     boot_args = ('-v ' if args.verbose_console else '') + f'keepsyms=1 cpus={args.cpus}'
     boot_args += ''.join(' ' + value for value in values)
+    try:
+        command_bytes = len(boot_args.encode('ascii'))
+    except UnicodeEncodeError:
+        parser.error('DarwinBoot24 kernel arguments must be ASCII')
+    if command_bytes > 1023:
+        parser.error(f'kernel arguments are {command_bytes} bytes; DarwinBoot24 permits 1023')
     boot_manifest = json.dumps({
         'format': 'pong-development-boot-manifest-v1',
         'apple_personalization': False,
@@ -127,7 +150,7 @@ def main():
         'system_volume_auth_blob_sha256': hashlib.sha256(auth_blob).hexdigest() if auth_blob is not None and not args.skip_image_verification else None,
         'kernel_sha384': hashlib.sha384(kernel).hexdigest() if not args.skip_image_verification else None,
         'loader_sha384': hashlib.sha384((payload / 'DarwinBoot24.efi').read_bytes()).hexdigest() if not args.skip_image_verification else None,
-        'board': 'Nothing Phone (2) / Diting / SM8475',
+        'board': 'Redmi K50 Ultra / Diting / SM8475',
         'boot_args': boot_args,
         'root_volume_uuid': args.root_match_volume_uuid,
         'requested_memory_window_bytes': args.window_size,
@@ -136,7 +159,8 @@ def main():
     manifest_path.write_bytes(boot_manifest)
     subprocess.run([sys.executable, str(DEVICE / 'scripts/make-diting-adt-ipados18.py'),
         '--cpus', str(args.cpus),
-        '--dram-size', '0x300000000', '--window-size', hex(args.window_size),
+        '--dram-size', hex(args.dram_size), '--memory-map', str(args.memory_map),
+        '--window-size', hex(args.window_size),
         '--output', str(payload / 'kernel.macho.adt'),
         '--boot-manifest', str(manifest_path),
         *(['--skip-image-verification'] if args.skip_image_verification else []),
@@ -148,14 +172,18 @@ def main():
         *(['--root-match-volume-uuid', args.root_match_volume_uuid]
           if args.root_match_volume_uuid else [])], check=True)
     adt_audit = ({'status': 'skipped by request'} if args.skip_image_verification else
-                 audit_adt((payload / 'kernel.macho.adt').read_bytes(), boot_manifest=boot_manifest))
+                 audit_adt((payload / 'kernel.macho.adt').read_bytes(), boot_manifest=boot_manifest,
+                           expected_cpus=args.cpus))
     (out / 'adt-audit.json').write_text(json.dumps(adt_audit, indent=2) + '\n')
     initrd_line = 'initrd = "Payloads/scratch-data.img"\n' if data_ramdisk else ''
-    (payload / 'unixnu.toml').write_text('version = 1\n[boot]\ntimeout = 3\n'
+    tools_entry = ('\n[[entry]]\nid = "tools"\ntitle = "Tools"\n'
+                   'type = "action"\naction = "tools"\n' if tools_enabled else '')
+    (payload / 'unixnu.toml').write_text('version = 1\n[boot]\n'
+        f'timeout = {args.boot_timeout}\n'
         'default = "diting-xnu"\n[kits]\nautoload = false\n[[driver]]\n'
         'path = "DarwinBoot24.efi"\nconnect = false\n[[entry]]\n'
-        'id = "diting-xnu"\ntitle = "Diting iOS 18 - iPhone 16 Pro"\n'
-        'type = "xnu"\npath = "kernel.macho"\n' + initrd_line + 'args = "' + boot_args + '"\n')
+        'id = "diting-xnu"\ntitle = "Diting iPadOS 18"\n'
+        'type = "xnu"\npath = "kernel.macho"\n' + initrd_line + 'args = "' + boot_args + '"\n' + tools_entry)
     fat = out / 'payload-fat.img'
     env = dict(os.environ, MTOOLS_SKIP_CHECK='1', TZ='UTC')
     subprocess.run(['mformat', '-C', '-T', str(args.fat_mib * 2048), '-v', 'DITINGXNU18', '-i', str(fat), '::'], check=True, env=env)

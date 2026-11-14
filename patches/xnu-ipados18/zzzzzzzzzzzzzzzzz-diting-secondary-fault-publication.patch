@@ -1,0 +1,514 @@
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -47,6 +47,9 @@
+ #include <pexpert/device_tree.h>
+ #include <pexpert/arm64/board_config.h>
+ #include <vm/pmap.h>
++#if defined(DITING)
++#include <arm64/diting_secondary_diag.h>
++#endif
+ 
+ #if defined(GENERIC_PSCI_SMP)
+ 
+@@ -83,6 +86,71 @@
+     __attribute__((aligned(64)));
+ _Static_assert(sizeof(struct diting_secondary_reset_record) == 64, "one cache line");
+ 
++struct diting_secondary_fault_record diting_secondary_fault[8]
++    __attribute__((aligned(64)));
++_Static_assert(sizeof(struct diting_secondary_fault_record) == DITING_SECONDARY_FAULT_BYTES,
++    "stack-free exception record stride");
++#define DITING_FAULT_OFFSET(field, offset) \
++    _Static_assert(__builtin_offsetof(struct diting_secondary_fault_record, field) == offset, \
++    "stack-free exception record offset: " #field)
++DITING_FAULT_OFFSET(valid, DITING_FAULT_VALID);
++DITING_FAULT_OFFSET(mpidr, DITING_FAULT_MPIDR);
++DITING_FAULT_OFFSET(vector, DITING_FAULT_VECTOR);
++DITING_FAULT_OFFSET(esr, DITING_FAULT_ESR);
++DITING_FAULT_OFFSET(elr, DITING_FAULT_ELR);
++DITING_FAULT_OFFSET(far, DITING_FAULT_FAR);
++DITING_FAULT_OFFSET(lr, DITING_FAULT_LR);
++DITING_FAULT_OFFSET(sp, DITING_FAULT_SP);
++DITING_FAULT_OFFSET(spsr, DITING_FAULT_SPSR);
++DITING_FAULT_OFFSET(daif, DITING_FAULT_DAIF);
++DITING_FAULT_OFFSET(cpacr, DITING_FAULT_CPACR);
++DITING_FAULT_OFFSET(sctlr, DITING_FAULT_SCTLR);
++DITING_FAULT_OFFSET(vbar, DITING_FAULT_VBAR);
++DITING_FAULT_OFFSET(ttbr0, DITING_FAULT_TTBR0);
++DITING_FAULT_OFFSET(ttbr1, DITING_FAULT_TTBR1);
++DITING_FAULT_OFFSET(tcr, DITING_FAULT_TCR);
++DITING_FAULT_OFFSET(mair, DITING_FAULT_MAIR);
++DITING_FAULT_OFFSET(current_el, DITING_FAULT_CURRENT_EL);
++DITING_FAULT_OFFSET(sp_el0, DITING_FAULT_SP_EL0);
++DITING_FAULT_OFFSET(sp_el1, DITING_FAULT_SP_EL1);
++DITING_FAULT_OFFSET(tpidr_el1, DITING_FAULT_TPIDR_EL1);
++DITING_FAULT_OFFSET(tpidr_el0, DITING_FAULT_TPIDR_EL0);
++DITING_FAULT_OFFSET(counter, DITING_FAULT_COUNTER);
++DITING_FAULT_OFFSET(midr, DITING_FAULT_MIDR);
++DITING_FAULT_OFFSET(off_return, DITING_FAULT_OFF_RETURN);
++#undef DITING_FAULT_OFFSET
++
++#if defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
++extern void diting_ramoops_diagnostic_write(const char *, int);
++extern int vsnprintf(char *, size_t, const char *, va_list);
++void diting_secondary_panic_snapshot(const char *, va_list *, unsigned long);
++
++/* The first real panic is saved before stackshot/IPI/debugger work can fail.
++ * Keep its arguments intact for the normal panic path. No allocation, CPU
++ * calls, registry locks, or hardware probes belong in this hook. */
++void
++diting_secondary_panic_snapshot(const char *format, va_list *args, unsigned long caller)
++{
++	static char text[2048];
++	static uint32_t busy;
++	uint32_t expected = 0;
++	if (!format || !args || !os_atomic_cmpxchg(&busy, expected, 1, acquire)) {
++		return;
++	}
++	int prefix = snprintf(text, sizeof(text), "DITING panic before debugger caller=%#lx: ", caller);
++	if (prefix > 0 && (unsigned)prefix < sizeof(text) - 2) {
++		va_list copy;
++		va_copy(copy, *args);
++		(void)vsnprintf(text + prefix, sizeof(text) - (unsigned)prefix - 1, format, copy);
++		va_end(copy);
++		unsigned length = (unsigned)strnlen(text, sizeof(text) - 2);
++		text[length++] = '\n';
++		text[length] = '\0';
++		diting_ramoops_diagnostic_write(text, (int)length);
++	}
++}
++#endif
++
+ /* Called before current_thread is installed: index from the actual MPIDR,
+  * not cpu_number(), and use no locks or other CPU-local state. */
+ void diting_secondary_kernel_step(uint64_t step);
+@@ -113,7 +181,12 @@
+ #define DITING_CPU_START_STEP(step) ((void)0)
+ #endif
+ 
+-static uint32_t psci_smp_cpu_stage[MAX_CPUS];   /* PSCI_SMP_CPU_*, by cpu number */
++/* CPU_OFF publishes while caches are still enabled. Each stage has its own
++ * line, so the boot CPU's cache maintenance never writes another CPU's stage. */
++static struct {
++	uint32_t value, reserved[15];
++} psci_smp_cpu_stage[MAX_CPUS] __attribute__((aligned(64)));
++_Static_assert(sizeof(psci_smp_cpu_stage[0]) == 64, "one stage per cache line");
+ static uint32_t psci_smp_started;               /* a bit per core that CPU_ON was granted for */
+ 
+ static int64_t
+@@ -163,10 +236,13 @@
+ void
+ psci_smp_cpu_reached(uint32_t stage)
+ {
+-	os_atomic_store(&psci_smp_cpu_stage[cpu_number()], stage, release);
+-}
+-
+-/* ... all the way: from GenericARMCPU::initCPU(), where the scheduler takes it. */
++	unsigned cpu = cpu_number();
++	os_atomic_store(&psci_smp_cpu_stage[cpu].value, stage, release);
++	CleanPoC_DcacheRegion((vm_offset_t)&psci_smp_cpu_stage[cpu],
++	    sizeof(psci_smp_cpu_stage[cpu]));
++}
++
++/* Local initialization is complete. The processor_boot wait remains separate. */
+ void
+ psci_smp_cpu_running(void)
+ {
+@@ -218,6 +294,13 @@
+ kern_return_t
+ psci_smp_start_cpu(int cpu)
+ {
++	if (cpu < 0 || cpu > ml_get_max_cpu_number() || cpu_datap(cpu) == NULL) {
++#if defined(DITING)
++		panic("Diting PSCI start has no registered CPU: %d", cpu);
++#else
++		return KERN_INVALID_ARGUMENT;
++#endif
++	}
+ 	cpu_data_t *cdp = cpu_datap(cpu);
+ 	uint32_t phys_id = cdp->cpu_phys_id, stage;
+ 	uint64_t entry = ml_static_vtop((vm_offset_t)&LowResetVectorBase);
+@@ -239,6 +322,7 @@
+ #if defined(DITING)
+ 	/* Clear only this core's record. No other core shares its cache line. */
+ 	bzero(&diting_secondary_reset[cpu], sizeof(diting_secondary_reset[cpu]));
++	bzero(&diting_secondary_fault[cpu], sizeof(diting_secondary_fault[cpu]));
+ #endif
+ 	psci_smp_clean_segment("__TEXT");
+ 	psci_smp_clean_segment("__DATA_CONST");
+@@ -255,12 +339,14 @@
+ #endif
+ 	__builtin_arm_dsb(DSB_SY);
+ 
+-	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
++	os_atomic_store(&psci_smp_cpu_stage[cpu].value, PSCI_SMP_CPU_ASKED, release);
++	CleanPoC_DcacheRegion((vm_offset_t)&psci_smp_cpu_stage[cpu],
++	    sizeof(psci_smp_cpu_stage[cpu]));
+ 	DITING_CPU_START_STEP(45);
+ 	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
+ 	DITING_CPU_START_STEP(46);
+ 	if (status != 0) {
+-		os_atomic_store(&psci_smp_cpu_stage[cpu], 0, release);
++		os_atomic_store(&psci_smp_cpu_stage[cpu].value, 0, release);
+ 		printf("psci: cpu %d (MPIDR 0x%x) was not started: the firmware answers %lld (%s)\n",
+ 		    cpu, phys_id, status, psci_error(status));
+ #if defined(DITING)
+@@ -277,14 +363,22 @@
+ 	DITING_CPU_START_STEP(47);
+ 	clock_interval_to_deadline(PSCI_SMP_START_SECONDS, NSEC_PER_SEC, &deadline);
+ 	do {
+-		stage = os_atomic_load(&psci_smp_cpu_stage[cpu], acquire);
+-		if (stage >= PSCI_SMP_CPU_RUNNING) {
++		stage = os_atomic_load(&psci_smp_cpu_stage[cpu].value, acquire);
++		/* OFF is numerically greater than RUNNING, but is never success. */
++		if (stage == PSCI_SMP_CPU_RUNNING) {
+ 			DITING_CPU_START_STEP(48);
+ 			return KERN_SUCCESS;
+ 		}
+ 		/* memory, not this processor's copy of it */
++#if defined(DITING)
++		FlushPoC_DcacheRegion((vm_offset_t)&diting_secondary_fault[cpu],
++		    sizeof(diting_secondary_fault[cpu]));
++		if (os_atomic_load(&diting_secondary_fault[cpu].valid, acquire) == 1 ||
++		    stage == PSCI_SMP_CPU_OFF) {
++#else
+ 		FlushPoC_DcacheRegion((vm_offset_t)&psci_smp_start_fault, sizeof(psci_smp_start_fault));
+-		if (psci_smp_start_fault.valid != 0) {
++		if (psci_smp_start_fault.valid != 0 || stage == PSCI_SMP_CPU_OFF) {
++#endif
+ 			break;
+ 		}
+ 		delay_for_interval(1, NSEC_PER_MSEC);
+@@ -297,11 +391,34 @@
+ 	 * here, before panic; panic itself takes no hardware/registry reads. */
+ 	FlushPoC_DcacheRegion((vm_offset_t)&diting_secondary_reset[cpu],
+ 	    sizeof(diting_secondary_reset[cpu]));
+-	if (psci_smp_start_fault.valid != 0) {
+-		struct psci_smp_start_fault *f = &psci_smp_start_fault;
+-		panic("Diting CPU%d early exception: reset=%llu kernel=%u MPIDR=%#llx ESR=%#llx ELR=%#llx FAR=%#llx LR=%#llx",
++	struct diting_secondary_fault_record *f = &diting_secondary_fault[cpu];
++	uint64_t valid = os_atomic_load(&f->valid, acquire);
++	if (valid == 1 && (f->mpidr & 0xffffU) == phys_id) {
++		char context[1536];
++		int length = snprintf(context, sizeof(context),
++		    "DITING CPU%d exception context: vector=%llu SPSR=%#llx DAIF=%#llx "
++		    "EL=%#llx SP=%#llx SP0=%#llx SP1=%#llx TPIDR=%#llx "
++		    "CPACR=%#llx SCTLR=%#llx VBAR=%#llx TTBR0=%#llx TTBR1=%#llx "
++		    "TCR=%#llx MAIR=%#llx MIDR=%#llx CPU_OFF-return=%#llx\n",
++		    cpu, f->vector, f->spsr, f->daif, f->current_el, f->sp,
++		    f->sp_el0, f->sp_el1, f->tpidr_el1, f->cpacr, f->sctlr,
++		    f->vbar, f->ttbr0, f->ttbr1, f->tcr, f->mair, f->midr, f->off_return);
++#if defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
++		if (length > 0) {
++			diting_ramoops_diagnostic_write(context,
++			    length < (int)sizeof(context) ? length : (int)sizeof(context) - 1);
++		}
++#else
++		(void)length;
++#endif
++		printf("%s", context);
++		panic("Diting CPU%d early exception: reset=%llu kernel=%u MPIDR=%#llx ESR=%#llx ELR=%#llx FAR=%#llx LR=%#llx vector=%llu SPSR=%#llx",
+ 		    cpu, diting_secondary_reset[cpu].step, stage,
+-		    f->mpidr, f->esr, f->elr, f->far, f->lr);
++		    f->mpidr, f->esr, f->elr, f->far, f->lr, f->vector, f->spsr);
++	}
++	if (valid != 0) {
++		panic("Diting CPU%d incomplete/mismatched early exception: valid=%llu MPIDR=%#llx expected=%#x reset=%llu kernel=%u",
++		    cpu, valid, f->mpidr, phys_id, diting_secondary_reset[cpu].step, stage);
+ 	}
+ 	panic("Diting CPU%d start timeout: reset=%llu kernel=%u MPIDR=%#llx handler=%#llx TTBR1=%#llx entry=%#llx tables=%u waited=%ds",
+ 	    cpu, diting_secondary_reset[cpu].step, stage,
+@@ -319,7 +436,8 @@
+ 	} else {
+ 		printf("psci: cpu %d (MPIDR 0x%x) was started %d seconds ago and has not joined: %s\n",
+ 		    cpu, phys_id, PSCI_SMP_START_SECONDS,
+-		    stage >= PSCI_SMP_CPU_IN_KERNEL ? "it got as far as arm_init_cpu()" : "no sign of it since the firmware took the request");
++		    stage == PSCI_SMP_CPU_OFF ? "it switched itself off" :
++		    stage == PSCI_SMP_CPU_IN_KERNEL ? "it got as far as arm_init_cpu()" : "no sign of it since the firmware took the request");
+ 	}
+ 	return KERN_FAILURE;
+ }
+@@ -329,7 +447,7 @@
+ psci_smp_cpu_off(void)
+ {
+     __builtin_arm_wsr("DAIFSet", DAIFSC_ALL);
+-    os_atomic_store(&psci_smp_cpu_stage[cpu_number()], PSCI_SMP_CPU_OFF, release);
++    psci_smp_cpu_reached(PSCI_SMP_CPU_OFF);
+     __builtin_arm_dsb(DSB_SY);
+     (void)psci_call(PSCI_CPU_OFF, 0, 0, 0);
+     panic("PSCI: CPU_OFF returned on cpu %d", cpu_number());
+--- a/osfmk/arm64/psci_smp.h
++++ b/osfmk/arm64/psci_smp.h
+@@ -12,7 +12,7 @@
+ /* How far a processor other than the boot processor has come (psci_smp_cpu_reached()). */
+ #define PSCI_SMP_CPU_ASKED      1       /* the firmware has agreed to start it */
+ #define PSCI_SMP_CPU_IN_KERNEL  2       /* it runs C code on the kernel's page tables (arm_init_cpu()) */
+-#define PSCI_SMP_CPU_RUNNING    3       /* it has joined the scheduler (psci_smp_cpu_running()) */
++#define PSCI_SMP_CPU_RUNNING    3       /* local initCPU completed; processor_boot waits for the scheduler */
+ #define PSCI_SMP_CPU_OFF        4       /* it has switched itself off, or is about to */
+ 
+ extern void             psci_smp_init(void);
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -37,6 +37,9 @@
+ #include <arm64/tunables/tunables.s>
+ #endif
+ #include <arm64/exception_asm.h>
++#if defined(DITING)
++#include <arm64/diting_secondary_diag.h>
++#endif
+ 
+ #if __ARM_KERNEL_PROTECT__
+ #include <arm/pmap.h>
+@@ -349,45 +352,113 @@
+  */
+ 	.align	11
+ 	.globl EXT(LowSecondaryExceptionVectorBase)
++.macro SECONDARY_EARLY_VECTOR number
++	.align	7
++#if defined(DITING)
++	mov		x8, #\number
++#endif
++	b		Lsecondary_early_exception
++.endmacro
+ LEXT(LowSecondaryExceptionVectorBase)
+ 	/* EL1 SP 0 */
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
++	SECONDARY_EARLY_VECTOR 0
++	SECONDARY_EARLY_VECTOR 1
++	SECONDARY_EARLY_VECTOR 2
++	SECONDARY_EARLY_VECTOR 3
+ 	/* EL1 SP1 */
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
++	SECONDARY_EARLY_VECTOR 4
++	SECONDARY_EARLY_VECTOR 5
++	SECONDARY_EARLY_VECTOR 6
++	SECONDARY_EARLY_VECTOR 7
+ 	/* EL0 64 */
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
++	SECONDARY_EARLY_VECTOR 8
++	SECONDARY_EARLY_VECTOR 9
++	SECONDARY_EARLY_VECTOR 10
++	SECONDARY_EARLY_VECTOR 11
+ 	/* EL0 32 */
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
+-	.align	7
+-	b		Lsecondary_early_exception
++	SECONDARY_EARLY_VECTOR 12
++	SECONDARY_EARLY_VECTOR 13
++	SECONDARY_EARLY_VECTOR 14
++	SECONDARY_EARLY_VECTOR 15
+ 
+ 	.align	3
+ Lsecondary_early_exception:
++#if defined(DITING)
++	// Preserve the first fault; a nested capture must not replace its ESR/PC.
++	adrp	x9, EXT(diting_secondary_fault)@page
++	add		x9, x9, EXT(diting_secondary_fault)@pageoff
++	mrs		x10, MPIDR_EL1
++	ubfx	x11, x10, #8, #3
++	add		x9, x9, x11, lsl #DITING_SECONDARY_FAULT_SHIFT
++	ldr		x11, [x9, #DITING_FAULT_VALID]
++	cbnz	x11, Lsecondary_cpu_off
++	mov		x11, #2
++	str		x11, [x9, #DITING_FAULT_VALID]
++	str		x10, [x9, #DITING_FAULT_MPIDR]
++	str		x8, [x9, #DITING_FAULT_VECTOR]
++	mrs		x10, ESR_EL1
++	str		x10, [x9, #DITING_FAULT_ESR]
++	mrs		x10, ELR_EL1
++	str		x10, [x9, #DITING_FAULT_ELR]
++	mrs		x10, FAR_EL1
++	str		x10, [x9, #DITING_FAULT_FAR]
++	str		lr, [x9, #DITING_FAULT_LR]
++	mov		x10, sp
++	str		x10, [x9, #DITING_FAULT_SP]
++	// Exception entry selects SP_EL1. MRS SP_EL1 would itself trap at EL1.
++	str		x10, [x9, #DITING_FAULT_SP_EL1]
++	mrs		x10, SP_EL0
++	str		x10, [x9, #DITING_FAULT_SP_EL0]
++	mrs		x10, SPSR_EL1
++	str		x10, [x9, #DITING_FAULT_SPSR]
++	mrs		x10, DAIF
++	str		x10, [x9, #DITING_FAULT_DAIF]
++	mrs		x10, CPACR_EL1
++	str		x10, [x9, #DITING_FAULT_CPACR]
++	mrs		x10, SCTLR_EL1
++	str		x10, [x9, #DITING_FAULT_SCTLR]
++	mrs		x10, VBAR_EL1
++	str		x10, [x9, #DITING_FAULT_VBAR]
++	mrs		x10, TTBR0_EL1
++	str		x10, [x9, #DITING_FAULT_TTBR0]
++	mrs		x10, TTBR1_EL1
++	str		x10, [x9, #DITING_FAULT_TTBR1]
++	mrs		x10, TCR_EL1
++	str		x10, [x9, #DITING_FAULT_TCR]
++	mrs		x10, MAIR_EL1
++	str		x10, [x9, #DITING_FAULT_MAIR]
++	mrs		x10, CurrentEL
++	str		x10, [x9, #DITING_FAULT_CURRENT_EL]
++	mrs		x10, TPIDR_EL1
++	str		x10, [x9, #DITING_FAULT_TPIDR_EL1]
++	mrs		x10, TPIDR_EL0
++	str		x10, [x9, #DITING_FAULT_TPIDR_EL0]
++	// Do not read a timer here: it may be the register that caused the trap.
++	str		xzr, [x9, #DITING_FAULT_COUNTER]
++	mrs		x10, MIDR_EL1
++	str		x10, [x9, #DITING_FAULT_MIDR]
++	mov		x10, #-1
++	str		x10, [x9, #DITING_FAULT_OFF_RETURN]
++	// Publish all four lines before the completion word. A cache-off core
++	// needs stores and DSB only; a cache-on core also cleans each line.
++	mrs		x11, SCTLR_EL1
++	tbz		x11, #2, Lditing_fault_payload_ready
++	mov		x10, x9
++	mov		x12, #(DITING_SECONDARY_FAULT_BYTES / 64)
++Lditing_fault_clean:
++	dc		cvac, x10
++	add		x10, x10, #64
++	subs	x12, x12, #1
++	b.ne	Lditing_fault_clean
++Lditing_fault_payload_ready:
++	dsb		sy
++	mov		x10, #1
++	str		x10, [x9, #DITING_FAULT_VALID]
++	tbz		x11, #2, Lditing_fault_committed
++	dc		cvac, x9
++Lditing_fault_committed:
++	dsb		sy
++#else
+ 	// struct psci_smp_start_fault: { valid, MPIDR, ESR, ELR, FAR, LR, SP }
+ 	adrp	x9, EXT(psci_smp_start_fault)@page
+ 	add		x9, x9, EXT(psci_smp_start_fault)@pageoff
+@@ -406,6 +477,8 @@
+ 	str		x10, [x9]
+ 	dc		cvac, x9
+ 	dsb		sy
++#endif
++Lsecondary_cpu_off:
+ 	// PSCI CPU_OFF, by the firmware's calling convention (psci_smp_hvc)
+ 	adrp	x9, EXT(psci_smp_hvc)@page
+ 	add		x9, x9, EXT(psci_smp_hvc)@pageoff
+@@ -418,8 +491,27 @@
+ 1:
+ 	hvc		#0
+ 2:
++#if defined(DITING)
++	// A returned CPU_OFF is a failure too. Firmware may clobber x9-x17.
++	adrp	x9, EXT(diting_secondary_fault)@page
++	add		x9, x9, EXT(diting_secondary_fault)@pageoff
++	mrs		x10, MPIDR_EL1
++	ubfx	x11, x10, #8, #3
++	add		x9, x9, x11, lsl #DITING_SECONDARY_FAULT_SHIFT
++	str		x0, [x9, #DITING_FAULT_OFF_RETURN]
++	mrs		x10, SCTLR_EL1
++	tbz		x10, #2, Lditing_off_return_ready
++	add		x9, x9, #DITING_FAULT_OFF_RETURN
++	dc		cvac, x9
++Lditing_off_return_ready:
++	dsb		sy
++Lditing_off_return_wait:
++	wfi
++	b		Lditing_off_return_wait
++#else
+ 	wfi											// it does not return; if it does, stay here
+ 	b		2b
++#endif
+ #endif /* defined(GENERIC_PSCI_SMP) */
+ 	.align 12, 0
+ 
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -124,6 +124,9 @@
+ #include <pexpert/pexpert.h> /* For gPanicBase */
+ #include <arm/caches_internal.h>
+ #include <arm/misc_protos.h>
++#if defined(DITING) && defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
++extern void diting_secondary_panic_snapshot(const char *, va_list *, unsigned long);
++#endif
+ extern volatile struct xnu_hw_shmem_dbg_command_info *hwsd_info;
+ #endif
+ 
+@@ -1228,6 +1231,10 @@
+ 		sync_internal();
+ 	}
+ 
++#if defined(DITING) && defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
++	diting_secondary_panic_snapshot(panic_format_str, panic_args, panic_caller);
++#endif
++
+ 	/* Turn off I/O tracing once we've panicked */
+ 	iotrace_disable();
+ 
+diff --git a/osfmk/arm64/diting_secondary_diag.h b/osfmk/arm64/diting_secondary_diag.h
+new file mode 100644
+--- /dev/null
++++ b/osfmk/arm64/diting_secondary_diag.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef _ARM64_DITING_SECONDARY_DIAG_H_
++#define _ARM64_DITING_SECONDARY_DIAG_H_
++
++/* Shared by stack-free start.s and C. One writer per SM8475 Affinity1. */
++#define DITING_SECONDARY_FAULT_SHIFT 8
++#define DITING_SECONDARY_FAULT_BYTES (1 << DITING_SECONDARY_FAULT_SHIFT)
++#define DITING_FAULT_VALID       0
++#define DITING_FAULT_MPIDR       8
++#define DITING_FAULT_VECTOR      16
++#define DITING_FAULT_ESR         24
++#define DITING_FAULT_ELR         32
++#define DITING_FAULT_FAR         40
++#define DITING_FAULT_LR          48
++#define DITING_FAULT_SP          56
++#define DITING_FAULT_SPSR        64
++#define DITING_FAULT_DAIF        72
++#define DITING_FAULT_CPACR       80
++#define DITING_FAULT_SCTLR       88
++#define DITING_FAULT_VBAR        96
++#define DITING_FAULT_TTBR0       104
++#define DITING_FAULT_TTBR1       112
++#define DITING_FAULT_TCR         120
++#define DITING_FAULT_MAIR        128
++#define DITING_FAULT_CURRENT_EL  136
++#define DITING_FAULT_SP_EL0      144
++#define DITING_FAULT_SP_EL1      152
++#define DITING_FAULT_TPIDR_EL1   160
++#define DITING_FAULT_TPIDR_EL0   168
++#define DITING_FAULT_COUNTER     176
++#define DITING_FAULT_MIDR        184
++#define DITING_FAULT_OFF_RETURN  192
++
++#if !defined(ASSEMBLER) && !defined(__ASSEMBLER__)
++struct diting_secondary_fault_record {
++	uint64_t valid, mpidr, vector, esr, elr, far, lr, sp;
++	uint64_t spsr, daif, cpacr, sctlr, vbar, ttbr0, ttbr1, tcr;
++	uint64_t mair, current_el, sp_el0, sp_el1, tpidr_el1, tpidr_el0;
++	uint64_t counter, midr, off_return, reserved[7];
++};
++#endif
++#endif

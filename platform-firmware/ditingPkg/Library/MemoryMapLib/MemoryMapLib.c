@@ -4,7 +4,8 @@ STATIC
 EFI_MEMORY_REGION_DESCRIPTOR
 gMemoryDescriptor[] = {
 
-  // ===== K60 (mondrian/SM8475) 运行时保留区 + UEFI 系统区（2026-10-27 实测生成）=====
+  // Diting SM8475: fixed reservations match the device's live tree.
+  // RAM banks below use the 8 GiB device captured in services181.
   // Name, Address, Length, HobOption, ResourceType, ResourceAttribute, MemoryType, ArmAttribute
 
   // DDR Regions —— K60 运行时保留区（实测）+ UEFI 系统区
@@ -76,9 +77,10 @@ gMemoryDescriptor[] = {
   // 开发候选：避开本机 Android 运行时记录的 0xD5C00000 之后保留区。
   // 启动链对这些区域的真实所有权尚未验证，不得用于设备启动。
   {"DXE Heap",           0xC7000000, 0x0EC00000, AddMem, SYS_MEM  , SYS_MEM_CAP, Conv   , WRITE_BACK_XN},
-  // 运行时 FDT 报告 0x900000000 起有 6 GiB 物理内存；此处只作主机构建候选。
-  // 真实 UEFI 内存图、动态保留区和分配行为必须在设备测试前核实。
-  {"XNU Candidate",      0x900000000, 0x140000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
+  // One actual 5 GiB bank, ending at 0x980000000. A 4 GiB bootstrap
+  // window cannot fit above 0x900000000 on this device. Never extend a
+  // conventional descriptor beyond the physical bank to make it fit.
+  {"XNU RAM",            0x840000000, 0x140000000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
 
   // Other Memory Regions
   {"IMEM Base",          0x14680000, 0x0002A000, NoHob , MMAP_IO  , INITIALIZED, Conv   , NS_DEVICE},

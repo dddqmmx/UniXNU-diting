@@ -70,6 +70,12 @@ def main():
 """ + needle
     if core.count(needle) != 1: raise RuntimeError('ath11k BDF request ABI differs')
     (gen / 'core.c').unlink(); (gen / 'core.c').write_text(core.replace(needle, replacement))
+    # Decode the vendor BDF PA flag and configure S3E only after the final
+    # real response. The public Linux checkout is never changed.
+    from diting_wifi_bdf import adapt_bdf
+    qmi_source,qmi_header=adapt_bdf((source/'qmi.c').read_text(),(source/'qmi.h').read_text())
+    for name,content in (('qmi.c',qmi_source),('qmi.h',qmi_header)):
+        (gen/name).unlink();(gen/name).write_text(content)
     mac = (shared / 'src/nw_mac80211.c').read_text()
     mac += r"""
 /* Linux ath11k still uses these mac80211 APIs; the shared station has one
@@ -118,7 +124,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
         '-nostdinc', '-isystem', str(shared / 'shim/libc'), '-isystem', resource,
         '-I', str(overlay), '-include', 'DitingCompat.h', '-I', str(shared / 'shim/include'),
         '-I', str(shared / 'include'), '-I', str(pinned), '-I', str(shared / 'src'),
-        '-I', str(gen), '-I', str(out), '-I', str(source.parent), '-DCONFIG_ATH11K_PCI=1',
+        '-I', str(ROOT/'drivers/DitingWifi'), '-I', str(gen), '-I', str(out), '-I', str(source.parent), '-DCONFIG_ATH11K_PCI=1',
         '-DLX_BOOT_SETTLE_MS=0']
     ath = 'core hal hal_tx hal_rx wmi mac reg htc qmi dp dp_tx dp_rx ce peer dbring hw pcic fw p2p mhi pci'.split()
     jobs = [(gen / (n + '.c'), out / ('ath11k_' + n + '.o'), []) for n in ath]
@@ -150,7 +156,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     nm = diting_paths.tool('llvm-nm', 'DITING_LLVM_NM', ('/opt/local/bin/llvm-nm-mp-18',))
     undefined = subprocess.check_output([nm, '-u', '-j', str(linked)], text=True).splitlines()
     (out / 'undefined-symbols.txt').write_text('\n'.join(undefined) + '\n')
-    allowed = {'_DitingWifiRandom','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
+    allowed = {'_diting_wifi_bdf_power_config','_DitingWifiRandom','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
     if set(undefined) - allowed: raise RuntimeError('unimplemented ath11k imports: ' + repr(set(undefined) - allowed))
     # Export only the documented board/station boundary. Linux shims have the
     # same C names as XNU helpers, so namespace every other defined symbol.

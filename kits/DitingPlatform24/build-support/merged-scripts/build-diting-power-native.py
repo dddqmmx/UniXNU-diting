@@ -9,6 +9,7 @@ from diting_native_inputs import build_env, input_path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 import diting_paths
+from diting_rpmh_contract import validate_live_dtb
 def late_init(obj, filename, symbol):
  raw=bytearray(obj.read_bytes());at=32;sym=None
  for _ in range(struct.unpack_from('<I',raw,16)[0]):
@@ -35,11 +36,16 @@ def main():
  p.add_argument('--resources-only',action='store_true',help='compile only DitingPlatformResources.cpp: the shared SMMU/power locks the UFS transport takes, without the audio firmware input')
  a=p.parse_args()
  out=a.tree/'build/diting-power';out.mkdir(parents=True,exist_ok=True)
+ validate_live_dtb(out/'rpmh-contract.json')
  framework=a.tree/'.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
  env=build_env()
  sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
  shared=input_path('sheng_source')/'package'
  flags=['-target','arm64-apple-ios18.0','-isysroot',sdk,'-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only','-fblocks','-O2','-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_DITING=1','-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),'-I'+str(ROOT/'drivers/DitingPower'),'-I'+str(out),'-I'+str(shared),'-Wno-deprecated-declarations']
+ if env.get('XNU_DITING_RAMOOPS_CONSOLE')=='1':
+  base=int(env['XNU_DITING_RAMOOPS_BASE'],0)
+  if not 0<base<2**64 or base%4096:raise RuntimeError('Invalid configured Diting ramoops base')
+  flags+=['-DXNU_DITING_RAMOOPS_CONSOLE=1','-DXNU_DITING_RAMOOPS_BASE='+hex(base)]
  if not a.resources_only:
   subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-diting-audio.py'),'--container',str(input_path('audio_container')),'--output',str(out/'DitingAmpProfiles.h')],check=True)
  objects=[]

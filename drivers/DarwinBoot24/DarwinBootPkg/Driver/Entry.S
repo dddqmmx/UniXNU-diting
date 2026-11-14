@@ -7,7 +7,7 @@ ASM_FUNC(DarwinCurrentEl)
 
 // x0=boot_args PA, x1=entry PA, x2=owned PA, x3=populated bytes, x4=frame buffer
 // PA (0 for none), x5=its size in bytes. EL1 only.
-ASM_FUNC(DarwinEnter)
+ASM_FUNC_ALIGN(DarwinEnter, 4)
   msr daifset, #15
   // Breadcrumb: a green bar (BGRA 0xFF00FF00) over the top 1/16 of the frame
   // buffer shows that this code ran, whatever the kernel does afterwards.
@@ -65,4 +65,7 @@ ASM_FUNC(DarwinEnter)
   isb
   br x1
 
-ASM_FUNC(DarwinEnterEnd)
+// Keep the end marker in the trampoline's section. A separate empty function
+// section may be discarded by the COFF linker and cannot define its byte size.
+.global ASM_PFX(DarwinEnterEnd)
+ASM_PFX(DarwinEnterEnd):

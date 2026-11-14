@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Build Diting Darwin 24 from this branch's scripts and pinned source feeds."""
-import argparse, datetime, json, os, shutil, subprocess, sys, tomllib
+import argparse, datetime, json, os, platform, shutil, subprocess, sys, tomllib
 from pathlib import Path
 import tomllib
 DEVICE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(DEVICE/'scripts'))
 import diting_paths
+import diting_build_host
 
 def link(src,dst):
     src=src.resolve()
@@ -25,6 +26,8 @@ def main():
     p.add_argument('--config-path',type=Path,help='resolved format2 configuration')
     p.add_argument('--hardware-dtb',type=Path,help='compiled format2 SM8475/Diting hardware description')
     p.add_argument('--skip-image-verification',action='store_true',default=True)
+    p.add_argument('--linux-support',type=Path,default=DEVICE.parent/'UniXNU/scripts/linux',
+                   help='UniXNU Linux source preparation scripts, also used by Sirius')
     a=p.parse_args();tree=a.tree.resolve()
     tree.mkdir(parents=True,exist_ok=True)
     local=DEVICE/'local.toml'
@@ -47,10 +50,25 @@ def main():
     env={k:v for k,v in os.environ.items() if not k.startswith(('XNU_','UNIXNU_'))}
     env.update(DEVELOPER_DIR=str(a.developer_dir),JOBS=str(a.jobs),DITING_NATIVE_DRIVER_SOURCE=str(DEVICE),
         UNIXNU_IOS_TARGET='18.0',SCAN_BUILD='',DO_CTFMERGE='0',CTFINSERT='',CTFCONVERT='',CTFMERGE='',CTFDUMP='')
+    local=DEVICE/'local.toml'
+    inputs=tomllib.loads(local.read_text()).get('diting_build',{}) if local.exists() else {}
+    for key,name in {'sheng_source':'DITING_SHENG_ROOT','wifi_linux':'DITING_WIFI_SOURCE',
+                     'wifi_shared':'DITING_WIFI_SHARED','wifi_firmware':'DITING_WIFI_FIRMWARE',
+                     'storage_source':'DITING_STORAGE_HEADERS'}.items():
+        if inputs.get(key) and name not in env:
+            path=Path(inputs[key]).expanduser()
+            env[name]=str((path if path.is_absolute() else DEVICE/path).resolve())
     if a.hardware_dtb:env['DITING_HARDWARE_DTB']=str(a.hardware_dtb.resolve())
     tools=tree/'.tools';tools.mkdir(exist_ok=True)
     link(Path(sys.executable),tools/'python3')
     env['PATH']=diting_paths.path_with(tools, *(['/opt/local/bin','/opt/local/sbin'] if diting_paths.macports() else []))
+    if platform.system() == 'Linux':
+        support=a.linux_support.resolve()
+        if not (support/'prepare-xnu.py').is_file():
+            raise SystemExit(f'Missing Linux source preparation: {support}')
+        shutil.copytree(support,tree/'scripts/linux',dirs_exist_ok=True)
+        env.update(diting_build_host.linux_env(tree))
+        env['PATH']=str(tools)+os.pathsep+env['PATH']
     gh=shutil.which('gh',path=env['PATH'])
     if gh:
         credential=subprocess.run([gh,'auth','token'],capture_output=True,text=True)

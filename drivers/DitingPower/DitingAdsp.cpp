@@ -13,7 +13,6 @@ extern "C" {
 kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomGlink.h"
 #include "QcomMdt.h"
-#include "QcomQmp.h"
 #include "QcomRpmh.h"
 #include "QcomScm.h"
 #include "QcomSmem.h"
@@ -76,7 +75,6 @@ QcomSmem gSmem;
 QcomSmemPartition gPart;
 QcomSmp2p gP2p;
 int gStopEntry = -1;
-QcomQmp gQmp;
 QcomGlink gGlink;
 bool gGlinkStarted;
 QcomRscLayout gLayout;
@@ -142,7 +140,6 @@ uint32_t waitEvents(uint32_t ms) {
 }
 
 void ring(uint32_t client, uint32_t signal) {wr(gIpcc, QCOM_IPCC_SEND, qcom_ipcc_id(client, signal));}
-void kickAop(void *) {ring(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP);}
 void kickGlink(void *) {ring(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP);}
 void kickSmp2p() {ring(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P);}
 
@@ -222,15 +219,14 @@ bool readCmdDb(uint8_t *copy) {
 QcomRpmhResource gLcx, gLmx;
 int gTcs = -1;
 
-// Votes both rails to the given ARC index pair through active TCS 1 and waits up to 100 ms for its done interrupt. The active TCSs are 0
-// to 2 (tcs-config lists the active type first); the WiFi bring-up sends through TCS 0, so the two never share one. A request whose done
-// interrupt is not seen still counts (bit 15 of [15]): the WiFi rails show such requests take effect.
+// Submit both actual ARC indices through the shared APSS active-only owner.
 int vote(uint32_t lcx, uint32_t lmx) {
     // These are shared rails on SM8475. Retain startup minima; never send
     // Sheng's handover zero vote into the GPU/WLAN parents. One board lock
-    // serializes active TCS4, while the GPU retains active TCS3.
+    // serializes the whole request with GPU/WLAN, leaving sleep/wake intact.
     if(!lcx && !lmx)return 0;
-    return diting_rpmh_vote(gLcx.address,lcx) && diting_rpmh_vote(gLmx.address,lmx)?0:-60;
+    const uint32_t addresses[]={gLcx.address,gLmx.address},values[]={lcx,lmx};
+    return diting_rpmh_vote_many(addresses,values,2)?0:-60;
 }
 
 // ---- secure world calls ----
@@ -411,7 +407,6 @@ void serviceGlink() {
     if (up && native_adsp_stats[0] >= StGlink) stage(StChannel);
 }
 void service(uint32_t bits) {
-    if (bits & kEvAop) qcom_qmp_step(&gQmp);
     if (bits & (kEvSmp2p | kEvGlink)) serviceSmp2p();
     if (bits & (kEvGlink | kEvSend)) {applyClients(); serviceGlink();}
 }
@@ -478,7 +473,7 @@ bool attachIrqs() {
         IOSleep(250);
     }
     if (rc) {fail(StDoorbells, rc); return false;}
-    // TCS4 is polled by the shared Diting RPMh owner; no RSC IRQ theft.
+    // Active TCS completion is polled by the shared owner; no RSC IRQ theft.
     const uint32_t enable[3] = {qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P),
                                 qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP),
                                 qcom_ipcc_id(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP)};
@@ -538,14 +533,9 @@ bool start() {
     kickSmp2p();
     stage(StDoorbells);
 
-    qcom_qmp_init(&gQmp, reinterpret_cast<volatile uint32_t *>(gAoss.va), 0x400, kickAop, nullptr);
-    for (int phase = 0; phase < 4 && qcom_qmp_step(&gQmp) > 0 && gQmp.state != QcomQmpOpen; ++phase)
-        waitUntil(1000, [] {return qcom_qmp_step(&gQmp) == QcomQmpOpen || gQmp.state < 0;});
-    native_adsp_stats[5] = (native_adsp_stats[5] & ~0xff) | (gQmp.state & 0xff);
-    if (gQmp.state != QcomQmpOpen) {fail(StLoadState, gQmp.state); release(dtb); release(adsp); return false;}
-    qcom_qmp_send(&gQmp, "{class: image, res: load_state, name: adsp, val: on}");
-    if (!waitUntil(1000, [] {return qcom_qmp_step(&gQmp) == QcomQmpOpen;})) {
-        qcom_qmp_abandon(&gQmp);
+    const bool loadState = diting_aop_send("{class: image, res: load_state, name: adsp, val: on}", 100);
+    native_adsp_stats[5] = (native_adsp_stats[5] & ~0xff) | (loadState ? 4 : 0xff);
+    if (!loadState) {
         fail(StLoadState, -60); release(dtb); release(adsp); return false;
     }
     stage(StLoadState);

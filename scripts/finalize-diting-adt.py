@@ -11,7 +11,7 @@ step repeats them with the local parameters so the artifacts agree:
   product and buttons, but not the properties this board's kernel reads from
   /arm-io (the diting,ufs-* windows NativeUfs validates, the touch and button
   resources, the PMIC metadata). The parameters are the ones a local run passes:
-  12 GiB of physical DRAM, a 4 GiB DarwinBoot window, one CPU, the J171 chip ID,
+  the selected RAM profile, a 4 GiB DarwinBoot window, eight CPUs, the J171 chip ID,
   the development policy and the boot manifest hash.
 * The boot image is the container a local run writes: Android boot v4 with an
   empty kernel slot (this device boots the firmware from its own partition),
@@ -116,18 +116,25 @@ def main():
     parser.add_argument('--volume-layout', type=Path, help='layout JSON the kernel was configured with')
     parser.add_argument('--hardware-dtb', type=Path,
                         help='compiled board DTS (default: board.toml [bootimg] dtb under the work tree)')
-    parser.add_argument('--dram-size', type=lambda value: int(value, 0), default=0x300000000,
-                        help='physical DRAM the boot chain reports; a local run passes 12 GiB')
+    parser.add_argument('--dram-size', type=lambda value: int(value, 0), default=None,
+                        help='nominal capacity; defaults to the selected RAM profile')
+    parser.add_argument('--memory-map', type=Path, default=device / 'configs/diting-memory-sm8475.json')
     parser.add_argument('--window-size', type=lambda value: int(value, 0), default=0x100000000,
                         help="DarwinBoot's allocation window; a local run passes 4 GiB")
-    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=1,
-                        help='CPU nodes in the ADT; a local bring-up run passes 1')
+    parser.add_argument('--cpus', type=int, choices=range(1, 9), default=8,
+                        help='physical SM8475 CPU nodes in the ADT')
     parser.add_argument('--chip-id', default=None, help='BuildIdentity chip ID (default: board.toml [payload.adt])')
     parser.add_argument('--ufs-probe', action='store_true',
                         help='publish the UFS nub; a local bring-up image leaves it out')
     parser.add_argument('--no-development-debug', dest='development_debug', action='store_false',
                         help='leave the DT debugger gate off; a local run turns it on')
     args = parser.parse_args()
+    from diting_memory import load_memory_map
+    memory, _, _ = load_memory_map(args.memory_map)
+    if args.dram_size is None:
+        args.dram_size = memory['physical_bytes']
+    if args.dram_size != memory['physical_bytes']:
+        parser.error('--dram-size differs from the selected RAM profile')
 
     work = args.work_dir.resolve()
     board = tomllib.loads((device / 'board.toml').read_text())
@@ -175,7 +182,7 @@ def main():
     generated = work / 'payload/kernel.macho.adt.diting'
     command = [sys.executable, str(device / 'scripts/make-diting-adt-ipados18.py'),
                '--cpus', str(args.cpus),
-               '--dram-size', hex(args.dram_size),
+               '--dram-size', hex(args.dram_size), '--memory-map', str(args.memory_map),
                '--window-size', hex(args.window_size),
                '--output', str(generated),
                '--unique-chip-id', args.unique_chip_id,
