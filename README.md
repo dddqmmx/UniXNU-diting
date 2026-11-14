@@ -11,7 +11,17 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 - 本设备：[格式 2 配置](migration/format2/README.zh.md)、[系统迁移](migration/ipados18/README.zh.md)、
   [结构化移植记录](porting.toml)、[AGENTS.md](AGENTS.md)
 
-## 当前状态（2026-11-11）
+## 当前状态（2026-11-14）
+
+**services185 已进入系统，用户确认触屏不工作。** 当前持久 boot_b 和最近临时启动镜像
+均为 services185，保持八核；本轮没有更新 userdata。新固件与 DarwinBoot24 使用本机
+实测 RAM banks，WLAN 普通供电、BDF 功放选择及共享 RPMh/AOP 交易按厂商契约修正。
+长期稳定性、Wi-Fi 联网、音频和 Metal 功能仍需本轮实机验收。
+
+见 [services185 修复与验收记录](migration/ipados18/services185-bdf-power-boot.md) 和
+[任务交接入口](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
+
+### 历史状态（2026-11-11）
 
 - bring-up 第 6 阶段：UFS 三窗口（OS / SystemOS / Data）已发布，根卷按 UUID 匹配并挂载，
   `launchd` 已实机启动。
@@ -21,8 +31,9 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 - 当前停点：准备用户态的 `launchd_cache_loader` 在 restore 模式下以
   `Failed to verify code directory` 退出。按 `migration/ipados18/services.md`（services9）的既有结论，
   启动参数需要 `launchd_unsecure_cache=1`；该参数已写入 `board.toml` 的 `kernel_args`。
-- 日志不使用拍屏：固件每次启动读取 `0xA7000000` 的 ramoops 环（`RAMOOPS|`），下一轮启动用
-  Advanced Logger 的二维码导出上一轮 XNU console。
+- 固件从 `0xA7000000` 读取 console，services182 另补 pmsg 导出，再用 Advanced Logger
+  扫传。services183/184 已从 OEM minidump 取得真实 XNU 日志；普通重启的 pstore 保留
+  对照仍失败，空 pstore 或缺失记录不能证明没有 panic。
 
 ## 组件与来源
 
@@ -38,6 +49,11 @@ A740/WCN7850 实现。Diting 的板级配置在 `board.toml`、`dts/diting.dts` 
 CI 使用 `.github/workflows/package.yml`（仅 `workflow_dispatch`），在 macOS runner 上构建
 kernel / payload / boot image，产物为 `diting-package` artifact。三个卷 UUID 是内核常量，换 userdata
 必须重编内核；占位 UUID 的构建只能用于编译验证，不能上机。
+
+Linux 也可以复用 Sirius 使用的 UniXNU Linux 工具链，本轮已在 Arch Linux 本地编译完整
+Darwin 24 内核、板级驱动、DarwinBoot24，并完成预链接和 boot image 打包。
+AEA 解密、APFS 用户态卷写入仍使用现有 macOS `diting-userdata.yml` workflow。
+命令及输入要求见 [services169 本地构建记录](migration/ipados18/services169-linux-build.md)。
 
 ## 源码边界
 

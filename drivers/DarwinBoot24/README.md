@@ -4,7 +4,7 @@
 
 ## 适配硬件
 
-- Nothing Phone (2)（Diting / SM8475）的 uefi-diting 固件环境，UEFI 侧为 Mu-Silicium
+- Redmi K50 Ultra（Diting / SM8475）的 uefi-diting 固件环境，UEFI 侧为 Mu-Silicium
 - 额外 4 GiB 以上 DRAM 的租借：按 ADT 报告的物理区间逐个申请回写常规内存页，每块不超过 1 GiB 并合并相邻区间
 
 ## 仓库关系
@@ -22,7 +22,10 @@
 
 Build with `scripts/build-darwinboot24-macos.py` from the device project root.
 The script builds only this loader in an independent workspace and exports the
-EFI binary, log and build record under `mac-build/darwinboot24/`.
+EFI binary, log and build record under `mac-build/darwinboot24/`, or an explicit
+`--artifact-dir` outside the checkout. CLANGPDB also builds on Linux with clang,
+lld-link, llvm-lib and llvm-rc. The trampoline end marker stays in the same
+aligned section as its entry so COFF linking preserves the copied byte range.
 
 An explicit `[[driver]]` entry injects the loader from the temporary FAT payload.
 It replaces one matching loader protocol in RAM and restores the older interface
@@ -41,8 +44,11 @@ leaves the low DXE heap intact, and reserves another 256 MiB high firmware
 pool until ExitBootServices. Each firmware allocation is at most 1 GiB and
 adjacent successful leases are coalesced in the XNU wire contract.
 
-Contract validation precedes all extra allocations. Invalid optional range
-metadata retains the primary boot window. Reserved, BootServices, RuntimeServices,
+The primary window and additional banks both intersect validated physical RAM
+and allocatable ranges with actual write-back conventional descriptors. The
+primary allocation rejects missing or invalid RAM metadata before taking pages;
+it also rejects malformed/overlapping EFI maps and excludes the framebuffer.
+Additional allocations retain the existing bounded firmware pool. Reserved, BootServices, RuntimeServices,
 framebuffer and uncached/device descriptors never become additional OS RAM.
 The actual managed capacity is reported by XNU and will be below physical
 capacity. `diting_ram_banks=0` requests only the bootstrap window.

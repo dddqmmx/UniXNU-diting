@@ -1,6 +1,6 @@
 # ArmCpu
 
-Nothing Phone (2)（Diting / Qualcomm SM8475）的 ARM CPU provider：GICv3 中断控制器与 ARM generic timer，从核由固件 PSCI 启动。
+Redmi K50 Ultra（diting / Qualcomm SM8475）的 ARM CPU provider：GICv3 中断控制器与 ARM generic timer，从核由固件 PSCI 启动。
 
 ## 适配硬件
 
@@ -30,3 +30,11 @@ Nothing Phone (2)（Diting / Qualcomm SM8475）的 ARM CPU provider：GICv3 中�
 ### 启动顺序
 
 `diting_cpu_start` 先由板级平台专家调用，完成 GIC 与 timer 后由固件 PSCI 拉起从核；从核进入 WFI 前会调用 `diting_cpu_startup_finished` 通知控制器。Darwin 24 上额外走 `diting_cpu_first_boot` 等待首个 processor 上线。
+
+2026-11-13：增加 `armcpu_start_phase` 与 `armcpu_start_error`，记录实际 boot CPU 初始化阶段和原有失败返回点。它们仅为缺少平台专家的 panic 提供上下文，不更改 CPU/GIC 成功条件；阶段与失败码见 `migration/ipados18/services172-platform-evidence.md`。八核与单核的旧候选均仍触发同一个平台断言，不能据此将原因归为多核启动。
+
+services172 实机为 `platform=6 cpu=11 error=0`，范围是首次启动提交循环，尚不能确定阻塞核。services173 加入每核 `armcpu_init_phase` 与原生 `processor_boot` 的锁/调度边界记录，panic 可直接读取软件快照；保持八核、真实首次启动与原硬件入口。构建、设备结果及阶段说明见 `migration/ipados18/services173-first-boot-boundaries.md`。
+
+2026-11-14：services173 实机反馈 `firstboot=7/29`。services174 在内核 PSCI 实现中修正 Darwin24 必需 CPU 启动失败被 PE void 转发丢弃的问题：在首个真实失败处报告固件状态、早期异常或复位边界；CPU 运行成功条件保持不变。详细证据见 `migration/ipados18/services174-secondary-start-failure.md`。
+
+services181 把本核 RUNNING 发布移到 `initCPU()` 的最后一步，避免 SGI 初始化尚未返回时被另一个核视为成功。PSCI 仅接受确切的 RUNNING 状态；OFF、未完成或属于另一 MPIDR 的异常记录仍是失败。每核异常槽保留入口号、SPSR、栈和页表上下文，原生 `processor_boot` 等待继续确认调度器上线。构建与实机结果分别记录在 `migration/ipados18/services181-secondary-fault-publication.md`。

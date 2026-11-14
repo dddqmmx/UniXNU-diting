@@ -4,7 +4,7 @@
 
 ## 适配硬件
 
-- 任何以 Apple 格式设备树启动的 AArch64 平台；在 UniXNU-diting 中用于 Nothing Phone (2) / SM8475
+- 任何以 Apple 格式设备树启动的 AArch64 平台；在 UniXNU-diting 中用于 Redmi K50 Ultra（diting）/ SM8475
 - 要求设备树提供 `/chosen`（CHRP NVRAM 代理，`nvram-bank-size`、`nvram-proxy-data`）、`/cpus`、`/arm-io`、`/defaults`、`/options`
 
 ## 仓库关系
@@ -26,4 +26,6 @@
 
 ### 启动顺序
 
-平台专家在 `start` 里依次发布 CPU nubs、平台设备与 `/defaults` 计数，最后调用板级入口 `diting_power_start_optional()`；`gethostuuid()` 等原生平台资源由这一步满足。设备树缺少 `/chosen` 的 CHRP 代理时只记录并跳过 NVRAM，不阻止启动。
+`configure()` 检查设备树结构和 CHRP NVRAM 输入，发布 CPU 与平台设备，并完成真实 CPU/GIC 启动；必要步骤失败时返回失败。电源、Wi-Fi 和平台注册按原启动顺序执行，GPU 入口随后执行。设备树缺少 CHRP 代理时记录错误并返回失败。
+
+2026-11-13：services171 调整可选外设与平台注册顺序后，实机八核和单核均仍触发 `IOSecureBSDRoot()` 的 `assert(pe)`，该顺序改动已撤回。services172 只记录实际启动阶段与 CPU 失败点，供同一项致命检查报告上下文；不以计数器替代硬件成功条件。

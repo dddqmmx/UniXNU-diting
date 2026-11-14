@@ -1,6 +1,8 @@
+> 当前 Linux 会话状态（2026-11-14）：services185 已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。持久 boot_b=services185，保持八核，本轮未更新 userdata。手机留在系统供观察；不要为重复取证主动重启或重刷。长期稳定性和各外围功能尚未验收。当前入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md) 和[任务交接](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)；其余较早记录为历史状态。
+
 # Diting probe policy
 
-> 当前状态以 `D:\ai\diting\交接-2026-11-11-准备用户态.md` 为准，执行步骤见 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md`。下方带日期的段落是历史实机与构建记录。
+> 当前状态以本文开头的 services185 记录为准。`D:\ai\diting\交接-2026-11-11-准备用户态.md` 与 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md` 是历史路线。下方带日期的段落是历史实机与构建记录。
 
 - Optional probes must record PASS, FAIL, SKIP or RUNNING and return to the normal boot path. Never terminate boot with panic, halt or an unbounded loop to display a probe result.
 - On failed prerequisites, log the reason and skip dependent MMIO/DMA work. Do not fabricate successful services, media or hardware resources to keep boot moving.
@@ -839,6 +841,25 @@ work is the boot itself, not the inputs.
 - 全开配置：`diting_ipados18_defconfig` 进入 CI 选项；`board.toml` 的 `cpus=1` 改为 `cpus=8`，并加 `diting_wifi=1`、`diting_adreno_start=1`、`diting_metal=1`。
 - 新 run `43068678253`（`2e406ef`）验证以上修复。
 
+# 2026-11-13 Linux 构建后的平台专家阻塞
+
+- services172 实机由用户报告 `platform=6 cpu=11 error=0`：arm-io nubs 与全部 CPU 中断 vectors 已注册，首次启动提交循环尚未返回。该阶段覆盖主核与副核，不能据此确定阻塞核或宣称 CPU 启动成功。
+- services171 未证实的平台注册顺序修改已撤回；保持八核、原 configure 顺序和真实 fatal invariant。不要再次切单核或猜测性关闭硬件入口。
+- services173 沿已定位的 processor_boot 锁/调度、secondary processor_dostartup、initCPU 和 IRQ 安装边界加入软件快照；本地链接与八核打包通过，2026-11-13 05:38:17 UTC 核对 diting/unlocked/b 后临时 Fastboot boot，Sending 2.392 秒、Booting 0.114 秒 OKAY。设备细分阶段待反馈，根因及修复尚未确认。
+- 证据见 `migration/ipados18/services172-platform-evidence.md`、`migration/ipados18/services173-first-boot-boundaries.md`；当前持久 boot_b 为 services169，本轮未写 userdata 或持久 boot。日志/产物使用当前 Linux 工作区 `diting-work/{build,logs/diting,tmp}/servicesNN`。用户明确当前没有 Android，不再要求进入 Android。
+
+# 2026-11-14 services173 的 firstboot 反馈
+
+- 用户提供 `firstboot=7/29`，CPU7 已到 secondary cpu_start，尚未记录返回；重启后未取得同轮 init/irq。不要仅据此断定 CPU7 自身故障或改 GIC/PSCI 配置。
+- PE_cpu_start_internal 的 void 转发丢弃 startCPU 失败；现有 PSCI 每核同步等 5 秒，连续失败可遮蔽首个失败并越过 IOSecureBSDRoot 的 30 秒。services174 在 Diting PSCI 的实际失败处执行必需 CPU 的 fatal invariant，保留固件返回、早期异常和独立缓存行的复位边界。没有把请求受理冒充 CPU 上线。
+- services174 补丁应用检查、本地内核链接与八核打包通过（101191680 字节）；2026-11-13 17:23:59 UTC（北京时间 11-14）依本轮编译并刷入的明确要求，核对 diting/unlocked/b 和 192 MiB boot_b 后稀疏刷 boot_b：两块发送写入 OKAY，4.823 秒；随后 fastboot boot Sending 2.336 秒、Booting 0.113 秒 OKAY。当前持久 boot_b 与运行镜像均为 services174，services169 保留作回退，不写 userdata；用户反馈 `Diting CPU1 start timeout: reset=5 kernel=1`：CPU_ON 受理且复位代码读到 cpu_ttep，尚未进入 arm_init_cpu；继续检查 MMU 到内核入口。记录见 `migration/ipados18/services174-secondary-start-failure.md`。
+
+# 2026-11-14 services174–176 副核 MMU 与异常上下文
+
+- services174 实机 CPU1 `start timeout reset=5 kernel=1`，用户补 TTBR1=0x906c06000。CPU_ON 已受理，复位代码找到 cpu_data/handler 并读取页表地址，尚未进 arm_init_cpu。
+- services175 补齐动态内核页表的 PoC clean，保留早期向量到 KVA trampoline；本地链接与八核打包通过，17:37:17 UTC 稀疏刷 boot_b 两块 OKAY（4.873 秒），随后 Fastboot boot OKAY（2.456 秒）。用户报告直接黑屏重启，无新报错；不能认定页表写回解决了根因。
+- services176 进一步将正常 VBAR 安装延后到 arm_init_cpu 的 machine_set_current_thread 之后，保留 phystokv/函数入口的早期异常捕获，并按 MPIDR 记录 C 入口 16–20。补丁应用、本地链接、八核打包和部署通过；实机异常见后续 services176 记录。详见对应 migration/ipados18/services174、175、176 记录；当前仍未确认副核上线或系统正常启动。
+
 # 工作方法（长期有效，不可省略）
 
 以下方法不因阶段或目标改写而失效；每次改 objective/交接时必须保留。
@@ -850,3 +871,28 @@ work is the boot itself, not the inputs.
 5. 用 Advanced Logger/ramoops 等日志取证，不拍屏；分区写入/刷机前必须得到明确授权。
 6. 保留 Pong 来源说明与许可证合规；不把厂商 blob 提交或发布到公共仓库。
 7. 以 Sheng 上游为参照消除重复劳动，对比架构与工具链；不为“看起来完成”而删减范围。
+
+# 2026-11-14 services176–179 后续设备证据与编译约束
+
+- services176 已刷 boot_b 并启动；CPU1 early exception reset=7 kernel=1，ESR=0x81000100、ELR=0xfffffff0089b00b0，对应 phystokv+0xc 的第一条 NEON。保留 ESR 原值，不据此强行判断标准 FP exception class。
+- services177 与 services178 均已本地链接、八核打包、稀疏刷 boot_b 并启动；用户分别反馈黑屏重启，services178 确认为自动重启。不能将 CPACR ISB 或三个对象的标量约束当作设备修复成功。
+- services178 临时 Recovery 的 pstore 仍为空，实际 ramoops 使用 0x400000@0xa7000000；未挂载 data/metadata/cache。日志读完后已通过 ADB 回到 Fastboot，未写 userdata。
+- services179 有具体后续调用证据：cpu_timebase_init 仍因 Linux clang 隐式生成 ld1/st1/str q0。Linux 构建环境及内核全局 flags 增加 -mno-implicit-float，保留显式 SIMD；已有 stamp 使旧内核对象失效。链接通过，1011 个 C/C++ 编译条目有约束，cpu_timebase_init/phystokv/ArmCpu 对象未见 SIMD 操作数。八核打包和部署已完成；实机仍黑屏自动重启，故障未解决。详见 migration/ipados18/services179-kernel-implicit-simd.md。
+
+- services179 八核打包通过（101191680 字节），18:23:53 UTC 稀疏刷 boot_b OKAY（4.655 秒），临时启动 OKAY（2.474 秒）；用户确认仍黑屏自动重启。该时点持久 boot_b 为 services179（随后被 services180 替换），启动故障未解决，services169 保留回退。
+
+- services180 针对缺失的新异常 PC：KVA trampoline 将早期 VBAR 改为 KVA，避免 PAN/清除 TTBR0 后物理捕获失效；保留捕获到 PE_init_cpu 返回，在 FIQ/timer/调度入口前安装正常向量。未重写异常栈或修改 DAIF；真实初始化及 CPU 成功条件保持。新增 reset=21–28 边界，本地补丁应用、链接和八核打包通过；18:31:27 UTC 稀疏写 boot_b OKAY（4.762 秒），临时启动 OKAY（2.484 秒）。用户确认仍黑屏自动重启，无新错误；当前持久 boot_b 为 services180。详见 migration/ipados18/services180-secondary-bootstrap-vectors.md。
+
+# 2026-11-14 用户要求交接
+
+- 用户对继续完成提出疑问，要求将当前任务状态写入文档并交接另一模型。本会话已停止编译与刷机，仅整理文档。交接时 fastboot 可见 1d4eb066，ADB 空；未发现遗留构建、打包或刷机进程。交接入口：migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md。没有创建后台自动刷机或代理任务。
+
+# 2026-11-14 services185 进入系统，触屏待修复
+
+- services183 有效 OEM minidump 已证明 services179–182 八核全部上线、UFS 三窗口发布、OS/SystemOS/Data 挂载及原生 launchd 执行；不要继续沿用“停在 CPU1 / 副核未上线”的旧判断。
+- services184 修正 APSS DRV2 active TCS0–2、sleep TCS3–4、wake TCS5–6、fast TCS7 的布局；GPU/WLAN/音频通过 DitingPlatformResources 共享完整交易。超时保留所有权，真实完成后才回收。10 个 host 交易场景通过，但 services184 实机仍重启。
+- services184 三条同轮 pmsg 均停在提前使能 smpe3 后。Nothing CNSS2 的普通 regulator list 不含 IPA；services185 按最终 ELF/BIN BDF 响应可选 host_bdf_data bit0 选择功放：外置不配置 S3E，内置用 64 字节 AOP wlan_pdc 消息，缺失 TLV 保留默认状态。普通电源保持厂商 consumer 顺序，仅显式 provider init-mode 才写模式。
+- WLAN 与 ADSP 共用 AOSS QMP owner；超时不清空邮箱、不伪造 ACK，真实 AOP 清零后才能消费迟到完成。POWER/BACKLIGHT 独立归档与链接条件已同步两套构建入口。
+- services185 原生驱动编译、完整内核链接和八核打包通过；07:42 稀疏写 boot_b 两块全 OKAY（4.670 秒），临时启动 OKAY（2.459 秒）。用户先确认“进系统了”，随后报告触屏不工作。进入系统是实机观察；Wi-Fi 功放响应、联网、PCM、GPU 和长期稳定性不能据此标为通过。
+- 触屏旧轮日志已显示 `goodix: clocks stay off`、全零固件版本与 Goodix 初始化失败；这是 services184 证据，不能冒充 services185 日志。当前先定位 Goodix 初始化/事件链，保留正常启动和真实硬件成功条件。
+- 本地状态、构建和用户观察分别保存在 `diting-work/{build,logs/diting,tmp}/services185`。`services169/tree/.cache/xnu-work` 现对应 services185，不能作 services169 原始对象。用户已明确要求提交和推送本轮更改及文档状态；所有私有输入和产物留在本地。

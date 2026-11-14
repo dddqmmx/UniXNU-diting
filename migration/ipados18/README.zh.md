@@ -1,4 +1,10 @@
-# Pong → iPadOS 18 迁移
+# Diting → iPadOS 18 迁移
+
+> 当前 Diting 状态（2026-11-14）：services185 已进入系统，触屏不工作；画面仍更新、
+> 实体按键有反应。当前 boot_b=services185，八核，未更新 userdata。见
+> [services185 修复与验收](services185-bdf-power-boot.md) 和
+> [任务交接](交接-2026-11-14-services180-黑屏自动重启.md)。下方 Pong 路径、设备身份
+> 与运行记录属于继承的迁移历史，不作为本轮 Diting 的实机证据。
 
 工作分支：`ipados18`。源码目录：`/Volumes/PongDev/source/UniXNU-pong-ipados18`。
 

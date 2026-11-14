@@ -4,7 +4,7 @@ Diting 的电源、ADSP 与音频：PAS1 加载签名 ADSP 固件，GENI I2C 驱
 
 ## 适配硬件
 
-- SM8475 APSS：SMEM `80900000/200000`、TCSR mutex3 `1f43000`、IPCC `ed18000` / INTID261、AOSS `c300000`；APSS DRV2 用 active TCS4（GPU 独占 TCS3）
+- SM8475 APSS：SMEM `80900000/200000`、TCSR mutex3 `1f43000`、IPCC `ed18000` / INTID261、AOSS `c300000`；DRV2 active TCS0–2、sleep TCS3–4、wake TCS5–6、fast TCS7
 - LPASS ADSP：PAS1、40 MiB 预留内存、SMP2P 与 GLINK
 - 音频：GENI I2C `a94000`（`qupv3_se13_i2c_active`，GPIO48/49），TFA9873 双功放地址 `0x34/0x35`，复位 GPIO1/89，WCD938x，tertiary MI2S SD1
 - 电池/充电器：按 NothingOSS `qti_battery_charger.c` 的单电池属性编号解码，不写充电限值
@@ -26,7 +26,8 @@ Diting 专属实现。协议与服务结构参照 UniXNU-sheng 的 Qualcomm 实�
 - `DitingAdsp.cpp`：手机自身 signed ADSP 固件、PAS1、40 MiB 预留内存、SMP2P、GLINK、ready/fatal 通知和有界等待。
 - 实际 SMEM `80900000/200000`、TCSR mutex3 `1f43000`、IPCC `ed18000` / INTID261、AOSS `c300000`。不使用 Sheng 的 SM8550 IPCC、固件或 PAS36 DTB。
 - 通过 `gPhysBase/gPhysSize` 检查 DarwinBoot 实际 RAM 所有权；若覆盖 ADSP carveout，停止加载，不覆盖 XNU RAM。
-- 电源请求与 WLAN 共用 APSS active TCS4 的 IOLock；GPU 的 active TCS3 保持独立。只保留启动 minima，不在 handover 时降掉共享电源投票。
+- 电源、WLAN 与 GPU 通过 `DitingPlatformResources` 共用 APSS active TCS0–2 的完整交易锁。按真实命令完成和 idle 状态回收；超时保留所有权，不覆盖 sleep/wake/fast TCS。只保留启动 minima，不在 handover 时降掉共享电源投票。
+- ADSP 与 WLAN 共用 AOSS QMP owner，分别发送补零的 100/64 字节消息。超时不清空未消费邮箱，AOP 真实清零后才处理迟到完成与后续请求。
 - `DitingBattery.cpp` / `ShengBattmgr.c`：沿用 UniXNU 协议 API，以 NothingOSS `qti_battery_charger.c` 的单电池属性编号解码；不访问 Xiaomi BOARD_GET 扩展、不写充电限值。
 - `DitingAudio.cpp`：`adsp_apps`、APM speaker/playback graph、TFA9873 配置、独立 SID1801 DMA 和输出环；只有真实初始化完成才发布 `DitingAudio`。尚无真机播放成功记录。
 
@@ -52,6 +53,12 @@ SID1801 的 DMA 映射，尚未完成 graph。services46 合并官方 power.md
 小空闲 intent 不再挤掉 graph 命令申请的大 intent。同时内存映射命令
 等待真实 MEM_MAP_DONE/handle，不能把普通 ACK 当成映射完成。HAL 继续
 在 staged 目录，未据此宣称系统播放已接通。
+
+## 当前实机状态（2026-11-14）
+
+services185 已由用户确认进入系统，随后报告触屏不工作。共享 RPMh 的 10 个 host 场景、
+QMP 的 8 个 host 场景和完整原生内核构建通过；本轮 PAS、PCM 播放、充电状态与背光
+操作尚未验收。见 [services185](../../migration/ipados18/services185-bdf-power-boot.md)。
 
 ## 许可
 

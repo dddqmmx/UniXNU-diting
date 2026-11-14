@@ -5,7 +5,7 @@ Diting 的 QCA6490 Wi-Fi 传输：PCIe0 + MHI + QRTR/QMI 上的真实 ath11k，�
 ## 适配硬件
 
 - SM8475 / QCA6490：PCIe0（`wlan-enable` GPIO80、reset GPIO94、clkreq GPIO95、wake GPIO96、xo-clk GPIO204）
-- MHI + QRTR + QMI；APSS DRV2 用 Diting DT 的 active TCS4，保留 GPU 的 TCS3
+- MHI + QRTR + QMI；APSS DRV2 active TCS0–2 与 GPU/音频共用完整交易 owner，sleep TCS3–4、wake TCS5–6、fast TCS7 保留
 - MSI 接收器按 DT `int_global_int` 路由到 SPI140（GIC INTID172），PARF MSI0 为 bit23
 - 独立 SMMU context，SID `0x1c01`；固件 `amss.bin`、`m3.bin`、`bdwlan*`、`regdb.bin` 取自本机 modem 的 `image/qca6490`
 
@@ -31,7 +31,8 @@ Diting 专属实现；`ath11k/` 是 Linux v7.0.14 ath11k 的 PCI/MHI/QMI 部分�
 - `scripts/build-diting-wifi-native.py`：编译板级/网络代码，合并归档并延后注册网络类。
 - `CONFIG_XNU_DITING_WIFI=y`：构建并链接归档；`diting_wifi=1` 启动板级工作线程。
 
-APSS DRV2 使用 Diting DT 的 active TCS4，保留 GPU 的 TCS3。使用 SM8475 GCC
+APSS DRV2 使用 Diting DT 的 active TCS0–2；共享 owner 只在真实完成后回收，超时保留
+交易，避免覆盖其他消费者与固件的 sleep/wake 请求。使用 SM8475 GCC
 `0x7bxxx`、真实 PHY 表和 cmd-db `SN7` 带宽投票。CPU 和 SMMU 的 DMA 环使用
 Normal-NC，页表独立保留。使用 DesignWare 控制器的 MSI 接收器，按 Diting DT
 `int_global_int` 路由到 SPI140（GIC INTID172）；PARF MSI0 为 bit23。
@@ -44,6 +45,18 @@ BDF 按 QMI chip/board ID 使用 Nothing CNSS2 的文件命名规则，AMSS 按
 无线地址使用固件报告的地址，不伪造出厂 MAC。WPA nonce 使用 XNU `read_random`。
 
 ## 当前证据
+
+services185 已由用户确认进入系统，但触屏不工作；本轮 Wi-Fi 的 BDF 功放响应、扫描、
+关联和联网尚未验收。普通 regulator list 按 Nothing CNSS2 consumer 顺序生成，
+`smpe3` 不再提前直接使能；未请求的模式保持不变。
+
+最终成功的 ELF/BIN BDF 响应解码可选 TLV `0x10`（u64 `host_bdf_data`，最大响应
+18 字节）：bit0=1 为外置功放，不配置 S3E；bit0=0 为内置功放，经共享 AOSS owner
+发送补零的 64 字节 `{class: wlan_pdc, ss: rf, res: s3e.e, upval: 1}`；缺失 TLV
+保留默认状态。ADSP 也使用该 QMP owner，超时不清空邮箱、不伪造完成。
+见 [services185 修复记录](../../migration/ipados18/services185-bdf-power-boot.md)。
+
+以下是历史轮次证据，不能替代 services185 的功能验收。
 
 真实 ath11k、PCI、MHI、QRTR、QMI、station 和网络代码已编译接入。
 services80 已观察到 PCIe/SMMU/MHI/QMI 完成和 102 个通道注册，之后发生

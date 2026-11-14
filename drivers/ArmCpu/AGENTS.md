@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Maintain ArmCpu, the Diting variant of the UniXNU `ArmCpu` component: Nothing Phone (2)（Diting / Qualcomm SM8475）的 ARM CPU provider
+Maintain ArmCpu, the Diting variant of the UniXNU `ArmCpu` component: Redmi K50 Ultra（diting / Qualcomm SM8475）的 ARM CPU provider
 
 ## Required reading
 

@@ -118,21 +118,22 @@ not Sheng's 0x14220/0x14224. The supplied DT declares 21 context banks and
 
 ## Implemented module
 
-- `DitingAdrenoPlatform.cpp`: actual Diting GCC, APSS DRV2 active TCS3 and
+- `DitingAdrenoPlatform.cpp`: actual Diting GCC, shared APSS DRV2 active TCS0–2 and
   command-db adapters, cold-master ownership, contiguous native4K allocations,
   real cache maintenance, exact GMU SID5/0x405 context setup and bounded
   firmware/HFI/power startup. It checks actual GX-off/CM3-reset prerequisites
-  and refuses to take over a live GPU. Until a shared RPMh aggregator exists,
+  and refuses to take over a live GPU. With the shared RPMh transaction owner,
   parent CX/MX votes retain the highest ACTUAL allowed AUX corner without
-  changing CPU/GPU frequency. Only TCS3 is used; sleep/wake votes are intact.
+  changing CPU/GPU frequency. GPU, WLAN and audio serialize complete requests
+  through DitingPlatformResources; sleep TCS3–4, wake TCS5–6 and fast TCS7 are intact.
   GMU faults are polled during every hardware wait with IRQs explicitly
   masked, fault reporting enabled and retained DMA backing on failure.
   Stage/results are written to the independent ramoops diagnostic pmsg area.
   Normal boot continues after PASS/FAIL/SKIP. GMU completion alone does not
   qualify CP execution or Metal readiness.
-  v95 uses real command ISSUED|COMPL plus idle/fresh-transaction observation
-  for polled RSC completion, not an enabled-IRQ prerequisite. It checks
-  active TCS4 for conflicting ARC work and reclaims only its own trigger.
+  The shared owner checks command ISSUED|COMPL plus idle/fresh-transaction
+  observation for polled RSC completion. It checks all active TCSes for
+  conflicting addresses and retains ownership on timeout until real completion.
 - `DitingAdrenoGmu.c`: SM8475 resource windows/identity, native4K backing
   requirements, firmware load plan, Diting RSCC/PDC sequence, real cache/TCM
   upload, GMU chip-id conversion to 0x07030200, fresh CM3/HFI readiness waits.
