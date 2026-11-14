@@ -23,7 +23,7 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 主机测试、完整内核链接与八核打包通过，基本触控及亮屏恢复已通过实机观察；双指手势尚未测试。
 
 见 [services186 修复与验收记录](migration/ipados18/services186-st61y-touch.md) 和
-[任务交接入口](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
+[任务交接入口](migration/ipados18/交接-2026-11-14-services186-启动与触控正常.md)。
 
 ### 历史状态（2026-11-11）
 

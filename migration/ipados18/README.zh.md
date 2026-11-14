@@ -3,7 +3,7 @@
 > 当前 Diting 状态（2026-11-14）：services186 已进入系统，用户确认点按、滑动及熄屏后亮屏触控恢复正常。
 > 当前 boot_b=services186，八核，未更新 userdata，services185 保留回退。双指手势尚未测试。见
 > [services186 修复与验收](services186-st61y-touch.md) 和
-> [任务交接](交接-2026-11-14-services180-黑屏自动重启.md)。下方 Pong 路径、设备身份
+> [任务交接](交接-2026-11-14-services186-启动与触控正常.md)。下方 Pong 路径、设备身份
 > 与运行记录属于继承的迁移历史，不作为本轮 Diting 的实机证据。
 
 触控器已由本机 Recovery 确认为 ST61Y。[services186](services186-st61y-touch.md)

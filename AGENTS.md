@@ -1,6 +1,6 @@
 > 当前 Linux 会话状态（2026-11-14）：services186 已稀疏写 boot_b 并临时启动，用户确认进系统、触屏点按与滑动正常，熄屏后亮屏触控恢复正常。保持八核，未更新 userdata；services185 镜像保留回退。双指手势尚未测试，长期稳定及其他外围未覆盖。手机留在系统供观察。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。源码 4d478a5 已推送；7 项 host 测试、两个日志关闭编译模式、完整内核和八核打包通过；缓存 services169/tree/.cache/xnu-work 对应 services186。
 
-> services185 历史状态（2026-11-14，后由 services186 替换）：当轮已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。保持八核，未更新 userdata；长期稳定性和各外围功能未验收。历史入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md)；最新状态见[任务交接](migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md)。
+> services185 历史状态（2026-11-14，后由 services186 替换）：当轮已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。保持八核，未更新 userdata；长期稳定性和各外围功能未验收。历史入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md)；最新状态见[任务交接](migration/ipados18/交接-2026-11-14-services186-启动与触控正常.md)。
 
 # Diting probe policy
 
@@ -887,7 +887,7 @@ work is the boot itself, not the inputs.
 
 # 2026-11-14 用户要求交接
 
-- 用户对继续完成提出疑问，要求将当前任务状态写入文档并交接另一模型。本会话已停止编译与刷机，仅整理文档。交接时 fastboot 可见 1d4eb066，ADB 空；未发现遗留构建、打包或刷机进程。交接入口：migration/ipados18/交接-2026-11-14-services180-黑屏自动重启.md。没有创建后台自动刷机或代理任务。
+- 用户对继续完成提出疑问，要求将当前任务状态写入文档并交接另一模型。本会话已停止编译与刷机，仅整理文档。交接时 fastboot 可见 1d4eb066，ADB 空；未发现遗留构建、打包或刷机进程。交接入口：migration/ipados18/交接-2026-11-14-services186-启动与触控正常.md。没有创建后台自动刷机或代理任务。
 
 # 2026-11-14 services185 进入系统，触屏待修复
 
