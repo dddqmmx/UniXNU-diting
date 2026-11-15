@@ -730,7 +730,63 @@ if [ "$(cat "$NATIVE_AIR_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_AIR_INIT" ];
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
   printf '%s\n' "$NATIVE_AIR_INIT" > "$NATIVE_AIR_STAMP"
 fi
-EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_DITING_APFS_DEBUG=$DITING_APFS_DEBUG -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_OWNER_DATA_UFS=$OWNER_DATA_UFS -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
+DITING_GPU_RUNTIME_INSTALL=0
+if [ -n "${DITING_GPU_RUNTIME_ARCHIVE:-}" ]; then
+  if [ "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP:$OWNER_DATA_UFS:$OWNER_UNION_SYSTEMOS:${XNU_NATIVE_UFS:-0}:${XNU_DITING_ADRENO_PLATFORM:-0}:${XNU_SOURCE_CORECRYPTO14:-0}" != 1:1:1:0:1:1:0 ]; then
+    echo 'GPU runtime bootstrap requires the bound Diting development UFS OS and matching Adreno ABI' >&2
+    exit 1
+  fi
+  python3 - "$DITING_GPU_RUNTIME_ARCHIVE" <<'PY_GPU_STAGE'
+import json, sys
+from pathlib import Path
+archive = Path(sys.argv[1]).resolve()
+report = json.loads((archive.parent / 'build-report.json').read_text())
+if (not archive.is_file() or not report.get('build_complete') or
+    (report.get('runtime_format'), report.get('guest'), report.get('native_abi'), report.get('chip_id')) !=
+    ('diting-gpu-boot-stage-v1', '22H374', 1, '0x07030002') or
+    Path(report['archive']).resolve() != archive or not 0 < report['packed_bytes'] <= 64 << 20):
+    raise SystemExit('build the complete matching GPU boot stage before linking')
+PY_GPU_STAGE
+  DITING_GPU_RUNTIME_INSTALL=1
+fi
+export XNU_DITING_GPU_RUNTIME_INSTALL=$DITING_GPU_RUNTIME_INSTALL
+DITING_UI_RUNTIME_INSTALL=0
+if [ -n "${DITING_UI_RUNTIME_ARCHIVE:-}" ]; then
+  if [ "$DITING_GPU_RUNTIME_INSTALL" != 1 ]; then
+    echo 'UI update requires the bound guest APFS installation helpers' >&2
+    exit 1
+  fi
+  python3 - "$DITING_UI_RUNTIME_ARCHIVE" <<'PY_UI_STAGE'
+import json, sys
+from pathlib import Path
+archive = Path(sys.argv[1]).resolve()
+report = json.loads((archive.parent / 'build-report.json').read_text())
+if (not archive.is_file() or not report.get('build_complete') or
+    (report.get('runtime_format'), report.get('guest'), report.get('board')) !=
+    ('diting-ui-boot-stage-v1', '22H374', 'SM8475-Diting') or
+    Path(report['archive']).resolve() != archive or not 64 <= report['packed_bytes'] <= 4 << 20):
+    raise SystemExit('build the complete matching UI boot stage before linking')
+PY_UI_STAGE
+  DITING_UI_RUNTIME_INSTALL=1
+fi
+UI_RUNTIME_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-ui-runtime-mode
+if [ "$(cat "$UI_RUNTIME_STAMP" 2>/dev/null || echo 0)" != "$DITING_UI_RUNTIME_INSTALL" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_UI_RUNTIME_INSTALL" > "$UI_RUNTIME_STAMP"
+fi
+export XNU_DITING_UI_RUNTIME_INSTALL=$DITING_UI_RUNTIME_INSTALL
+DITING_USB_DIAGNOSTICS=${XNU_DITING_POWER:-0}
+USB_DIAGNOSTIC_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-usb-diagnostic-mode
+if [ "$(cat "$USB_DIAGNOSTIC_STAMP" 2>/dev/null || echo 0)" != "$DITING_USB_DIAGNOSTICS" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_USB_DIAGNOSTICS" > "$USB_DIAGNOSTIC_STAMP"
+fi
+GPU_RUNTIME_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-gpu-runtime-mode
+if [ "$(cat "$GPU_RUNTIME_STAMP" 2>/dev/null || echo 0)" != "$DITING_GPU_RUNTIME_INSTALL" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_GPU_RUNTIME_INSTALL" > "$GPU_RUNTIME_STAMP"
+fi
+EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_DITING_USB_DIAGNOSTICS=$DITING_USB_DIAGNOSTICS -DXNU_DITING_GPU_RUNTIME_INSTALL=$DITING_GPU_RUNTIME_INSTALL -DXNU_DITING_UI_RUNTIME_INSTALL=$DITING_UI_RUNTIME_INSTALL -I$DITING_NATIVE_DRIVER_SOURCE/kits/DitingPlatform24 -DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_DITING_APFS_DEBUG=$DITING_APFS_DEBUG -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_OWNER_DATA_UFS=$OWNER_DATA_UFS -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
 OWNER_CACHE_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.owner-cache-mount-mode
 if [ "$(cat "$OWNER_CACHE_STAMP" 2>/dev/null || echo 0:0:0)" != "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP:$DITING_APFS_DEBUG" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
@@ -1107,6 +1163,14 @@ PY_RAM_BLOCK_BINDINGS
   if [ "$DITING_ADRENO_PLATFORM" = 1 ]; then
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
     PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
+  fi
+  if [ "$DITING_GPU_RUNTIME_INSTALL" = 1 ]; then
+    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$DITING_GPU_RUNTIME_ARCHIVE"
+    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $DITING_GPU_RUNTIME_ARCHIVE"
+  fi
+  if [ "$DITING_UI_RUNTIME_INSTALL" = 1 ]; then
+    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$DITING_UI_RUNTIME_ARCHIVE"
+    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $DITING_UI_RUNTIME_ARCHIVE"
   fi
   PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
   PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $POWER_ARCHIVE"

@@ -4,9 +4,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Diagnostic ABI, independent of rendering policy. All times are uptime us.
+/* Diagnostic ABI, independent of rendering policy. Record.us is uptime us;
+ * Retire.value[4:6] are raw 19.2 MHz CP ticks, not CPU-clock timestamps.
+ * Boot trace mode 1 includes userspace details; mode 2 keeps kernel events
+ * without enabling the frontend's per-resource calls/allocation backtraces.
  * Event fields and joins are documented by scripts/decode-gpu-trace.py. */
 enum { NativeGpuTraceVersion=1, NativeGpuTraceNote=3,
+       NativeGpuTraceDetailed=1, NativeGpuTraceKernelOnly=2,
        NativeGpuTraceMethod=0x7102, NativeGpuPixelMethod=0x7103,
        NativeGpuTraceCapacity=16384, NativeGpuTraceMetadata=4096, NativeGpuCaptureRecords=4096, NativeGpuPixelSlots=24,
        NativeGpuPixelBytes=65536, NativeGpuPixelChunk=1024 };

@@ -1,0 +1,34 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7849,6 +7849,7 @@
+ 		    {"log/mDNSResponder", 0755, 65, 0},
+ 		    {"log/ppp", 0755, 0, 0},
+ 		    {"logs", 0755, 0, 0},
++		    {"logs/diting", 0755, 0, 0},
+ 		    {"logs/Baseband", 0755, 0, 0},
+ 		    {"logs/WindowServer", 0755, 501, 501},
+ 		    {"logs/hidfw-crashlogs", 0755, 501, 501},
+@@ -7993,6 +7994,13 @@
+ #include "DitingGpuRuntimeInstall.h"
+ #endif
+ 
++#if defined(XNU_DITING_USB_DIAGNOSTICS) && XNU_DITING_USB_DIAGNOSTICS
++#if !defined(DITING) || !DEVELOPMENT || SECURE_KERNEL
++#error Diting USB diagnostics require the Diting development kernel
++#endif
++#include "DitingUsbBootCapture.h"
++#endif
++
+ static const char * init_programs[] = {
+ #if DEBUG && !defined(DITING)
+ 	"/usr/appleinternal/sbin/launchd.debug",
+@@ -8079,6 +8087,9 @@
+ 	}
+ #if defined(XNU_DITING_GPU_RUNTIME_INSTALL) && XNU_DITING_GPU_RUNTIME_INSTALL
+ 	diting_gpu_runtime_prepare(p, (user_addr_t)scratch_addr);
++#endif
++#if defined(XNU_DITING_USB_DIAGNOSTICS) && XNU_DITING_USB_DIAGNOSTICS
++	diting_usb_boot_capture_start();
+ #endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();

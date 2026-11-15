@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -66,11 +67,19 @@ def main():
             env=env, text=True).strip()
 
     sdk = sdk_read('--show-sdk-path')
+    def compiler_tool(tool):
+        if sys.platform == 'linux' and tool in ('ar', 'strip'):
+            found = shutil.which('llvm-' + tool)
+            if not found:
+                raise SystemExit('Linux userland needs llvm-' + tool)
+            return found
+        return sdk_read('--find', tool)
+
     flags = ['-target', 'arm64-apple-ios'+minimum, '-isysroot', sdk,
              '-fstack-protector-strong']
     cross = out/('diting-'+a.guest_build+'.cross')
     cross.write_text('[binaries]\n' + ''.join(
-        name+' = '+repr(sdk_read('--find', tool))+'\n'
+        name+' = '+repr(compiler_tool(tool))+'\n'
         for name, tool in [('c', 'clang'), ('cpp', 'clang++'), ('objc', 'clang'),
                            ('ar', 'ar'), ('strip', 'strip')]) +
         "pkg-config = '/usr/bin/false'\n"
@@ -98,14 +107,18 @@ def main():
     if 'NativeAdrenoAbiVersion = 2' in abi.read_text():
         options += ['-Dtu-build-id=87bf1f920b5ab40afb70012cb7ce080d55a2cceb']
     meson = str(a.venv/'bin/meson')
-    command = ([meson, 'configure', str(out)] if (out/'build.ninja').exists()
-        else [meson, 'setup', str(out), str(a.mesa.resolve()),
-              '--wrap-mode=nodownload', '--cross-file', str(cross)]) + options
+    # SDK/compiler-wrapper changes must not reuse failed capability probes.
+    command = [meson, 'setup', str(out), str(a.mesa.resolve()),
+               '--wrap-mode=nodownload', '--cross-file', str(cross)]
+    if (out/'build.ninja').exists():
+        command += ['--reconfigure', '--clearcache']
+    command += options
     with (out/'configure.log').open('w') as log:
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise SystemExit('Turnip configure failed: '+str(out/'configure.log'))
-    build = [diting_paths.tool('ninja', 'DITING_NINJA', ('/opt/local/bin/ninja',)), '-C', str(out), '-j6']
+    build = [diting_paths.tool('ninja', 'DITING_NINJA', ('/opt/local/bin/ninja',)),
+             '-C', str(out), '-j6', 'src/freedreno/vulkan/libvulkan_freedreno.dylib']
     with (out/'build.log').open('w') as log:
         result = subprocess.run(build, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:

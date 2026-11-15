@@ -40,7 +40,17 @@ void diting_power_start_optional(void) {
  // DSP channel registration is ready synchronously; remote opens follow
  // only after firmware and PAS prerequisites complete on its worker.
  void *h=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
- if(h){DitingBatteryStaticInit();if(!OSMetaClass::postModLoad(h))sheng_battery_start();}
+ if(!h) {
+  native_battery_stats[0]=-10;
+  IOLog("DitingBattery: metaclass registration unavailable\n");
+ } else {
+  DitingBatteryStaticInit();
+  if(!OSMetaClass::postModLoad(h))sheng_battery_start();
+  else {
+   native_battery_stats[0]=-11;
+   IOLog("DitingBattery: metaclass registration failed\n");
+  }
+ }
  sheng_audio_probe();
 }
 }

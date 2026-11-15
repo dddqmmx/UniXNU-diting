@@ -66,13 +66,17 @@ def main():
  if gpu:
   opts=[x for x in opts if x not in ('diting_ui_software=1','diting_software_ui=1')]
   opts+=['diting_ui_software=0','diting_software_ui=0','diting_adreno_start=1','diting_metal=1',
-         'diting_gpu_scanout=1','diting_gpu_pool_mib=256','diting_metal_global=1',
+         'diting_gpu_scanout=1','diting_gpu_pool_mib=0','diting_metal_global=1',
          'diting_gpu_pwrlevel=0']
  # PCM stays optional and publishes only after the real APM/amp/DMA route
  # is ready. Do not silently disable it in an otherwise audio-enabled build.
  # Select peripheral workers from the compiled configuration. Keep the
  # wallpaper policy independent of optional network/audio support.
  if report['settings'].get('XNU_DITING_POWER')=='1':opts+=['diting_adsp=2','diting_audio=2']
+ if report['settings'].get('XNU_DITING_GPU_RUNTIME_INSTALL')=='1':
+  # Mode 2 preserves real kernel submit/retire/display evidence while the
+  # existing frontend leaves SHENG_DIAG and per-resource tracing disabled.
+  opts+=['diting_gpu_runtime_install=1','diting_gpu_trace=2']
  if report['settings'].get('XNU_DITING_WIFI')=='1':opts+=['diting_wifi=1']
  opts+=['diting_ram_banks=1','launchd_unsecure_cache=1','diting_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
  if report['settings'].get('XNU_DITING_BACKLIGHT')=='1':opts+=['diting_backlight=1']

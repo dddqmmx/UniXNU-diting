@@ -6,6 +6,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <dlfcn.h>
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
@@ -32,6 +33,7 @@ static IMP localized_original;
 static bool phone_identity;
 static IMP asset_named_original;
 static IMP asset_simple_original;
+static IMP asset_bundle_original;
 static _Thread_local bool asset_fallback;
 static void (*previous_exception)(id);
 static void record(const char *text)
@@ -121,9 +123,13 @@ static id pad_asset(id cls,SEL selector,id name,id bundle,id traits)
     Class tc=objc_lookUpClass("UITraitCollection");
     if(!tc)return nil;
     id pad=((id(*)(id,SEL,long))objc_msgSend)((id)tc,sel_registerName("traitCollectionWithUserInterfaceIdiom:"),1);
-    if(!pad)return nil;
-    id source[2]={traits,pad};
-    CFArrayRef list=CFArrayCreate(NULL,(const void **)(traits?source:source+1),traits?2:1,&kCFTypeArrayCallBacks);
+    // These catalogs were thinned for J171 at 2x. Preserve the requested
+    // appearance while replacing both missing rendition dimensions.
+    id scale=((id(*)(id,SEL,double))objc_msgSend)((id)tc,sel_registerName("traitCollectionWithDisplayScale:"),2.0);
+    if(!pad || !scale)return nil;
+    if(!traits)traits=((id(*)(id,SEL))objc_msgSend)((id)tc,sel_registerName("currentTraitCollection"));
+    id source[3]={traits,pad,scale};
+    CFArrayRef list=CFArrayCreate(NULL,(const void **)(traits?source:source+1),traits?3:2,&kCFTypeArrayCallBacks);
     if(!list)return nil;
     id actual=((id(*)(id,SEL,id))objc_msgSend)((id)tc,sel_registerName("traitCollectionWithTraitsFromCollections:"),(id)list);
     asset_fallback=true;
@@ -144,6 +150,11 @@ static id simple_asset(id self,SEL selector,id name)
 {
     id image=((id(*)(id,SEL,id))asset_simple_original)(self,selector,name);
     return image?image:pad_asset(self,sel_registerName("imageNamed:inBundle:compatibleWithTraitCollection:"),name,nil,nil);
+}
+static id bundle_asset(id self,SEL selector,id name,id bundle)
+{
+    id image=((id(*)(id,SEL,id,id))asset_bundle_original)(self,selector,name,bundle);
+    return image?image:pad_asset(self,sel_registerName("imageNamed:inBundle:compatibleWithTraitCollection:"),name,bundle,nil);
 }
 
 /* The captured SIGABRT is optional AppIntents history serialization, not
@@ -176,6 +187,9 @@ static void methods(void)
             if(abi(simple,"@",1,"@"))asset_simple_original=method_setImplementation(simple,(IMP)simple_asset);
             record("native restore image rendition fallback installed");
         }
+        Method bundled=image?class_getClassMethod(image,sel_registerName("imageNamed:inBundle:")):NULL;
+        if(asset_named_original && !asset_bundle_original && abi(bundled,"@",2,"@@"))
+            asset_bundle_original=method_setImplementation(bundled,(IMP)bundle_asset);
         // About's marketing row and UIKit branding use the selected identity;
         // version/build, user-assigned name and regulatory values stay native.
         hook("PSGAboutDataSource","_modelNameString","@",0,"",(IMP)phone_model);
@@ -305,9 +319,12 @@ static CGImageRef scale_icon(CGImageRef input,double scale)
     }
     return result;
 }
+#include "settings_icons18.h"
+
 static void added(const struct mach_header *head,intptr_t slide)
 {
     methods();
+    settings_type_icons_install(head,slide);
     static const uint8_t mobile_uuid[]={0x8f,0xeb,0x56,0xd8,0x54,0x30,0x3e,0x27,0x88,0xe4,0x13,0x7f,0x30,0x53,0x42,0xa6};
     static const uint8_t about_uuid[]={0x24,0x82,0x62,0xd0,0x70,0xed,0x3e,0xd5,0xbf,0x6f,0x4c,0x4c,0x8f,0x8d,0xec,0xfb};
     uintptr_t entry=(uintptr_t)head+0x77bc;
@@ -347,11 +364,12 @@ static void load_icons(void *unused)
     // local dependency. Keep its handle for the life of Preferences.
     if(!dlopen("/System/Library/PrivateFrameworks/MobileIcons.framework/MobileIcons",RTLD_LAZY|RTLD_LOCAL))
         record("MobileIcons framework unavailable");
-    // Retry these two qualified images once after loader initialization.
+    // Retry the qualified images once after loader initialization.
     // Successful installs are idempotent and all UUID/entry guards remain.
     for(uint32_t i=0;i<_dyld_image_count();i++) {
         const char *path=_dyld_get_image_name(i);
-        if(path && (strstr(path,"/MobileIcons.framework/") || strstr(path,"/GeneralSettingsUI.framework/")))
+        if(path && (strstr(path,"/MobileIcons.framework/") || strstr(path,"/GeneralSettingsUI.framework/") ||
+                    strstr(path,"/IconServices.framework/")))
             added(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
     }
 }

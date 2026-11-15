@@ -15,3 +15,7 @@ zzzzzzzzzzzzzzz-diting-secondary-fp-context-sync.patch
 zzzzzzzzzzzzzzzz-diting-secondary-bootstrap-vectors.patch
 zzzzzzzzzzzzzzzzz-diting-secondary-fault-publication.patch
 zzzzzzzzzzzzzzzzzz-diting-st61y-touch.patch
+zzzzzzzzzzzzzzzzzzz-diting-gpu-runtime-install.patch
+zzzzzzzzzzzzzzzzzzzz-diting-usb-diagnostics.patch
+zzzzzzzzzzzzzzzzzzzzz-diting-display-refresh.patch
+zzzzzzzzzzzzzzzzzzzzzz-diting-ui-runtime-install.patch

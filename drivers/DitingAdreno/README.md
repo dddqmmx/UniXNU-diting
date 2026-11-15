@@ -8,6 +8,11 @@ Adreno 730 平台支持：GMU、CP、HFI、ZAP 认证、SMMU 与 scanout，冷�
 - GPU 中断 SPI300 / GIC INTID332；SID 0/1 与 mask `0x400` 的 user 与 lpac 上下文
 - `diting_adreno_start=1` 才发起一次异步冷启动；否则不碰 GPU MMIO
 
+`diting-usb-command.py gpu` 在真实 CP 启动完成后读取 Cape GPUCC、GMU DCVS
+和现有 RBBM 计数器。读取有次数和寄存器范围上限，GX 未供电或配置变化时返回
+SKIP/CHANGED，不写时钟、不选择新计数器。原始读数需按 SM8475 源码解释；
+900 MHz 请求及软件刷新通知均不能代替实际帧率验收。
+
 ## 仓库关系
 
 Diting 专属实现，不来自 `UniXNU/Adreno740`（那是 740 的固件与寄存器）。`ArmSmmu4K/` 供 Wi-Fi 与音频共用，`submit/` 是 NativeAdreno 的 Mesa/Turnip 侧。

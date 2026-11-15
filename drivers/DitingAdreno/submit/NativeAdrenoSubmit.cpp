@@ -154,15 +154,15 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
     IOReturn swept=retireCompleted();
     if(swept)return swept;
     // Single-ring admission, not fabricated A740 hardware preemption.
-    // Bound low-priority work already ahead of visible UI. FIFO and real
-    // fences of every accepted submission stay unchanged.
+    // Bound low-priority and auxiliary client work already ahead of visible UI.
+    // FIFO and real fences of every accepted submission stay unchanged.
+    const unsigned cache_context=queue/NativeAdrenoAbiMaxQueues;
     size_t client_pending=0;
     for(const auto &pending:jobs_)if(pending.active && pending.pid==next_pid_)++client_pending;
-    const bool low=next_priority_==2 || next_priority_==3;
-    const size_t cap=low?1:next_priority_==1?2:8;
+    const bool low=next_priority_==2 || next_priority_==3 || cache_context>=2;
+    const size_t cap=low?1:(next_priority_==1 || cache_context==1)?2:8;
     if(client_pending>=cap){++admission_yields_;return kIOReturnBusy;}
     const uint64_t began=native_adreno_vm_now_us?native_adreno_vm_now_us():0;
-    const unsigned cache_context=queue/NativeAdrenoAbiMaxQueues;
     if(cache_context<16)acquired_[cache_context].valid=false;
     Job *job=free();
     if(!job)return kIOReturnBusy;

@@ -1614,36 +1614,14 @@ def refresh_metal(a):
     """Stage the matching native plugin in the real OS extension directory."""
     if os.geteuid() != 0: raise RuntimeError('refresh_metal requires system authentication')
     out, runtime = a.out.resolve(), a.runtime.resolve()
-    report = json.loads((runtime / 'build-report.json').read_text())
-    if report.get('guest') != '22H374': raise RuntimeError('Build a 22H374 Metal plugin first')
-    bundle = runtime / 'DitingAdrenoMetal.bundle'
-    info = plistlib.loads((bundle / 'Info.plist').read_bytes())
-    if info.get('CFBundleIdentifier') != 'dev.unixnu.diting.Metal': raise RuntimeError('Unexpected Metal bundle')
+    import gpu_runtime18
+    gpu_runtime18.load_runtime(runtime)
     device = attach(os_copy(out), out / 'system-mount')
     try:
-        extensions = out / 'system-mount/System/Library/Extensions'
-        if extensions.is_symlink(): raise RuntimeError('Native18 requires a real Extensions directory')
-        extensions.mkdir(parents=True, exist_ok=True)
-        target = extensions / bundle.name
-        if target.is_symlink(): raise RuntimeError('Unexpected plugin alias')
-        if target.exists():
-            old = plistlib.loads((target / 'Info.plist').read_bytes())
-            if old.get('CFBundleIdentifier') != info['CFBundleIdentifier']: raise RuntimeError('Preserving a foreign bundle')
-            shutil.rmtree(target)
-        shutil.copytree(bundle, target)
-        for name in ('DitingAdrenoMetal.publish', 'DitingAdrenoMetal.clients'):
-            shutil.copyfile(runtime / name, extensions / name)
-            os.chown(extensions / name, 0, 0); os.chmod(extensions / name, 0o644)
-        for path in [target, *target.rglob('*')]:
-            if path.is_symlink(): raise RuntimeError('Plugin must contain ordinary owned files')
-            os.chown(path, 0, 0)
-            os.chmod(path, 0o755 if path.is_dir() or path.name != 'Info.plist' else 0o644)
+        staged = gpu_runtime18.stage(out / 'system-mount', runtime)
     finally:
         run(['hdiutil', 'detach', device])
-    dump(runtime / 'os-metal-update.json', dict(build='22H374',
-         path='/System/Library/Extensions/DitingAdrenoMetal.bundle', data_modified=False,
-         publication='real CP/fence and runtime ABI prerequisites; stock discovery',
-         hardware_acceleration_confirmed=False, image_verification='skipped by request'))
+    dump(runtime / 'os-metal-update.json', staged)
 
 
 def finish(a):

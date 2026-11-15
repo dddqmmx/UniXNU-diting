@@ -2,7 +2,7 @@
  * Diting eUSB2 board sequence adapted from NothingOSS SM8475
  * drivers/usb/phy/phy-msm-snps-eusb2.c and repeater-i2c-eusb2.c.
  * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc.
- * Rail names, QUP5, NXP parameters and addresses are Diting REC DT values.
+ * Rail names, QUP5, NXP parameters and addresses are services189 REC DT values.
  * Included inside DitingUsb after Map; no dependence on a WLAN consumer.
  */
 #include "../DitingPower/DitingGccVotes.h"
@@ -11,7 +11,7 @@ static GeniI2c repeater;
 static uint64_t phyNow() {
  uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;
 }
-static bool phyFail(const char *reason) {IOLog("DitingUSB: board PHY unavailable: %s\n",reason);return false;}
+static bool phyFail(const char *reason) {phase("board-phy-unavailable",reason);IOLog("DitingUSB: board PHY unavailable: %s\n",reason);return false;}
 static bool phyWait(Map &m,unsigned off,uint32_t mask,uint32_t value,unsigned ms) {
  const uint64_t end=phyNow()+ms;
  do{if((m.r(off)&mask)==value)return true;IOSleep(1);}while(phyNow()<end);return false;
@@ -36,14 +36,18 @@ static bool prepareBoardPhy() {
  auto *copy=(uint8_t *)IOMallocData(0x20000);if(!copy)return phyFail("cmd-db copy");
  for(unsigned off=0;off<0x20000;off+=4){uint32_t word=usbDb.r(off);memcpy(copy+off,&word,4);}
  // Retain actual USB supplies. Shared votes are never lowered on an optional
- // failure. VRM uses mV, enable +4, mode +8, as on Diting's other consumers.
- struct Rail{const char *name;unsigned mv;};
- const Rail rails[]={{"ldob5",880},{"ldoc10",1200},{"smpb10",1800},{"ldob2",3075}};
+ // failure. VRM uses mV, enable +4, mode +8. Only explicit provider init-mode
+ // requests produce a mode vote (generic mode4 is raw7 for pmic5-ldo).
+ // smpb10 has no init-mode or regulator-type: preserve its existing mode.
+ struct Rail{const char *name;unsigned mv;int mode;};
+ // ldob2's 3072mV provider init is below the upstream USB consumer's
+ // 3075mV minimum; services190 REC reads 3075000uV with USB connected.
+ const Rail rails[]={{"ldob5",880,7},{"ldoc10",1200,7},{"smpb10",1800,-1},{"ldob2",3075,7}};
  bool ok=true;
  for(const auto &rail:rails) {
   QcomRpmhResource resource={};
   if(qcom_cmd_db_find(copy,0x20000,rail.name,&resource)||
-     !diting_rpmh_vote(resource.address+8,7)||!diting_rpmh_vote(resource.address,rail.mv)||
+     (rail.mode>=0&&!diting_rpmh_vote(resource.address+8,unsigned(rail.mode)))||!diting_rpmh_vote(resource.address,rail.mv)||
      !diting_rpmh_vote(resource.address+4,1)){ok=false;break;}
  }
  QcomRpmhResource xo={};
@@ -106,7 +110,9 @@ static bool prepareBoardPhy() {
     !repeaterTransfer(true,0x15,0,&id[1])||!repeaterTransfer(true,0x16,0,&id[2])||
     ((!id[0]&&!id[1]&&!id[2])||(id[0]==255&&id[1]==255&&id[2]==255)))
   return phyFail("NXP repeater not responding; reset remains unowned");
- const uint8_t params[][2]={{6,0x40},{7,0x22},{8,0x64}};
+ // DT override cells are value,register. Select the device sequence; the
+ // host-only TX overrides must not be applied to this CDC device endpoint.
+ const uint8_t params[][2]={{6,0x50},{7,0x00},{8,0x63}};
  for(const auto &param:params) {
   uint8_t got=0;
   if(!repeaterTransfer(false,param[0],param[1])||!repeaterTransfer(true,param[0],0,&got)||got!=param[1])

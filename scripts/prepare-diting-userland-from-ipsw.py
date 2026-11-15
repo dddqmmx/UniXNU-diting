@@ -515,6 +515,8 @@ def main():
     parser.add_argument('--developer', type=Path,
                         help='Xcode developer directory; default is xcode-select -p')
     parser.add_argument('--json-out', type=Path, help='write the run report here')
+    parser.add_argument('--metal-runtime', type=Path,
+                        help='complete optimized A730 ABI1/22H374 runtime to install on OS')
     parser.add_argument('--volume-layout-out', type=Path,
                         help='write the volume-layout.json these images imply here as well')
     parser.add_argument('--jobs', type=int, default=8, help='parallel ranges for the IPSW download')
@@ -524,6 +526,10 @@ def main():
     parser.add_argument('--keep-work', action='store_true',
                         help='keep the downloaded and decrypted intermediates for a post mortem')
     args = parser.parse_args()
+    if args.metal_runtime:
+        sys.path.insert(0, str(ROOT / 'userland'))
+        import gpu_runtime18
+        gpu_runtime18.load_runtime(args.metal_runtime)
     if args.data_mib < 1024 or args.data_mib % 1024:
         fail('--data-mib must be a whole number of GiB, at least 1')
 
@@ -825,6 +831,13 @@ def main():
     rec.run('apply userland', root + [str(ROOT / 'userland/build-ipados18.py'),
                                       'apply', '--out', str(out)])
     expect_file(out / 'apply-complete.json', 'apply', 2)
+
+    if args.metal_runtime:
+        rec.stage('native-gpu-runtime')
+        rec.run('stage native GPU runtime', root + [str(ROOT / 'userland/build-ipados18.py'),
+                'refresh_metal', '--out', str(out), '--runtime', str(args.metal_runtime.resolve())])
+        report['native_gpu_runtime'] = json.loads(
+                (args.metal_runtime.resolve() / 'os-metal-update.json').read_text())
 
     # -- 10. finish -------------------------------------------------------
     rec.stage('finish')

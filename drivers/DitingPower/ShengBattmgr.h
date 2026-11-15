@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* The battery manager the audio DSP runs (PMIC GLINK, channel "PMIC_RTR_ADSP_APPS"): messages start with a 12-byte header (owner, type,
- * opcode); a property read is a request {battery 0, property, 0} answered by {property, value, result}; the DSP also sends notifications
- * when something changed. This is the message codec, the refresh cycle (one request in flight, the next one only when it is answered
- * or the owner's timer gives up on it) and the mapping to what iOS reads from a power source. No I/O, no waits: the owner sends the
- * bytes and feeds back what arrives. Charging itself stays with the DSP firmware; the one setting written here is the USB input current
- * limit on a computer's port, which the firmware keeps low until the host side asks for more (as a USB device stack does once the
- * port configured it). */
+/* Diting PMIC GLINK on "PMIC_RTR_ADSP_APPS". A property request is a
+ * 12-byte {owner, type, opcode} header followed by {battery 0, property, 0};
+ * its response carries {property, value, result}. This allocation-free codec
+ * reads measurements and subscribes to notifications. Charging is firmware
+ * owned: this implementation never emits a property write. The Sheng API
+ * names and diagnostic field indices are retained for the board aggregate. */
 #ifndef SHENG_BATTMGR_H
 #define SHENG_BATTMGR_H
 #include <stdint.h>
@@ -24,8 +23,10 @@ extern "C" {
 #define SHENG_BATTMGR_OP_BOARD_GET 0x50u  /* the board's own properties, same request and answer shape: fuel gauges, charger state */
 #define SHENG_BATTMGR_REQUEST_BYTES 24u
 #define SHENG_BATTMGR_ENABLE_BYTES 28u
+#define SHENG_BATTMGR_NOTIFY_BYTES 16u
 
-/* The fields one refresh reads, in order (at most 32: valid has a bit per field). */
+/* Stable diagnostic indices, not the request order. Unsupported board fields
+ * are never requested. There are at most 32 fields: masks have one bit each. */
 enum {
     BmStatus, BmPresent, BmCapacity, BmVoltage, BmCurrent, BmTemperature, BmCharge, BmUsbOnline, BmUsbType, BmUsbVoltage,
     BmUsbCurrent, BmTimeToEmpty, BmTimeToFull, BmGauge1Remaining, BmGauge1Full, BmGauge2Remaining, BmGauge2Full, BmFull, BmDesign,
@@ -39,26 +40,24 @@ enum {
 
 typedef struct {
     int32_t value[BmFields];
-    uint32_t valid;               /* bit per field */
-    uint32_t fresh, completed;    /* current cycle and last completed cycle */
+    uint32_t valid, fresh;        /* working values and this cycle's replies */
+    int32_t completed_value[BmFields];
+    uint32_t completed_valid, completed, snapshot_cycle; /* immutable publication */
+    uint32_t deferred;            /* optional failed reads: retry on a slow refresh */
     uint8_t cursor, in_flight, enabled, slow_due;
     uint32_t cycles_done, responses, notifications, errors, timeouts, ignored;
     uint32_t refresh_wanted;      /* a notification asked for a new cycle while one ran */
     int last_timeout;             /* the field the last timeout skipped, -1 none */
-    /* the input current limit on a computer's port: what a standard port (SDP) gets, 0 to leave the firmware's; the port type the
-     * tries count for; the value due to be sent, the one in flight, tries for this port type, sets the firmware took, the last result
-     * (the firmware's, or -60 timed out) */
-    uint32_t sdp_limit_ua;
-    int32_t limit_port;
-    uint32_t limit_due, limit_in_flight, limit_tries, limit_sets;
-    int32_t limit_result;
 } ShengBattmgr;
 
-/* What a power source shows. Temperatures are hundredths of a degree Celsius, as the firmware reports them. The charge comes from the
- * board's two fuel gauges (remaining over full, both summed) when they answer, else from the battery's capacity property; the board
- * reports the current with discharge positive, the power source with charge positive. */
+/* Xiaomi battery properties: capacity 0.01%, temperature 0.01 C, voltage uV,
+ * current uA (discharge positive), charge counter mAh, full/design uAh,
+ * time-to-full minutes and time-to-empty seconds. IOPMPowerSource current is
+ * charge positive. No readings from the old dual-gauge board extension are
+ * used to infer this phone's capacity. */
 typedef struct {
     int present, external, charging, fully_charged, critical;
+    int present_known;
     int source_known, status_known; /* current completed cycle, not retained values */
     int percent;                  /* 0..100 */
     int charge_known;             /* percent comes from a reading, not a default */
@@ -68,23 +67,25 @@ typedef struct {
     int time_to_empty_min, time_to_full_min;  /* -1 unknown */
     uint32_t adapter_family;      /* kIOPSFamilyCode value, 0 when no adapter */
     int adapter_mv, adapter_ma, adapter_watts;
+    uint32_t sample_cycle;        /* core and optional publication share this ID */
 } ShengBatterySnapshot;
 
-enum {BmIgnored = 0, BmAnswer = 1, BmCycleDone = 2, BmNotified = 3, BmEnabled = 4};
+enum {BmIgnored = 0, BmAnswer = 1, BmCycleDone = 2, BmNotified = 3, BmEnabled = 4, BmSnapshotReady = 5};
 
 void sheng_battmgr_init(ShengBattmgr *b);
 /* The notification enable request (sent once the channel is up). */
 uint32_t sheng_battmgr_enable_request(uint8_t out[SHENG_BATTMGR_ENABLE_BYTES]);
 /* Starts a refresh cycle (no effect while one runs: it is remembered and runs after). slow: also the fields that hardly change. */
 void sheng_battmgr_refresh(ShengBattmgr *b, int slow);
-/* The next request: an input current limit due after the last cycle, else the running cycle's next field; 0 when nothing is to be
- * sent now (one in flight, or nothing due). */
+/* The next read; 0 when there is a request in flight or no cycle is running. */
 uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_BYTES]);
-/* The owner's request timer ran out: the field is skipped (a limit set counts as tried). */
-void sheng_battmgr_timeout(ShengBattmgr *b);
+/* Advance a timed-out request or a request the transport refused to queue.
+ * Both return a Bm* result; a refusal is not an unanswered firmware request. */
+int sheng_battmgr_timeout(ShengBattmgr *b);
+int sheng_battmgr_send_failed(ShengBattmgr *b);
 /* A message from the channel; returns one of the Bm* results. */
 int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length);
-/* The power source values from the fields read so far. */
+/* The most recently committed snapshot, unaffected by a following cycle. */
 void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s);
 
 #ifdef __cplusplus

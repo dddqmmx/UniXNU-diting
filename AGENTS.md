@@ -1,10 +1,18 @@
-> 当前 Linux 会话状态（2026-11-14）：services186 已稀疏写 boot_b 并临时启动，用户确认进系统、触屏点按与滑动正常，熄屏后亮屏触控恢复正常。保持八核，未更新 userdata；services185 镜像保留回退。双指手势尚未测试，长期稳定及其他外围未覆盖。手机留在系统供观察。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。源码 4d478a5 已推送；7 项 host 测试、两个日志关闭编译模式、完整内核和八核打包通过；缓存 services169/tree/.cache/xnu-work 对应 services186。
+> 当前亮度/图标任务状态（2026-11-15）：持久boot_b与运行内核为services193的 `ui-brightness-20261115-06`，UI安装ID `3d4f894a-5231-44f3-8ed9-b552dc3cb1d1`、stage6/error0。第四版用户确认“亮度正常图标不显示”；第六版原生设置BKS事务低/高/中/恢复均通过实际DCS回读，failures0。图标第四版视觉FAIL，第六版缓存读取修复已刷入，打开设置后的图标日志和视觉验收仍待完成；本轮熄屏恢复未验收。设备已从只读Recovery返回正常第六版系统。入口：[services193亮度与图标](migration/ipados18/services193-ui-brightness.md)。GPU安装仍stage1/error17/files-written0，120fps未通过，保持独立GPU工作的原始FAIL与边界。本任务使用私有源码/缓存、nice19/ionice3/jobs1，未改GPU/USB/电池/ADSP源码或共享services169缓存。以下2026-11-14的192交接段落保留为历史时点，不代表当前boot镜像。
+
+> 历史交接状态（2026-11-14）：持久 boot_b 与最近临时启动均为 services192，完整内核、八核打包和部署已完成。系统内 USB 链路已打通，192 枚举 ffff:0128 /dev/ttyACM0，完整 status 与两份有界 gpu 时钟回复 PASS、command_errors=0。services190/191 已实测实时日志、真实 RAM 读取、坏地址拒绝及 ACK 后自主回 Fastboot；192 未重复重启。ADSP stage13/error0、SCM0:0、PMIC_online1；电池 stage4/percent100/flags0x7，界面电量、插拔、PCM、Mux/Finder 与长期稳定未验收。
+
+> GPU 性能仍 FAIL，目标为120 fps / 8.333 ms，不能改为60 fps验收。services190 用户确认动画仍跳到终态；匹配运行内核的 gRefreshHz 已实测为120，旧“60 Hz对照”说法过时。services191 最新反馈“还是极其卡顿”，连续USB采集16792条事件，已检查范围无缺失、kernel drops=0，提交至退役p95=17.576ms、CP执行p95=15.472ms。services192 只增加GPUCC/GMU/RBBM只读取证，尚无新的UI/触控/流畅度验收；频率投票、软件通知和GPU copy不能证明物理120fps。当前交接入口：[services192 USB与120fps进度](migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md)。
+
+> 保持services186 ST61Y、services182实测RAM/FD/template/33792字节loader及services187真实GPU runtime（安装ID 0912509e-45dd-4e4b-8852-2683ee553258），Data/SystemOS保留。设备仓库HEAD bd21ea7，有大量未提交修改；共享services169 XNU缓存现在对应192。保留各轮产物和未实机验收的显式186软件回退候选，独立电池/ADSP改动必须保留，不reset/clean。用户已授权构建、稀疏写boot_b、临时启动、Recovery取证和有界USB/RAM诊断，不重复询问常规许可；继续使用--skip-image-verification，跳过镜像哈希、审计和镜像回读。本次用户要求文档交接，手机留在192系统，没有运行中的构建/部署/采集、活动goal或代理任务。
+
+> services186 历史基线（2026-11-14）：用户确认进系统、触屏点按和滑动正常，熄屏后亮屏触控恢复正常。八核，未更新 userdata，双指手势和长期稳定尚未测试。入口：[`services186-st61y-touch.md`](migration/ipados18/services186-st61y-touch.md)。源码 4d478a5 已推送；7 项 host 测试、两个日志关闭编译模式、完整内核和八核打包通过。
 
 > services185 历史状态（2026-11-14，后由 services186 替换）：当轮已稀疏写 boot_b 并临时启动，用户确认“进系统了”，随后报告触屏不工作。保持八核，未更新 userdata；长期稳定性和各外围功能未验收。历史入口为 [`services185-bdf-power-boot.md`](migration/ipados18/services185-bdf-power-boot.md)；最新状态见[任务交接](migration/ipados18/交接-2026-11-14-services186-启动与触控正常.md)。
 
 # Diting probe policy
 
-> 当前状态以本文开头的 services186 记录为准。`D:\ai\diting\交接-2026-11-11-准备用户态.md` 与 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md` 是历史路线。下方带日期的段落是历史实机与构建记录。
+> 当前状态以本文开头及 services192 交接为准。`D:\ai\diting\交接-2026-11-11-准备用户态.md` 与 `D:\ai\diting\DeepSeek执行计划-进系统与Diting整理-20261111.md` 是历史路线。下方带日期的段落是历史实机与构建记录；其中旧 boot_b、缓存和设备模式不代表当前状态。
 
 - Optional probes must record PASS, FAIL, SKIP or RUNNING and return to the normal boot path. Never terminate boot with panic, halt or an unbounded loop to display a probe result.
 - On failed prerequisites, log the reason and skip dependent MMIO/DMA work. Do not fabricate successful services, media or hardware resources to keep boot moving.
@@ -907,3 +915,9 @@ work is the boot itself, not the inputs.
 - 真实事件高nibble、LE16 super-resolution、多指状态、空FIFO、丢失批次释放和复位后立即恢复已实现。错误初始化/超时保持有界并返回正常UI；不刷触控firmware、不校准/写OTP或工厂数据。
 - 7项host协议/资源测试、两套shell语法和workflow预检通过；ramoops关闭的resources-only archive和touch对象实际编译无未定义诊断引用，完整内核及八核打包通过。新增18个z前缀的增量XNU patch已追加series，未重写0001聚合补丁。
 - 实机镜像101183488字节，继续services182 FD/template和33792字节loader，新hardware DTB只作本轮资源输入。09:27稀疏写boot_b并临时boot全部OKAY；当前boot_b/运行系统为services186，用户确认进系统、点按与滑动正常，熄屏后亮屏触控恢复正常；双指手势尚未测试。只推送源码/测试/配置/记录，所有原始日志、firmware/restore和产物本地保存。
+
+# 2026-11-15 设置图标独立候选（低优先级，未部署）
+
+- 用户确认仅 Game Center、iCloud 图标可见。匹配22H374分析证实既有适配未覆盖主列表的ISTypeIcon同步/异步生成；新增Preferences内失败/占位图回退，重用已安装的MobileCoreTypes声明和原生符号/命名图像，并补UIImage两参数及pad/2x回退。
+- 独立arm64 UI库编译/链接、12个实际ABI、188个图形类型资源和block捕获检查PASS。没有新实机日志，LaunchServices或GPU具体失败层尚未证实，图标显示未验收；没有占用设备、部署、GPU/共享XNU缓存/运行态修改，现有独立改动保留。
+- 入口：[services192-settings-icons.md](migration/ipados18/services192-settings-icons.md)。本机候选/日志在diting-work/{build,logs/diting,tmp}/services192/settings-icons-20261115；后续以当时的完整UI源码合并重编译，不能覆盖GPU任务后续产物。

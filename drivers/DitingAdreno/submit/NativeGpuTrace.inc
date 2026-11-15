@@ -14,7 +14,7 @@ static void gpuTraceInit()
     unsigned enabled=0,pixels=0;
     PE_parse_boot_argn("diting_gpu_trace",&enabled,sizeof(enabled));
     PE_parse_boot_argn("diting_gpu_pixels",&pixels,sizeof(pixels));
-    if(enabled!=1)return;
+    if(enabled!=NativeGpuTraceDetailed && enabled!=NativeGpuTraceKernelOnly)return;
     gpuTrace.slots=static_cast<NativeGpuTraceSlot *>(IOMallocZero(sizeof(NativeGpuTraceSlot)*NativeGpuTraceCapacity));
     if(!gpuTrace.slots)return;
     gpuTrace.capacity=NativeGpuTraceCapacity;
@@ -24,6 +24,11 @@ static void gpuTraceInit()
     __atomic_store_n(&gpuTraceOn,1,__ATOMIC_RELEASE);
 }
 extern "C" int native_gpu_trace_enabled(void) {return __atomic_load_n(&gpuTraceOn,__ATOMIC_ACQUIRE);}
+extern "C" uint32_t native_gpu_trace_range(uint64_t after,uint32_t records,void *out,uint32_t bytes)
+{
+    if(!native_gpu_trace_enabled())return 0;
+    return gpuTrace.range(after,records,out,bytes);
+}
 extern "C" void native_gpu_trace_record(uint32_t event,uint32_t pid,const uint64_t *values,uint32_t count)
 {
     if(!native_gpu_trace_enabled() || count>12 || (count && !values))return;

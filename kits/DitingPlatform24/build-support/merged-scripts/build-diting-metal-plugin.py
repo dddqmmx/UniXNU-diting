@@ -37,7 +37,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=e
 minimum='18.0' if a.guest_build=='22H374' else '16.6.1'
 command=['xcrun','clang++','-target','arm64-apple-ios'+minimum,'-isysroot',sdk,
     *(['-DDITING_GUEST_22H374=1'] if a.guest_build=='22H374' else []),
-    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror',
+    '-std=c++17','-fobjc-arc','-fblocks',('-O3' if a.guest_build=='22H374' else '-Os'),'-Wall','-Wextra','-Werror',
     '-Wno-deprecated-declarations','-I'+str(ROOT/'drivers/DitingMetal'),
     '-I'+str(ROOT/'drivers/DitingAdreno/submit'),
     '-dynamiclib',str(ROOT/'drivers/DitingMetal/DitingMetalPlugin.mm'),
@@ -53,7 +53,7 @@ shutil.copyfile(a.bridge_directory/'DitingMetalBridge.dylib',bundle/'DitingMetal
 shutil.copyfile(a.turnip_library,bundle/'libvulkan_freedreno.dylib')
 if a.prime_list:shutil.copyfile(a.prime_list,bundle/'DitingAdrenoMetal.primelist')
 for binary in ['DitingAdrenoMetal','DitingMetalBridge.dylib','libvulkan_freedreno.dylib']:
-    subprocess.run(['codesign','--force','--sign','-','--pagesize','4096',str(bundle/binary)],check=True)
+    subprocess.run([os.environ.get('DITING_CODESIGN','codesign'),'--force','--sign','-','--pagesize','4096',str(bundle/binary)],check=True)
 with (bundle/'Info.plist').open('wb') as f:
     plistlib.dump(dict(CFBundleIdentifier='dev.unixnu.diting.Metal',CFBundleName='DitingAdrenoMetal',
         CFBundleExecutable='DitingAdrenoMetal',CFBundlePackageType='BNDL',CFBundleVersion='1',

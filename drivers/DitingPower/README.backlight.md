@@ -1,41 +1,53 @@
 # Diting 亮度控制
 
-## 板级输入
+## 板级输入与回读单位
 
-- 面板：NT37705 Visionox OLED，1080 × 2412，单 DSI0 命令模式。
-- REC 启动参数实际选择 `qcom,mdss_dsi_nt37705_visionox_amoled_120hz_cmd`，phandle `0x5e6`。
-- 控制器：SM8475 DSI v2.6，寄存器 `0x0ae94000`、长度 `0x400`。
-- 调光：DCS `0x51` 写入、`0x52` 回读；0 表示关闭，非零下限 10，上限 4095。
-- `bl-inverted-dbv` 在 Nothing 驱动里交换字节，并不反转亮度。其 MIPI helper 原始顺序为低字节、高字节，交换后 Diting 在线路上使用高字节、低字节。
-- 输入记录在 `configs/diting-display-sm8475.json`，ADT `/chosen/diting-dsi-backlight` 为 `<Q6I`，依次为基址、长度、最大值、非零最小值、字节交换、通道、版本。
+- Diting L12 AMOLED，1220 × 2712；设备树含 `l12_36_02_0b_dsc_cmd` 和 `l12_42_02_0a_dsc_cmd` 两种面板。
+- SM8475 DSI0 寄存器为 `0x0ae94000`，长度 `0x400`，VC0。
+- DCS `0x51` 写入：0 表示关闭，最低非零值 1，最高 4095。线路字节顺序为高字节、低字节；`bl-inverted-dbv` 是字节交换标记。
+- DCS `0x52` 两字节回读：**每个写入步长对应 4 个原始回读单位**。services92 已记录 1604→6416、787→3148、3894→15576、4045→16180；2026-11-15 第一版设备测试又得到 1→4。
+- 原始回包保留于 `DitingBrightnessRawReadback`，换算后的控制值为 `DitingBrightnessReadback` 和 `IODisplayParameters.brightness.value`。`DitingBrightnessReadScale=4`，控制值的 `DitingBrightnessReadQuantum=1`。
+- 原始值按最近写入步长换算，满量程限制在 4095；超出 14 位回读范围、错误 VC、畸形包和一字节包均拒绝，不把错误回包当成测量成功。
 
-## 实现
+输入见 [diting-display-sm8475.json](../../configs/diting-display-sm8475.json)。ADT `/chosen/diting-dsi-backlight` 是精确 32 字节 `<Q6I`：基址、长度、最大值、最低非零值、字节交换、通道、版本。驱动要求上述 Diting 输入；原先检查最低非零值为 10 会拒绝实际生成的 ADT。
 
-`DitingBacklight.cpp` 在独立 IOWorkLoop 上使用控制器的命令 FIFO。每次最多两个 DWORD，完全不需要分配 DMA 内存；保留固件的像素流水线、PLL、显示供电及扫描缓冲。
+## 服务与事务
 
-首次读取真实亮度后才发布 `IODisplayParameters`、`backlight-control`。写入完成后再读面板确认；16.16 秒的 `FadePeriod` 转成最多 5 秒渐变，新请求覆盖待处理目标，不阻塞调用方。硬件完成、数据类型和超时均有界处理。DMA 忙时不重用或复位 FIFO。
+[DitingBacklight.cpp](DitingBacklight.cpp) 在独立 IOWorkLoop 上使用命令 FIFO，每次最多两个 DWORD，不分配物理 DMA 缓冲。
+[DitingBacklightProtocol.h](DitingBacklightProtocol.h) 定义数据包、单位换算和完成所有权规则。
 
-CoreBrightness 查找 AppleARMBacklight conformance。板级类只注册唯一的 `DitingBacklight` 名称，在编译期实现 `getMetaClass()` 适配所选 Darwin24 接口。真实 AppleARMPlatform 的类初始化可能晚于 framebuffer；亮度工作循环每 100 ms 异步查询，最多等待 30 秒，类就绪后才开始 DCS 事务及服务发布。没有原生类时停用亮度服务并记录原因，不阻塞系统启动。
+首次真实回读通过后才发布亮度属性和 `backlight-control`，并使用实际 AppleARMPlatform 的 AppleARMBacklight metaclass 提供 conformance。类晚到时每 100 ms 查询，最多 30 秒；不可用时记录原因，保持正常系统启动。板级类名称仍是唯一的 DitingBacklight，不注册重复的 AppleARMBacklight 类，也不修改猜测的 vtable 槽位。
 
-services61 实际 panic 证明 AppleARMPlatform 随后会注册 `AppleARMBacklight`。已删除之前的同名兼容类，不能用“当前没查到”推断它永远不会注册。没有复制固定长度 vtable 或修改猜测的槽位。服务只允许 `brightness`、`FadePeriod`，backboardd 使用现有的服务级属性授权。
+事务只临时借用命令引擎相关控制位，保留像素流水线、PLL、显示供电、视频/刷新 IRQ 和其他硬件故障。DMA 完成且控制器不忙才允许回收；读事务还要求真实 BTA 完成。50 ms 超时保留 FIFO 所有权，迟到完成可以由后续请求收取，空闲状态本身不算完成。
 
-服务启动允许固件保留的 DSI 视频引擎，只要求 DSI_EN 已开启且测试图案未激活。命令事务临时启用 CMD_MODE_EN，完成后恢复原控制位；不复位固件显示流水线。
+写入退休后等待至少 20 ms 再读面板。已退休但未被接受的值最多切换 HS/LP 重试一次，记录实际错误并保留后续请求。恢复目标已经等于当前测量值时，若仍有旧错误则重新回读，成功后才清除错误。
 
-## 构建接入
+`brightness` 支持有符号 32/64 位数字，负值归零；`FadePeriod` 为 16.16 秒，最多 5 秒渐变。可选 `backlight-level` 只作 CoreBrightness 元数据。未知属性和错误类型拒绝。独立请求定时器与最新值邮箱防止并发请求的唤醒丢失，调用方不等待 DSI 事务。
 
-- `CONFIG_XNU_DITING_BACKLIGHT=y` 单独控制链接，与 Wi‑Fi 是否启用无关。
-- `build-diting-power-native.py` 构建类，并将其静态初始化放到 IOKit 后期注册路径。
-- `MiniIOMobileFramebufferStart` 仅在显示启动成功后调用亮度初始化。
-- 打包器显式加入 `diting_backlight=1`；设为 0 可暂时保留固件亮度。
+配套 [ui_compat18.c](../../userland/ui_compat18.c) 只对匹配 22H374 CoreBrightness 的空映射初始化窗口使用该运行时自带的默认曲线；通过真实协议服务或完整 Diting ADT 安装保护。映射建立后恢复原函数。默认曲线不构成面板光度校准。
 
-## 来源与当前状态
+早期未有效启用背光的系统可能保存 `SBBacklightLevel2=0.0`；真实控制启用后，该值使面板降至最低亮度。首次启动时，SpringBoard 在初始化亮度控制器前将这个精确零值迁移到0.5，并保存 `DitingBacklight18InitialValueMigrated`。完成标记使后续用户选择（包括最低滑块值）保持原生行为；已有正值、缺失值和非数字不被改写，保存失败允许下次重试。
 
-- [UniXNU 官方显示与亮度文档](https://unixnu.com/zh/porting/display)：OS 属性、工作循环、渐变及完成/失败处理。
-- [Sheng 亮度服务](https://github.com/UniXNU/UniXNU-sheng/blob/08cde20/package/AppleARMBacklight.cpp)：CoreBrightness 服务发现与 sandbox 接入方式。没有采用其 KTZ8866、双 I²C、SM8550 时钟和引脚参数。
-- NothingOSS 版本 `c402fcdb3a1523d10b15ef1123bced45456f7592` 的 [dsi_panel.c](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/blob/c402fcdb3a1523d10b15ef1123bced45456f7592/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_panel.c)、[dsi_ctrl_hw_cmn.c](https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475/blob/c402fcdb3a1523d10b15ef1123bced45456f7592/vendor/qcom/opensource/display-drivers/msm/dsi/dsi_ctrl_hw_cmn.c)、`dsi_ctrl_reg.h` 和 `drivers/gpu/drm/drm_mipi_dsi.c`：Diting 编码、FIFO、BTA、状态及寄存器事实。本实现为本项目的工作循环传输，没有引入 Linux 运行时依赖。
+## 构建与部署
 
-已完成编译并按用户后续指令临时启动，Fastboot Sending/Booting 均为 OKAY；尚待确认滑块、最低/中间/最高亮度及面板回读。
+- `CONFIG_XNU_DITING_BACKLIGHT=y` 独立于 Wi-Fi；`build-diting-power-native.py` 构建静态归档，显示成功启动后调用亮度初始化。
+- 打包器加入 `diting_backlight=1`。实际源码、recipe 和 merged 构建入口都必须使用同一候选。
+- UI 更新可通过 `scripts/build-diting-ui-stage.py` 与 `DITING_UI_RUNTIME_ARCHIVE` 在 launchd 前安装 `/diting/libditing-ui18.dylib`。先保存本候选独立备份，再原子替换 UI 文件；GPU 文件和标记保持原状态。
+- 低优先级工作使用私有 XNU 源码/对象缓存、`nice -n 19 ionice -c 3` 和单编译任务，不写 GPU 工作的共享缓存。
 
-DCS GET_DISPLAY_BRIGHTNESS 的双字节值按高字节、低字节解码。services87 的实际写入 `00 b4` 对应回包 `22 00 b4`，确认旧 little-endian 推断错误。固件初始 `22 20 00` 保留原始读数 8192，发布给系统的控制值按声明的 0–4095 范围限制；原始读数单独记录，不能交换字节来让读数落入范围。退休后的错误回包保留错误、允许后续滑块请求；DMA 归属不明确时继续保护 FIFO，不复用未完成事务。
+## 当前验证
 
-services84 的面板双字节回读已通过，随后 backboardd 在 22H374 CoreBrightness 默认映射尚未分配时崩溃。配套 `ui_compat18.c` 只在真实 NT37705 服务存在、目标 CoreBrightness 身份匹配且映射为空的初始化窗口，使用同一运行时自带的软件默认曲线；映射建立后恢复原函数。它不代替面板光度校准。详见 `migration/ipados18/services85-backlight-startup.md`。
+2026-11-15：12项实际协议/ADT/兼容保护/首次偏好迁移 host 测试通过ASan/UBSan。图标修复及亮度实现已集成；第三版直接IOKit/DCS测试的0、1、512、2048、4095、超上限、500ms渐变、连续最新请求、相同目标及恢复均PASS。
+
+第三版恢复原值1后，用户观察为黑屏；只读设备偏好确认为 `SBBacklightLevel2=0.0`。第四版的一次迁移实际保存0.5及完成标记。用户随后确认“亮度正常图标不显示”；滑块操作后的USB读回为level=goal=501、requests805/writes473/reads474。再次只读Recovery取得用户选择0.12231758236885071及完成标记，证实迁移没有覆盖后续正值选择。实际滑块亮度调节PASS，设置图标在第四版FAIL，熄屏后亮屏本轮未验收。
+
+第六版保留第四版生产亮度代码，并覆盖设置图标的两个真实缓存读取入口；完整内核、八核打包、稀疏boot_b及同镜像临时启动通过。USB匹配UI安装ID `3d4f894a-5231-44f3-8ed9-b552dc3cb1d1`、stage6/error0，实际level=goal=623、requests5/writes5/reads6。第六版一次性BKS事务日志已回收：低1024/4096、高3072/12288、中2048/8192、恢复623/2492均PASS（控制值/原始回读），failures=0。图标像素日志尚未产生，可见图标和熄屏恢复待观察；这些读回不能代替视觉验收。
+
+第一版单位换算错误、第二版上限测试误判以及第四版UIScreen setter未触发系统请求的FAIL日志均保留；UIScreen自动测试失败不覆盖用户真实滑块的PASS。4095写入的原始回读可饱和为16383，其余等级仍要求精确4倍对应。设备原始证据保存在本机 `diting-work/logs/diting/services193/ui-brightness-20261115{-02,-03,-04,-06}/`，不上传私人日志。
+
+## 固定参考
+
+- [UniXNU 显示与亮度文档](https://unixnu.com/zh/porting/display)：OS 属性、工作循环、渐变及完成/失败处理。
+- LineageOS `android_kernel_xiaomi_sm8450-modules` revision `3b30ba7df6608c97c0ba2d55d679a6b5987c4c66` 的 Qualcomm `dsi_panel.c`、`dsi_ctrl_hw_cmn.c`、`dsi_ctrl_reg.h` 及 Xiaomi `mi_dsi_panel.c`：Diting 面板范围、字节交换和控制器协议。
+- NothingOSS SM8475 revision `c402fcdb3a1523d10b15ef1123bced45456f7592` 仅作同 SoC 寄存器和 FIFO 参照；面板身份和板级参数以 Diting 设备树为准。
+- [Sheng 亮度服务](https://github.com/UniXNU/UniXNU-sheng/blob/08cde20/package/AppleARMBacklight.cpp) 作 conformance/sandbox 结构参照，不采用其 KTZ8866、双 I²C 或 SM8550 板级参数。

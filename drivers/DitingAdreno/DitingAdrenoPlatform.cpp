@@ -17,6 +17,8 @@
 #include "DitingAdrenoSmmu.h"
 #include "DitingAdrenoRegisters.h"
 #include "DitingAdrenoCp.h"
+#include "DitingAdrenoCpProfile.h"
+#include "DitingAdrenoClockSnapshot.h"
 #include "../DitingPower/DitingPlatformResources.h"
 
 extern "C" const uint8_t DitingAdrenoGmuFirmware[];
@@ -40,6 +42,7 @@ static ArmSmmu4KContextConfig config;
 static ArmSmmu4KIo smmu_io;
 static uint64_t bank_offset;
 static unsigned parents_ready,attempted;
+static unsigned diagnostics_ready,diagnostics_power_level;
 static void record(const char *phase,unsigned result,uint64_t a=0,uint64_t b=0)
 {
     char text[240];int n=snprintf(text,sizeof(text),
@@ -336,6 +339,10 @@ static void run(void *,wait_result_t)
         power_level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[power_level].bus:0);
     auto cp_status=DitingAdrenoCpStart(&gmu);
     record("CP/user-client startup",cp_status,gr.core_version,gr.hfi_version);
+    if(!cp_status) {
+        diagnostics_power_level=power_level;
+        __atomic_store_n(&diagnostics_ready,1,__ATOMIC_RELEASE);
+    }
     if(cp_status)record("GX clock state after CP failure",rd(windows[DitingGpuClock],0x90a8),
         (uint64_t(rd(windows[DitingGpuClock],0))<<32)|rd(windows[DitingGpuClock],0x1000),
         (uint64_t(rd(windows[DitingGpuClock],4))<<32)|rd(windows[DitingGpuClock],0x1004));
@@ -346,6 +353,61 @@ static void worker(void *parameter,wait_result_t result)
     thread_terminate(current_thread());
     thread_block(THREAD_CONTINUE_NULL);
 }
+}
+extern "C" unsigned diting_gpu_snapshot_text(char *out,unsigned capacity)
+{
+    if(!out || capacity<512)return 0;
+    DitingClockSample sample{};
+    const bool ready=__atomic_load_n(&diagnostics_ready,__ATOMIC_ACQUIRE)!=0;
+    auto readClock=[](void *,uint32_t at,uint32_t *value)->int {
+        if(!windows[DitingGpuClock].cpu || at>windows[DitingGpuClock].bytes-4)return 1;
+        *value=rd(windows[DitingGpuClock],at);
+        __asm__ volatile("dmb oshld":::"memory");return 0;
+    };
+    DitingAdrenoReadClockSample(nullptr,ready,readClock,&sample);
+    const char *status=sample.status==DitingClockSamplePass?"PASS":
+        sample.status==DitingClockSampleSkip?"SKIP":
+        sample.status==DitingClockSampleChanged?"CHANGED":"FAIL";
+    unsigned used=0;
+    auto append=[&](const char *format,auto... words) {
+        if(used>=capacity-1)return;
+        int n=snprintf(out+used,capacity-used,format,words...);
+        if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
+    };
+    const unsigned level=ready?diagnostics_power_level:DitingAdrenoPowerLevelCount;
+    append("GPU clock v1 status=%s uptime_us=%llu reads=%u requested_hz=%u requested_DDR=%u\n",
+        status,microseconds(),sample.reads,level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].hz:0,
+        level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].bus:0);
+    if(sample.status!=DitingClockSamplePass) {
+        append("unavailable: require completed CP startup, powered GX, and stable clock configuration\n");
+        return used;
+    }
+    const auto &v=sample.value;
+    append("GPUCC GX=%08x GFX_CBCR=%08x RDVM_CBCR=%08x GMU_CMD=%08x GMU_CFG=%08x HUB_CMD=%08x HUB_CFG=%08x\n",
+        v[DitingClockGx],v[DitingClockGfx],v[DitingClockRdvm],v[DitingClockGmuCmd],
+        v[DitingClockGmuCfg],v[DitingClockHubCmd],v[DitingClockHubCfg]);
+    append("PLL0 MODE=%08x OPMODE=%08x STATUS=%08x L=%08x ALPHA=%08x USER=%08x\n",
+        v[DitingClockPll0Mode],v[DitingClockPll0Op],v[DitingClockPll0Status],
+        v[DitingClockPll0L],v[DitingClockPll0Alpha],v[DitingClockPll0User]);
+    append("PLL1 MODE=%08x OPMODE=%08x STATUS=%08x L=%08x ALPHA=%08x USER=%08x\n",
+        v[DitingClockPll1Mode],v[DitingClockPll1Op],v[DitingClockPll1Status],
+        v[DitingClockPll1L],v[DitingClockPll1Alpha],v[DitingClockPll1User]);
+    uint32_t perf=0,bw=0,ret=0,control=0,select=0,hi=0,lo=0,again=0;
+    bool ok=!cp_read(nullptr,GEN7_GMU_DCVS_PERF_SETTING,&perf) &&
+        !cp_read(nullptr,GEN7_GMU_DCVS_BW_SETTING,&bw) && !cp_read(nullptr,GEN7_GMU_DCVS_RETURN,&ret) &&
+        !cp_read(nullptr,GEN7_RBBM_PERFCTR_CNTL,&control) && !cp_read(nullptr,GEN7_RBBM_PERFCTR_RBBM_SEL_0,&select);
+    bool counter=false;
+    for(unsigned i=0;ok && i<3;++i) {
+        ok=!cp_read(nullptr,GEN7_RBBM_PERFCTR_RBBM_0_HI,&hi) &&
+            !cp_read(nullptr,GEN7_RBBM_PERFCTR_RBBM_0_LO,&lo) &&
+            !cp_read(nullptr,GEN7_RBBM_PERFCTR_RBBM_0_HI,&again);
+        if(ok && hi==again){counter=true;break;}
+    }
+    if(ok && counter)append("GMU PERF=%08x BW=%08x RETURN=%08x RBBM_CONTROL=%08x RBBM_SELECT=%08x RBBM0=%llx\n",
+        perf,bw,ret,control,select,(uint64_t(hi)<<32)|lo);
+    else append("unavailable: bounded GMU/RBBM observation failed; no counter value substituted\n");
+    append("Clock registers and counter readings require source-specific decoding; requested_hz is a vote.\n");
+    return used;
 }
 extern "C" void diting_adreno_start_optional(void)
 {

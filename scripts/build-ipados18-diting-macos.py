@@ -30,9 +30,13 @@ def main():
                    help='UniXNU Linux source preparation scripts, also used by Sirius')
     a=p.parse_args();tree=a.tree.resolve()
     tree.mkdir(parents=True,exist_ok=True)
+    local=DEVICE/'local.toml'
+    overrides=tomllib.loads(local.read_text()).get('source',[]) if local.exists() else []
     refs=[r for r in tomllib.loads((DEVICE/'feeds.toml').read_text())['source'] if r['kind']=='refer']
     for ref in refs:
-        src=DEVICE/'refer/ipados18'/ref['ref']
+        override=next((s for s in overrides if s.get('kind')=='refer' and s.get('name')==ref['name']),{})
+        src=Path(override['local']).expanduser() if override.get('local') else DEVICE/'refer/ipados18'/ref['ref']
+        if not src.is_absolute():src=DEVICE/src
         rev=subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()
         if rev!=ref['commit']:raise RuntimeError(f'Wrong source revision for {ref["name"]}')
         link(src,tree/'refer'/ref['name'])
@@ -94,6 +98,23 @@ def main():
     for line in resolved.splitlines():
         if line.startswith('CONFIG_XNU_'):
             key,value=line.removeprefix('CONFIG_').split('=',1);env[key]={'y':'1','n':'0'}.get(value,value.strip('"'))
+    # Fail at the configuration boundary, before building an archive whose
+    # startup entry or platform helper would otherwise be omitted at link.
+    dependencies = {
+        # Wi-Fi itself needs the shared SMMU lease, which DitingPlatformResources provides;
+        # that object is built by the full power archive or by --resources-only when
+        # NATIVE_UFS is set, so the power/audio archive is not required to build it.
+        'XNU_DITING_WIFI': ('XNU_ARMCPU', 'XNU_NATIVE_UFS'),
+        'XNU_DITING_BACKLIGHT': ('XNU_DITING_POWER',),
+        'XNU_DITING_POWER': ('XNU_ARM_DT_PLATFORM', 'XNU_ARMCPU'),
+        'XNU_ARM_DT_PLATFORM': ('XNU_ARMCPU',),
+    }
+    for feature, required in dependencies.items():
+        if env.get(feature, '0') == '1':
+            missing = [key for key in required if env.get(key, '0') != '1']
+            if missing: raise SystemExit(feature + ' requires ' + ', '.join(missing))
+    if env.get('XNU_SOURCE_CORECRYPTO14', '0') != '0':
+        raise SystemExit('22H374 requires its matching prelinked crypto, not the Darwin22 archive recipe')
     # Only the board-specific archive has a matching 22H374 binding profile.
     # Other legacy display/AIR archives remain excluded.
     legacy_gpu = ('XNU_NATIVE_ADRENO',
@@ -107,9 +128,15 @@ def main():
     env['XNU_OWNER_ROOT_VOLUME_UUID']=layout['os']['uuid']
     env['XNU_OWNER_DATA_VOLUME_UUID']=layout['data']['uuid']
     env['XNU_OWNER_CACHE_VOLUME_UUID']=layout['systemos']['uuid']
+    env['XNU_DITING_GPU_RUNTIME_INSTALL']='1' if env.get('DITING_GPU_RUNTIME_ARCHIVE') else '0'
+    env['XNU_DITING_UI_RUNTIME_INSTALL']='1' if env.get('DITING_UI_RUNTIME_ARCHIVE') else '0'
     settings={k:v for k,v in env.items() if k.startswith(('XNU_','UNIXNU_'))}
     report=dict(profile='Diting-iPadOS18-22H374-Darwin24',tree=str(tree),settings=settings,
         debug_symbols_generated=a.debug_symbols,reference_commits={r['name']:r['commit'] for r in refs},image_verification='skipped by request',build_complete=False)
+    if env.get('DITING_GPU_RUNTIME_ARCHIVE'):
+        report['gpu_runtime_stage']=json.loads((Path(env['DITING_GPU_RUNTIME_ARCHIVE']).parent/'build-report.json').read_text())
+    if env.get('DITING_UI_RUNTIME_ARCHIVE'):
+        report['ui_runtime_stage']=json.loads((Path(env['DITING_UI_RUNTIME_ARCHIVE']).parent/'build-report.json').read_text())
     if a.hardware_dtb:
         report['hardware_dtb']=str(a.hardware_dtb.resolve())
         report['configuration']=str(config_path.resolve())

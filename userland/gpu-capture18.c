@@ -30,7 +30,9 @@ static int save(io_connect_t connection,uint32_t type,const char *path) {
  }
  IOConnectUnmapMemory64(connection,type,mach_task_self(),address);return result;
 }
-int main(void) {
+int main(int argc, char **argv) {
+ int pixels=argc==2 && !strcmp(argv[1],"--pixels");
+ if(argc>1 && !pixels)return 64;
  if(geteuid())return 77;
  io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("NativeAdrenoGpuPublished"));
  if(!service){fprintf(stderr,"Diting GPU capture: actual service unavailable\n");return 0;}
@@ -41,7 +43,7 @@ int main(void) {
   io_connect_t connection=0;kern_return_t r=IOServiceOpen(service,mach_task_self(),0x4754,&connection);
   if(r){fprintf(stderr,"Diting GPU capture: actual trace open=%x\n",r);continue;}
   snprintf(path,sizeof path,"%s/gpu-%u.trace.bin",directory,passed);save(connection,0x4754,path);
-  snprintf(path,sizeof path,"%s/gpu-%u.pixels.bin",directory,passed);save(connection,0x4755,path);
+  if(pixels){snprintf(path,sizeof path,"%s/gpu-%u.pixels.bin",directory,passed);save(connection,0x4755,path);}
   IOServiceClose(connection);
  }
  IOObjectRelease(service);return 0;

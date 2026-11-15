@@ -17,6 +17,7 @@ kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomScm.h"
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
+#include "DitingAdspBoard.h"
 #include "DitingPlatformResources.h"
 #include "ShengAdsp.h"
 int sheng_fw_open(const char *path, void **handle, uint64_t *size);
@@ -42,7 +43,7 @@ enum Stage {
 };
 constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 + 3 * 0x1000, kIpcc = 0x0ed18000, kAoss = 0xc300000;
 constexpr uint64_t kRscDrv = 0x17a20000, kRscTcs = 0xd00, kCmdDb = 0x80860000, kCmdDbSize = 0x20000;
-constexpr uint64_t kAdspBase = 0x85700000, kAdspSize = 0x2800000, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
+constexpr uint64_t kAdspBase = DITING_ADSP_BASE, kAdspSize = DITING_ADSP_SIZE, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
 constexpr uint32_t kPasAdsp = 1, kPasDtb = 36, kRemotePid = 2, kItemIn = 443, kItemOut = 429, kItemCrash = 423;
 constexpr uint32_t kItemGlinkDesc = 478, kItemGlinkTx = 479, kItemGlinkRx = 480, kGlinkFifo = 0x4000;
 constexpr uint32_t kSpiIpcc = 229, kSpiRsc = 5;
@@ -427,6 +428,14 @@ template <typename F> bool waitUntil(uint32_t ms, F done) {
 // ---- client glue (DSP thread side) ----
 void clientState(void *context, QcomGlinkChannel *, int up) {
     ShengAdspChannel *c = static_cast<ShengAdspChannel *>(context);
+    // PMIC scalar replies carry no transaction ID. Sends queued for a closed
+    // incarnation must not run after OPEN, even if its work loop has not yet
+    // seen the down/up callbacks. This runs on the sole send-consumer thread.
+    if (!strcmp(c->name, "PMIC_RTR_ADSP_APPS")) {
+        IOLockLock(gClientLock);
+        c->head = c->count = 0;
+        IOLockUnlock(gClientLock);
+    }
     if (c->client.state) c->client.state(c->context, up);
 }
 void clientReceive(void *context, QcomGlinkChannel *, const uint8_t *data, uint32_t length) {

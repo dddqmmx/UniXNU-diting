@@ -5,7 +5,7 @@ SM8475 的 DWC3 / eUSB2 设备模式栈：CDC 日志与命令、Mux 桥接到原
 ## 适配硬件
 
 - SM8475 DWC3 controller + eUSB2 PHY + 本机 NXP repeater
-- 使用 UEFI 保留的独立 32 KiB DMA（`/chosen/diting-usb-dma`）与 SID0，需 `diting-usb-handoff` 记录说明 PHY/repeater 已保留、旧 DMA 已停
+- 使用 UEFI 保留的独立 32 KiB DMA（`/chosen/diting-usb-dma`）与 SID0，有效 `diting-usb-handoff` 支持固件接管；明确 EFI_NOT_FOUND 时可独立初始化本机 PHY，再通过真实 DEVCTRLHLT 接管
 - 依赖原生 PMIC cable-session、Diting PHY 与 UFS 就绪
 
 ## 仓库关系
@@ -15,23 +15,34 @@ Pong 专属实现，接口结构参照 NativeDwc3（LICENSE 保留 `The NativeDw
 ## 说明
 
 - `diting_usb=1` 开启设备模式，`diting_usb_mux=1` 打开 Mux 通道，`diting_usb_iphone=1` 使用 `05ac:12a8` 描述符。
-- `DitingUsbPhy.h` 的 eUSB2/repeater 序列改编自 NothingOSS 的 `phy-msn-snps-eusb2.c` 与 `repeater-i2c-eusb2.c`，是 GPL-2.0-only；其余为 BSD-2-Clause-Patent。
+- `DitingUsbPhy.h` 的 eUSB2/repeater 序列改编自 NothingOSS 的 `phy-msm-snps-eusb2.c` 与 `repeater-i2c-eusb2.c`，是 GPL-2.0-only；其余为 BSD-2-Clause-Patent。
 - 没有 Apple FairPlay 硬件，不发布伪造的 IOUSBDeviceController 类。
 
 构建、接口与组件目录见 [UniXNU 组件目录](https://unixnu.com/reference/components)，板级输入与编译入口在 [UniXNU-diting](https://github.com/Chengdong-Yu/UniXNU-pong)。
 
 ## 串口
 
-CDC 提供日志和三个固定命令，使用正常 CDC DTR 握手。电脑端：
+CDC 提供日志、状态、有界 RAM 读取和固定重启命令，使用正常 CDC DTR 握手。电脑端：
 
 ```sh
 python3 scripts/capture-diting-usb-console.py --output /tmp/diting-console.log
 python3 scripts/diting-usb-command.py help
+python3 scripts/diting-usb-command.py status
+python3 scripts/diting-usb-command.py gpu
+python3 scripts/capture-diting-gpu-live.py --seconds 25 --output-dir /tmp/diting-gpu-live
 python3 scripts/diting-usb-command.py rec
 python3 scripts/diting-usb-command.py fastboot
 ```
 
 串口内直接发送 `reboot rec\n` 或 `reboot fastboot\n` 也可。重启工作线程提交 Diting PMIC/IMEM 目标并同步文件系统；没有自动重启计时器。收不到命令时不会重启。
+
+`status` 返回真实 ownership/ADSP/PMIC 状态与诊断 RAM 地址；`read HEX-KVA BYTES` 读取1..512字节 managed RAM，坏地址返回 copied=0。主机工具在 raw mode 与清队列后恢复 DTR，防止 Linux tty 初始回显污染命令。
+
+`trace AFTER COUNT` 返回最多20条 GPU/显示事件，明确报告覆盖窗口、游标和丢失位置；
+主机连续采集使用一个 CDC 会话。`gpu` 是独立的有界硬件读取命令，只有实际 CP
+启动和 GX 供电满足条件时读取板级时钟/GMU/现有计数器，不改变渲染或频率策略。
+
+services190 首轮 CDC、实时日志、完整回复、真实 RAM 与自主 Fastboot 已通过70秒实机复测；本轮 Mux/Finder、插拔和长期稳定尚未验收。见 [services190](../../migration/ipados18/services190-usb-diagnostics.md)。
 
 ## 原生 iOS 服务连接
 

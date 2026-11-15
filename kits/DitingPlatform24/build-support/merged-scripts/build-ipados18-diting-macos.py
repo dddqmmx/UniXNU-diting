@@ -128,9 +128,15 @@ def main():
     env['XNU_OWNER_ROOT_VOLUME_UUID']=layout['os']['uuid']
     env['XNU_OWNER_DATA_VOLUME_UUID']=layout['data']['uuid']
     env['XNU_OWNER_CACHE_VOLUME_UUID']=layout['systemos']['uuid']
+    env['XNU_DITING_GPU_RUNTIME_INSTALL']='1' if env.get('DITING_GPU_RUNTIME_ARCHIVE') else '0'
+    env['XNU_DITING_UI_RUNTIME_INSTALL']='1' if env.get('DITING_UI_RUNTIME_ARCHIVE') else '0'
     settings={k:v for k,v in env.items() if k.startswith(('XNU_','UNIXNU_'))}
     report=dict(profile='Diting-iPadOS18-22H374-Darwin24',tree=str(tree),settings=settings,
         debug_symbols_generated=a.debug_symbols,reference_commits={r['name']:r['commit'] for r in refs},image_verification='skipped by request',build_complete=False)
+    if env.get('DITING_GPU_RUNTIME_ARCHIVE'):
+        report['gpu_runtime_stage']=json.loads((Path(env['DITING_GPU_RUNTIME_ARCHIVE']).parent/'build-report.json').read_text())
+    if env.get('DITING_UI_RUNTIME_ARCHIVE'):
+        report['ui_runtime_stage']=json.loads((Path(env['DITING_UI_RUNTIME_ARCHIVE']).parent/'build-report.json').read_text())
     if a.hardware_dtb:
         report['hardware_dtb']=str(a.hardware_dtb.resolve())
         report['configuration']=str(config_path.resolve())

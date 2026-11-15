@@ -1,11 +1,14 @@
 {
   "schema": "diting-usb-hardware-description-v1",
   "device": "Diting SM8475",
-  "status": "services138 physically enumerated Apple Inc./iPhone05ac12a8 at480Mbps; preferred-config vendor request timed out. Manual configuration exposed retained CDC+Mux and native62078 SYN/ACK, but QueryType timed out. services139 compiled PreferredConfig1/1/1/0, EP0 stall correction, kernel-origin native sockets and invalid-MG-UDID guard; actual139 result pending.",
+  "status": "services190: real independent DWC3 takeover, CDC logs, framed commands, bounded managed-RAM reads and commanded Fastboot passed 70-second device acceptance; native Mux/Finder untested",
   "sources": [
     "Diting REC live DT, services124",
     "22H374 original kernelcache USB family metadata (local only)",
-    "NothingOSS SM8475 c402fcdb3a1523d10b15ef1123bced45456f7592 drivers/usb/dwc3/dwc3-qcom.c external session override"
+    "NothingOSS SM8475 c402fcdb3a1523d10b15ef1123bced45456f7592 drivers/usb/dwc3/dwc3-qcom.c external session override",
+    "Diting serial 1d4eb066 Recovery raw FDT, services189: USB device/host overrides and explicit provider initialization",
+    "NothingOSS SM8475 c402fcdb3a1523d10b15ef1123bced45456f7592 drivers/usb/repeater/repeater-i2c-eusb2.c: value,register sequence semantics",
+    "Diting serial 1d4eb066 connected Recovery regulator sysfs, services190: ldob2 3075000uV, ldob5 880000uV, ldoc10 1200000uV, smpb10 1800000uV"
   ],
   "nodes": {
     "/soc/ssusb@a600000": {
@@ -202,6 +205,12 @@
         ],
         "regulator-max-microvolt": [
           958000
+        ],
+        "qcom,init-voltage": [
+          880000
+        ],
+        "qcom,init-mode": [
+          4
         ]
       },
       "vdda12-supply": {
@@ -212,6 +221,12 @@
         ],
         "regulator-max-microvolt": [
           1304000
+        ],
+        "qcom,init-voltage": [
+          1200000
+        ],
+        "qcom,init-mode": [
+          4
         ]
       },
       "qcom,vdd-voltage-level": [
@@ -280,6 +295,12 @@
         ],
         "regulator-max-microvolt": [
           1304000
+        ],
+        "qcom,init-voltage": [
+          1200000
+        ],
+        "qcom,init-mode": [
+          4
         ]
       },
       "clocks": [
@@ -692,6 +713,9 @@
         ],
         "regulator-max-microvolt": [
           1800000
+        ],
+        "qcom,init-voltage": [
+          1800000
         ]
       },
       "vdd3-supply": {
@@ -702,6 +726,12 @@
         ],
         "regulator-max-microvolt": [
           3300000
+        ],
+        "qcom,init-voltage": [
+          3072000
+        ],
+        "qcom,init-mode": [
+          4
         ]
       },
       "reset-gpio": {
@@ -716,12 +746,22 @@
         1410
       ],
       "qcom,param-override-seq": [
+        80,
+        6,
+        0,
+        7,
+        99,
+        8
+      ],
+      "qcom,param-override-seq-host": [
         64,
         6,
         34,
         7,
-        100,
-        8
+        99,
+        8,
+        1,
+        10
       ]
     }
   },
@@ -796,5 +836,92 @@
     "runtime": "/diting/usb-mux",
     "pairing": "native iOS trust and TLS; no synthetic replies",
     "device_result": "actual help and synchronized REC reset confirmed; native Mux framing correction pending next boot"
+  },
+  "historical_status": "services138 physically enumerated Apple Inc./iPhone05ac12a8 at480Mbps; preferred-config vendor request timed out. Manual configuration exposed retained CDC+Mux and native62078 SYN/ACK, but QueryType timed out. services139 compiled PreferredConfig1/1/1/0, EP0 stall correction, kernel-origin native sockets and invalid-MG-UDID guard; actual139 result pending.",
+  "runtime_board_contract": {
+    "serial": "1d4eb066",
+    "device_sequence": [
+      80,
+      6,
+      0,
+      7,
+      99,
+      8
+    ],
+    "device_register_values": [
+      [
+        6,
+        80
+      ],
+      [
+        7,
+        0
+      ],
+      [
+        8,
+        99
+      ]
+    ],
+    "host_sequence": [
+      64,
+      6,
+      34,
+      7,
+      99,
+      8,
+      1,
+      10
+    ],
+    "mode_policy": "Explicit provider init-mode only; reuse diting_wifi_power_contract.MODE_MAP",
+    "hardware_tested": true,
+    "rails": [
+      {
+        "resource": "ldob5",
+        "provider_init_uv": 880000,
+        "request_uv": 880000,
+        "mode": 7,
+        "init_mode": 4
+      },
+      {
+        "resource": "ldoc10",
+        "provider_init_uv": 1200000,
+        "request_uv": 1200000,
+        "mode": 7,
+        "init_mode": 4
+      },
+      {
+        "resource": "smpb10",
+        "provider_init_uv": 1800000,
+        "request_uv": 1800000,
+        "mode": -1,
+        "init_mode": null
+      },
+      {
+        "resource": "ldob2",
+        "provider_init_uv": 3072000,
+        "request_uv": 3075000,
+        "mode": 7,
+        "init_mode": 4
+      }
+    ],
+    "voltage_policy": "Retain actual USB working voltage: ldob2 consumer minimum 3075000uV matches connected Recovery; provider init 3072000uV is distinct"
+  },
+  "runtime_services190": {
+    "transport": "ffff:0128 CDC-ACM, 480Mbps",
+    "board_phy": "PASS real NXP/eUSB2 and DWC3 DEVCTRLHLT",
+    "adsp": "stage13 error0 SCM0:0 PMIC_online1 with growing RX/TX",
+    "commands": [
+      "help",
+      "status",
+      "read HEX-KVA BYTES",
+      "reboot fastboot"
+    ],
+    "ram_read_max_bytes": 512,
+    "device_ram_read_bytes": 64,
+    "bad_address_rejected": true,
+    "commanded_fastboot": "PASS complete accepted/END followed by host Fastboot",
+    "stable_seconds": 70,
+    "native_mux_finder": "UNTESTED",
+    "gpu_performance": "FAIL"
   }
 }

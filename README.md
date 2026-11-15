@@ -11,13 +11,35 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 - 本设备：[格式 2 配置](migration/format2/README.zh.md)、[系统迁移](migration/ipados18/README.zh.md)、
   [结构化移植记录](porting.toml)、[AGENTS.md](AGENTS.md)
 
-## 当前状态（2026-11-14）
+## 当前亮度与图标状态（2026-11-15）
 
-**services186 已进入系统，用户确认触屏点按、滑动及熄屏后亮屏触控恢复正常。** 当前持久 boot_b 和最近临时启动镜像
-均为 services186，保持八核；本轮没有更新 userdata。services185 镜像保留作回退。新固件与 DarwinBoot24 使用本机
-实测 RAM banks，WLAN 普通供电、BDF 功放选择及共享 RPMh/AOP 交易按厂商契约修正。
-长期稳定性、Wi-Fi 联网、音频和 Metal 功能仍需本轮实机验收。
+持久 boot_b 与运行内核为 services193 的 `ui-brightness-20261115-06`，保持八核、120 Hz请求和
+services182的33,792字节loader。第四版用户确认“亮度正常图标不显示”；第六版实际设置BKS事务的
+低、中、高亮度及恢复原值均得到正确DCS回读，failures=0。亮度通过；图标第四版视觉失败，新的缓存读取修复
+已刷入第六版，仍待打开设置后的图标日志和可见画面验收。熄屏恢复本轮未验收。
 
+UI安装stage6/error0，设备已从只读Recovery回到正常系统。GPU安装仍stage1/error17/files-written0，
+120 fps性能仍未通过。此低优先级任务使用私有源码/缓存、nice19/ionice3和单编译任务，没有改动GPU工作源码或
+共享XNU缓存。实现、设备证据和未完成项见 [services193亮度与设置图标](migration/ipados18/services193-ui-brightness.md)。
+
+## USB与GPU历史状态（截至2026-11-14）
+
+**services192已打通系统内USB，GPU120 fps性能仍FAIL。** services192完整内核、八核打包、
+稀疏写 boot_b 与临时启动完成，实机枚举 `ffff:0128 Diting XNU console`（`/dev/ttyACM0`），完整
+`status` 与两份 `gpu` 时钟快照通过。services190/191 已实测实时日志、有界 RAM 读取与命令回 Fastboot；
+192 本次未重复重启。原生 Mux/Finder、USB 插拔及长期稳定尚未验收。
+
+目标为 **120 fps / 8.333 ms**。services191 用户反馈“还是极其卡顿”，连续 USB trace 中提交至退役 p95
+为17.576 ms、CP 执行 p95 为15.472 ms；192 增加只读时钟诊断，尚无新的 UI、触控和流畅度验收。
+120 Hz 请求与软件通知已核实，物理面板帧率仍未测得，不能将正常启动、频率投票或 GPU 拷贝完成视为性能通过。
+
+保持 services186 ST61Y、services182 实测 RAM/FD/33,792 字节 loader，以及 services187 实际 GPU runtime；
+Data/SystemOS 保留。最新 ADSP stage13/error0、SCM0:0、PMIC_online1，电池 stage4/percent100/flags0x7；
+界面电量、插拔和 PCM 播放尚未验收。源码含大量未提交改动，独立电池/ADSP 工作必须保留。
+完整证据、USB 命令、构建入口和下一步见
+[services192 当前交接](migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md)。
+
+触控历史基线：services186 已进入系统，用户确认点按、滑动及熄屏后亮屏触控恢复正常。
 本机 Recovery 已确认触控器为 **ST61Y**；旧驱动使用 Goodix 协议。
 [services186](migration/ipados18/services186-st61y-touch.md) 接入真实协议、供电与共享时钟投票，
 主机测试、完整内核链接与八核打包通过，基本触控及亮屏恢复已通过实机观察；双指手势尚未测试。

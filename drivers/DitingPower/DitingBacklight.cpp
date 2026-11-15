@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Diting NT37705 DCS brightness. Register/packet facts are documented in
+// Diting L12 DCS brightness. Register/packet facts are documented in
 // README.backlight.md; this work-loop transport does not reset the display,
 // reprogram the PLL, or lend a physical DMA buffer to the DSI controller.
 #include <IOKit/IOService.h>
@@ -16,32 +16,16 @@
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+#include "DitingBacklightProtocol.h"
 
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" void DitingBacklightStaticInit(void);
 class DitingBacklight;
 
 namespace {
+using namespace DitingBrightness;
 DitingBacklight *gPublishedBacklight;
 const OSMetaClass *gAppleBacklightClass;
-enum : uint32_t {
-    Version = 0x000, Control = 0x004, Status = 0x008,
-    DmaControl = 0x03c, DmaLength = 0x04c, AckError = 0x068,
-    ReadData0 = 0x06c, ReadData1 = 0x070, TriggerControl = 0x084,
-    DmaTrigger = 0x090, InterruptControl = 0x110,
-    PatternControl = 0x15c, PatternData = 0x17c,
-    ReadControl = 0x1d4, FifoReset = 0x1ec,
-    DmaBusy = 1u << 1, DmaDone = 1u, BtaDone = 1u << 20,
-    ErrorPending = 1u << 24,
-    EnableMask = (1u << 1) | (1u << 9) | (1u << 11) | (1u << 13) |
-                 (1u << 15) | (1u << 17) | (1u << 21) | (1u << 25) |
-                 (1u << 29) | (1u << 31)
-};
-struct Board {
-    uint64_t base;
-    uint32_t span, maximum, minimum, swappedDbv, channel, version;
-};
-static_assert(sizeof(Board) == 32, "Diting backlight ADT wire size");
 uint64_t nowNs() {
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -56,17 +40,17 @@ class DitingBacklight : public IOService {
     volatile uint32_t *regs = nullptr;
     IOWorkLoop *loop = nullptr;
     IOTimerEventSource *timer = nullptr;
+    IOTimerEventSource *requestTimer = nullptr;
     const OSMetaClass *appleClass = nullptr;
-    bool published = false, stopped = false, inFlight = false;
-    bool needVerification = false;
-    bool lowPowerWrite = true, retriedWrite = false;
+    Command command;
+    bool published = false, stopped = false;
+    bool needVerification = false, queryPending = false, retryPending = false;
+    bool lowPowerWrite = false, retriedWrite = false;
     uint64_t verifyAfter = 0;
     enum Operation { SetReadSize, ReadInitial, WriteLevel, ReadVerify } operation = ReadInitial;
     Operation pendingRead = ReadInitial;
-    uint32_t readQuantum = 1;
-    uint32_t savedDma = 0, savedLength = 0, savedTrigger = 0, savedPattern = 0, savedControl = 0;
     uint32_t level = 0, sending = 0, from = 0, goal = 0;
-    uint64_t deadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0;
+    uint64_t idleDeadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0;
     uint64_t request = 0;
     uint32_t requestedFade = 0, requests = 0, writes = 0, reads = 0;
 
@@ -75,150 +59,106 @@ class DitingBacklight : public IOService {
         regs[offset / 4] = value;
         __asm__ volatile("dsb sy" ::: "memory");
     }
-    uint32_t encodedLevel(uint32_t value) const {
-        // Linux's MIPI helper begins with low-byte/high-byte. Diting's DT
-        // bl-inverted-dbv swaps those bytes: the actual wire is high/low.
-        return board.swappedDbv ? ((value & 0xff) << 8) | (value >> 8) : value;
-    }
     uint32_t clamped(uint32_t value) const {
-        if (value > board.maximum) value = board.maximum;
-        if (value && value < board.minimum) value = board.minimum;
-        return value;
+        return DitingBrightness::clamp(board, value);
     }
-    void acknowledge() {
-        // Preserve interrupt masks, W1C only our command/BTA completions.
-        wr(InterruptControl, (rd(InterruptControl) & EnableMask) | DmaDone | BtaDone);
+    static uint32_t readRegister(void *context, uint32_t offset) {
+        return static_cast<DitingBacklight *>(context)->rd(offset);
     }
-    bool canBegin() const {
-        return !inFlight && !__atomic_load_n(&stopped, __ATOMIC_ACQUIRE) &&
-            !(rd(Status) & DmaBusy) && !(rd(PatternControl) & 1u) &&
-            (rd(Control) & 1u) && !(rd(InterruptControl) & ErrorPending);
+    static void writeRegister(void *context, uint32_t offset, uint32_t value) {
+        static_cast<DitingBacklight *>(context)->wr(offset, value);
     }
-    bool beginTransaction(const uint32_t *words, unsigned count, bool lowPower) {
-        if (!canBegin()) return false;
-        savedDma = rd(DmaControl); savedLength = rd(DmaLength);
-        savedTrigger = rd(TriggerControl); savedPattern = rd(PatternControl);
-        savedControl = rd(Control);
-        // Firmware may leave video mode on with CMD_MODE_EN clear. Enable
-        // only the command engine; keep DSI_EN and the pixel engine intact.
-        wr(Control, savedControl | (1u << 2));
-        acknowledge();
-        wr(TriggerControl, (savedTrigger & ~0xfu) | 4); // software DMA trigger only
-        wr(PatternControl, (3u << 16) | 6); // custom command FIFO, not video TPG
-        for (unsigned i = 0; i < count; i++) wr(PatternData, words[i]);
-        if (count & 1) wr(PatternData, 0); // hardware requires an even DWORD count
-        uint32_t control = savedDma & ~((3u << 30) | (1u << 29) | (1u << 26) | (1u << 24));
-        control |= 1u << 28; // embedded command packet
-        if (lowPower) control |= 1u << 26;
-        wr(DmaControl, control); wr(DmaLength, count * 4);
-        deadline = nowNs() + 50000000ULL;
-        inFlight = true;
-        wr(DmaTrigger, 1);
-        return true;
-    }
-    void restoreTransaction() {
-        // A timeout with DMA still busy retains the FIFO and its register
-        // state. Reusing/resetting it could corrupt an unfinished transfer.
-        if (rd(Status) & DmaBusy) return;
-        acknowledge();
-        wr(PatternControl, 0); wr(FifoReset, 1); IODelay(1); wr(FifoReset, 0);
-        wr(DmaControl, savedDma); wr(DmaLength, savedLength);
-        wr(TriggerControl, savedTrigger); wr(PatternControl, savedPattern);
-        wr(Control, savedControl);
-        inFlight = false;
+    static void delay(void *, unsigned microseconds) { IODelay(microseconds); }
+    bool beginTransaction(const uint32_t *words, unsigned count, bool lowPower, bool read = false) {
+        return !__atomic_load_n(&stopped, __ATOMIC_ACQUIRE) &&
+            command.begin(words, count, lowPower, read, nowNs());
     }
     bool startRead(Operation next) {
-        if (!canBegin()) return false;
         // DSI resets to a one-byte return limit. Negotiate two bytes as a
         // separate short packet (bit 6 means LONG, not a short-packet flag).
         // Complete it before resetting readback and issuing the BTA query.
-        const uint32_t words[] = {0x80370002u};
+        const uint32_t words[] = {ReturnSizePacket};
         if (!beginTransaction(words, 1, true)) return false;
         pendingRead = next; operation = SetReadSize;
         return true;
     }
     bool startQuery() {
-        const uint32_t words[] = {0xa0060052u};
-        wr(ReadControl, 1); wr(ReadControl, 0);
-        if (!beginTransaction(words, 1, true)) return false;
+        const uint32_t words[] = {ReadBrightnessPacket};
+        if (!beginTransaction(words, 1, true, true)) return false;
         operation = pendingRead;
         return true;
     }
     bool readLevel(uint32_t &answer) {
-        const unsigned count=rd(ReadControl)>>16;
-        if(count<4 || count>16)return false;
-        uint32_t data = rd(ReadData0);
-        uint32_t first = 0, second = 0;
-        // The readback register is network byte order; short DCS response
-        // 0x22 carries the two bytes immediately after the data type.
-        readQuantum = 1;
-        if (((data >> 24) & 0x3f) == 0x21) {
-            // A panel may implement the standard 8-bit DCS read even with
-            // a 12-bit write range. Preserve its measured resolution.
-            answer = (((data >> 16) & 0xff) * board.maximum + 127) / 255;
-            readQuantum = (board.maximum + 254) / 255;
-            return true;
-        } else if (((data >> 24) & 0x3f) == 0x22) {
-            first = (data >> 16) & 0xff; second = (data >> 8) & 0xff;
-        } else {
-            // Qualcomm right-aligns a long response across descending
-            // DATA registers. Header is DATA1, followed by payload DATA0.
-            const uint32_t header = rd(ReadData1);
-            if(count<8 || ((header>>24)&0x3f)!=0x1c ||
-               ((header>>16)&0xff)!=2 || ((header>>8)&0xff))return false;
-            first=data>>24;second=(data>>16)&0xff;
-        }
-        // NT37705 returns DBV most-significant byte first. services87's
-        // successful SET 00 b4 was followed by GET 22 00 b4; interpreting
-        // that as little endian disabled the service after its first write.
-        // Firmware's inherited DBV can exceed our declared control range.
-        // Keep the raw measurement separate; never reinterpret its bytes
-        // just to make it fit the range exposed to CoreBrightness.
-        const uint32_t native = (first << 8) | second;
-        // Diting's NT37705 GET(52) returns the 12-bit SET(51) level in
-        // quarter-DBV units. services92: 1604->6416, 787->3148,
-        // 3894->15576, 4045->16180. Normalize the read protocol only;
-        // shifting the write would change the user's requested brightness.
-        if (native > board.maximum * 4u + 3u) return false;
-        answer = (native + 2u) >> 2;
-        return true;
+        uint32_t raw = 0;
+        const bool valid = DitingBrightness::readLevel(rd(ReadControl) >> 16,
+            rd(ReadData0), rd(ReadData1), raw);
+        if (valid) setProperty("DitingBrightnessRawReadback", raw, 32);
+        return valid && DitingBrightness::controlLevel(board, raw, answer);
     }
-    void publishLevel() {
+    bool publishLevel() {
         OSDictionary *item = OSDictionary::withCapacity(3);
         OSDictionary *parameters = OSDictionary::withCapacity(1);
         OSNumber *minimum = OSNumber::withNumber(0ULL, 32);
         OSNumber *maximum = OSNumber::withNumber(board.maximum, 32);
         OSNumber *value = OSNumber::withNumber(level, 32);
-        if (item && parameters && minimum && maximum && value) {
-            item->setObject("min", minimum); item->setObject("max", maximum); item->setObject("value", value);
-            parameters->setObject("brightness", item); setProperty("IODisplayParameters", parameters);
-        }
+        const bool ready = item && parameters && minimum && maximum && value &&
+            item->setObject("min", minimum) && item->setObject("max", maximum) && item->setObject("value", value) &&
+            parameters->setObject("brightness", item) && setProperty("IODisplayParameters", parameters);
         OSSafeReleaseNULL(item); OSSafeReleaseNULL(parameters);
         OSSafeReleaseNULL(minimum); OSSafeReleaseNULL(maximum); OSSafeReleaseNULL(value);
+        return ready;
     }
-    void fail(const char *reason) {
-        __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
-        timer->cancelTimeout();
-        if (inFlight) restoreTransaction();
+    void reportError(const char *reason) {
+        OSString *previous = OSDynamicCast(OSString, getProperty("DitingBacklightError"));
+        if (previous && previous->isEqualTo(reason)) return;
         setProperty("DitingBacklightError", reason);
         IOLog("DitingBacklight: %s; requests=%u writes=%u reads=%u status=%x irq=%x ack=%x rx=%x data=%08x/%08x\n",
               reason, __atomic_load_n(&requests, __ATOMIC_RELAXED), writes, reads, rd(Status), rd(InterruptControl), rd(AckError),rd(ReadControl),rd(ReadData0),rd(ReadData1));
     }
-    void publishFirst() {
+    void fail(const char *reason) {
+        __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
+        timer->cancelTimeout(); requestTimer->cancelTimeout();
+        reportError(reason);
+        if (command.inFlight()) command.finish();
+    }
+    void abandonRetired(const char *reason) {
+        // This failed packet has retired. Keep the last measured DBV and
+        // permit a newer request; the mailbox has not been consumed yet.
+        needVerification = queryPending = retryPending = false;
+        goal = from = level; fadeDuration = 0; idleDeadline = 0;
+        reportError(reason); timer->cancelTimeout();
+        if (__atomic_load_n(&request, __ATOMIC_ACQUIRE) >> 63) timer->setTimeoutMS(1);
+    }
+    void waitForEngine(const char *reason) {
+        const uint64_t now = nowNs();
+        if (!idleDeadline) idleDeadline = now + (published ? 200000000ULL : 2000000000ULL);
+        if (now < idleDeadline) { timer->setTimeoutMS(2); return; }
+        idleDeadline = 0;
+        if (!published) fail(reason);
+        else {
+            // A temporarily busy or sleeping display is still owned by its
+            // existing driver. Do not reset it or disable this OS service.
+            reportError(reason); timer->cancelTimeout();
+        }
+    }
+    bool publishFirst() {
         // Use the actual AppleARMPlatform metaclass for CoreBrightness's
         // conformance query. The getter below is compiled against Darwin24;
         // no vtable-size assumption, fixed slot, or duplicate class name.
+        if (!publishLevel() || !setProperty("DitingBacklightProtocol", "sm8475-diting-dcs-v1") ||
+            !setProperty("NativeSandboxGrantProcess", "backboardd") ||
+            !setProperty("backlight-control", true) || !setProperty("built-in", true)) {
+            removeProperty("backlight-control"); removeProperty("DitingBacklightProtocol");
+            fail("brightness service property allocation failed"); return false;
+        }
         gAppleBacklightClass = appleClass;
         __atomic_store_n(&gPublishedBacklight, this, __ATOMIC_RELEASE);
-        published = true;
-        setName("AppleARMBacklight");
-        setProperty("NativeSandboxGrantProcess", "backboardd");
-        setProperty("backlight-control", true); setProperty("built-in", true);
-        publishLevel(); registerService();
-        IOLog("DitingBacklight: NT37705 DCS service ready, level=%u max=%u, readback PASS\n", level, board.maximum);
+        published = true; setName("AppleARMBacklight"); registerService();
+        IOLog("DitingBacklight: L12 DCS service ready, level=%u max=%u, readback PASS\n", level, board.maximum);
+        return true;
     }
     void service() {
-        if (stopped) return;
+        if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return;
         if (!appleClass) {
             // AppleARMPlatform initializes asynchronously after framebuffer
             // startup. Never register its private class name in the kernel:
@@ -232,39 +172,36 @@ class DitingBacklight : public IOService {
             }
             IOLog("DitingBacklight: native AppleARMBacklight class ready\n");
         }
-        const uint64_t latest = __atomic_exchange_n(&request, 0ULL, __ATOMIC_ACQUIRE);
-        if (latest >> 63) {
-            from = level; goal = clamped((latest >> 16) & 0xffff);
-            fadeStart = nowNs(); fadeDuration = (latest & 0xffff) * 1000000ULL;
-            retriedWrite = false;
-        }
-        if (inFlight) {
-            const uint32_t irq = rd(InterruptControl);
-            if (irq & ErrorPending) { fail("DSI command error"); return; }
-            bool done = (irq & DmaDone) && !(rd(Status) & DmaBusy);
-            if (done && (operation == ReadInitial || operation == ReadVerify))
-                done = (irq&BtaDone) && (rd(ReadControl)>>16)>=4;
-            if (!done) {
-                if (nowNs() >= deadline) { fail("DSI command/readback timeout"); return; }
+        if (command.inFlight()) {
+            const Completion completion = command.poll(nowNs());
+            if (completion == Completion::Retained) {
+                // No proven retirement: keep the FIFO/register ownership.
+                // A later request can reap a late completion, with no idle
+                // polling or reset while the controller still owns it.
+                if (!published) fail("initial DSI timeout; command FIFO retained");
+                else { reportError("DSI timeout; command FIFO retained"); timer->cancelTimeout(); }
+                return;
+            }
+            if (completion == Completion::Pending) {
                 timer->setTimeoutMS(1); return;
             }
             uint32_t returned = 0;
-            const bool readOk = operation == WriteLevel || operation == SetReadSize || readLevel(returned);
-            restoreTransaction();
+            const bool readOk = completion == Completion::Done &&
+                (operation == WriteLevel || operation == SetReadSize || readLevel(returned));
+            if (completion == Completion::Error) reportError("retired DSI command error");
+            if (!command.finish()) { timer->setTimeoutMS(1); return; }
             if (!readOk) {
                 // The command has retired, so a malformed response does
                 // not leave DMA ownership uncertain. Preserve the last
                 // measured level and allow a later OS request to retry.
                 // An initial read is still required before publication.
                 if (!published) { fail("invalid initial DCS brightness response"); return; }
-                needVerification = false; goal = from = level; fadeDuration = 0;
-                setProperty("DitingBacklightError", "invalid DCS brightness response");
-                IOLog("DitingBacklight: invalid retired GET response; later requests remain available\n");
+                abandonRetired(completion == Completion::Error ?
+                    "retired DSI command error" : "invalid DCS brightness response");
                 return;
             }
             if (operation == SetReadSize) {
-                if (!startQuery()) { fail("DSI BTA engine unavailable"); return; }
-                timer->setTimeoutMS(1); return;
+                queryPending = true;
             } else if (operation == WriteLevel) {
                 writes++; needVerification = true;
                 // DMA completion retires the packet, not the panel's DBV
@@ -272,16 +209,14 @@ class DitingBacklight : public IOService {
                 verifyAfter = nowNs() + 20000000ULL;
             } else {
                 reads++;
-                const uint32_t difference = returned > sending ? returned-sending : sending-returned;
-                if (operation == ReadVerify && difference > readQuantum) {
+                if (operation == ReadVerify && returned != sending) {
                     level = clamped(returned); publishLevel(); needVerification = false;
-                    // The LP packet path is also used by Diting's original
-                    // panel driver. Retry once with the other supported
+                    // Retry the same retired write once with the other
                     // command signalling mode after the first retired write.
                     // Never disable every later slider request for a value
-                    // the panel rejected; only uncertain DMA is fatal.
+                    // the panel rejected. Uncertain DMA retains ownership.
                     if (!retriedWrite) {
-                        retriedWrite = true; lowPowerWrite = !lowPowerWrite;
+                        retriedWrite = retryPending = true; lowPowerWrite = !lowPowerWrite;
                     } else {
                         setProperty("DitingBacklightError", "DBV not accepted");
                         IOLog("DitingBacklight: DBV rejected wanted=%u measured=%u LP=%u; later requests remain available\n",
@@ -291,35 +226,57 @@ class DitingBacklight : public IOService {
                 } else {
                     level = clamped(returned);
                     removeProperty("DitingBacklightError");
-                    retriedWrite = false;
+                    retriedWrite = retryPending = false;
                 }
-                if (!published) { from = goal = level; publishFirst(); }
+                if (!published) { from = goal = level; if (!publishFirst()) return; }
                 else publishLevel();
                 needVerification = false;
                 setProperty("DitingBrightnessReadback", returned, 32);
-                setProperty("DitingBrightnessReadQuantum", readQuantum, 32);
+                setProperty("DitingBrightnessReadQuantum", 1u, 32);
+                setProperty("DitingBrightnessReadScale", DitingBrightness::ReadScale, 32);
                 setProperty("DitingBrightnessWrites", writes, 32);
+                setProperty("DitingBrightnessRequests", __atomic_load_n(&requests, __ATOMIC_RELAXED), 32);
             }
+        }
+        if (queryPending) {
+            if (!startQuery()) { waitForEngine("DSI BTA engine unavailable"); return; }
+            queryPending = false; idleDeadline = 0;
+            timer->setTimeoutMS(1); return;
         }
         if (needVerification) {
             if (nowNs() < verifyAfter) { timer->setTimeoutMS(2); return; }
-            if (!startRead(ReadVerify)) { fail("DSI readback engine unavailable"); return; }
+            if (!startRead(ReadVerify)) { waitForEngine("DSI readback engine unavailable"); return; }
+            idleDeadline = 0;
             timer->setTimeoutMS(1); return;
         }
         if (!published) {
-            if (!startRead(ReadInitial)) { fail("DSI engine not ready at handoff"); return; }
+            if (!startRead(ReadInitial)) { waitForEngine("DSI engine not ready at handoff"); return; }
+            idleDeadline = 0;
             timer->setTimeoutMS(1); return;
         }
+        // Take the newest slider request only after the old packet and its
+        // verification retire. A rejected old write cannot erase this goal.
+        const uint64_t latest = __atomic_exchange_n(&request, 0ULL, __ATOMIC_ACQUIRE);
+        if (latest >> 63) {
+            from = level; goal = clamped((latest >> 16) & 0xffff);
+            fadeStart = nowNs(); fadeDuration = (latest & 0xffff) * 1000000ULL;
+            retriedWrite = retryPending = false; idleDeadline = 0;
+            setProperty("DitingBrightnessRequests", __atomic_load_n(&requests, __ATOMIC_RELAXED), 32);
+            if (goal == level && getProperty("DitingBacklightError")) {
+                // A restore may already equal the last measured level.
+                // Re-read it to clear an old error only on real success.
+                sending = goal; needVerification = true; verifyAfter = nowNs();
+                timer->setTimeoutMS(1); return;
+            }
+        }
         const uint64_t elapsed = nowNs() - fadeStart;
-        uint32_t next = goal;
-        if (fadeDuration && elapsed < fadeDuration)
-            next = (uint32_t)((int64_t)from + ((int64_t)goal - from) * (int64_t)elapsed / (int64_t)fadeDuration);
+        uint32_t next = retryPending ? sending : DitingBrightness::fadeLevel(from, goal, elapsed, fadeDuration);
         next = clamped(next);
         if (next != level) {
             sending = next;
-            const uint32_t wire = encodedLevel(next);
-            const uint32_t words[] = {0xc0390003u, 0xff000051u | (wire << 8)};
-            if (!beginTransaction(words, 2, lowPowerWrite)) { fail("DSI write engine unavailable"); return; }
+            const uint32_t words[] = {WriteBrightnessHeader, DitingBrightness::writePayload(next)};
+            if (!beginTransaction(words, 2, lowPowerWrite)) { waitForEngine("DSI write engine unavailable"); return; }
+            retryPending = false; idleDeadline = 0;
             operation = WriteLevel;
             timer->setTimeoutMS(1);
         } else if (next != goal) timer->setTimeoutMS(16);
@@ -333,21 +290,26 @@ public:
         OSData *data = chosen ? OSDynamicCast(OSData, chosen->getProperty("diting-dsi-backlight")) : nullptr;
         if (data && data->getLength() == sizeof(board)) memcpy(&board, data->getBytesNoCopy(), sizeof(board));
         OSSafeReleaseNULL(chosen);
-        if (board.version != 1 || board.base != 0xae94000 || board.span != 0x400 ||
-            board.maximum != 4095 || board.minimum != 10 || board.swappedDbv != 1 || board.channel) return false;
+        if (!DitingBrightness::validBoard(board)) {
+            IOLog("DitingBacklight: invalid L12 ADT base=%llx span=%x min=%u max=%u swap=%u channel=%u version=%u\n",
+                board.base, board.span, board.minimum, board.maximum, board.swappedDbv, board.channel, board.version);
+            return false;
+        }
         IODeviceMemory *memory = IODeviceMemory::withRange(board.base, board.span);
         mapping = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
         OSSafeReleaseNULL(memory);
         regs = mapping ? reinterpret_cast<volatile uint32_t *>(mapping->getVirtualAddress()) : nullptr;
         if (!regs) return false;
+        command.initialize({this, readRegister, writeRegister, delay});
         if (!rd(Version) || rd(Version) == ~0u || !(rd(Control) & 1u) || (rd(PatternControl) & 1u)) {
             IOLog("DitingBacklight: DSI0 unavailable version=%x control=%x pattern=%x\n",rd(Version),rd(Control),rd(PatternControl));
             return false;
         }
         loop = IOWorkLoop::workLoop();
         timer = IOTimerEventSource::timerEventSource(this, tick);
-        if (!loop || !timer || loop->addEventSource(timer)) return false;
-        setProperty("DitingPanel", "NT37705 Visionox / SM8475 DSI0");
+        requestTimer = IOTimerEventSource::timerEventSource(this, tick);
+        if (!loop || !timer || !requestTimer || loop->addEventSource(timer) || loop->addEventSource(requestTimer)) return false;
+        setProperty("DitingPanel", "Diting L12 AMOLED / SM8475 DSI0");
         setProperty("DitingDSIVersion", rd(Version), 32);
         classDeadline = nowNs() + 30000000000ULL;
         timer->setTimeoutMS(1);
@@ -358,7 +320,7 @@ public:
         if (!properties) return kIOReturnBadArgument;
         if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return kIOReturnNotReady;
         // Darwin24 also sends the optional calibrated current-table level.
-        // It is metadata, not another NT37705 DBV command.
+        // It is metadata, not another L12 DBV command.
         if (properties->getCount() > 3 ||
             properties->getCount() != (properties->getObject("brightness") ? 1u : 0u) +
                                       (properties->getObject("FadePeriod") ? 1u : 0u) +
@@ -369,23 +331,24 @@ public:
         if ((properties->getObject("brightness") && !brightness) ||
             (properties->getObject("FadePeriod") && !fade) ||
             (properties->getObject("backlight-level") && !calibrated)) return kIOReturnBadArgument;
-        const uint64_t fixed = fade ? fade->unsigned64BitValue() : 0;
-        const uint64_t ms = fade ? (fixed > 5u * 65536u ? 5000u : (fixed * 1000) >> 16) :
-                                  __atomic_load_n(&requestedFade, __ATOMIC_RELAXED);
-        __atomic_store_n(&requestedFade, (uint32_t)ms, __ATOMIC_RELAXED);
+        const uint32_t ms = fade ? DitingBrightness::fadeMilliseconds(fade->unsigned64BitValue(), fade->numberOfBits()) :
+            __atomic_load_n(&requestedFade, __ATOMIC_RELAXED);
+        if (fade) __atomic_store_n(&requestedFade, ms, __ATOMIC_RELAXED);
         if (!brightness) return kIOReturnSuccess;
-        const int64_t value = (int64_t)brightness->unsigned64BitValue();
-        const uint32_t target = value < 0 ? 0 : clamped(value > board.maximum ? board.maximum : (uint32_t)value);
+        const uint32_t target = DitingBrightness::requestedLevel(board, brightness->unsigned64BitValue(), brightness->numberOfBits());
         __atomic_fetch_add(&requests, 1u, __ATOMIC_RELAXED);
         __atomic_store_n(&request, (1ULL << 63) | ((uint64_t)target << 16) | ms, __ATOMIC_RELEASE);
-        timer->setTimeoutUS(1); // caller never waits on DSI or the work-loop gate
+        // A separate event source prevents the transaction/fade timer from
+        // overwriting a concurrently armed slider wakeup.
+        requestTimer->setTimeoutUS(1); // caller never waits on DSI or the work-loop gate
         return kIOReturnSuccess;
     }
     void free() override {
         if (__atomic_load_n(&gPublishedBacklight, __ATOMIC_ACQUIRE) == this)
             __atomic_store_n(&gPublishedBacklight, (DitingBacklight *)nullptr, __ATOMIC_RELEASE);
         if (timer) { timer->cancelTimeout(); if (loop) loop->removeEventSource(timer); }
-        OSSafeReleaseNULL(timer); OSSafeReleaseNULL(loop); OSSafeReleaseNULL(mapping);
+        if (requestTimer) { requestTimer->cancelTimeout(); if (loop) loop->removeEventSource(requestTimer); }
+        OSSafeReleaseNULL(timer); OSSafeReleaseNULL(requestTimer); OSSafeReleaseNULL(loop); OSSafeReleaseNULL(mapping);
         IOService::free();
     }
 };

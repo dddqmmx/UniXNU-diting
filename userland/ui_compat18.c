@@ -695,6 +695,39 @@ static float brightness18_slider(void *display,float slider)
     }
     return brightness18_slider_original(display,slider);
 }
+static bool brightness18_diting_board(void)
+{
+    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
+    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
+    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+    if(!release)return false;
+    if(matching && get) {
+        CFMutableDictionaryRef dict=matching("IOService");
+        const void *key=CFSTR("DitingBacklightProtocol"),*value=CFSTR("sm8475-diting-dcs-v1");
+        CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if(dict && properties) {
+            CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+            uint32_t service=get(0,dict);
+            if(service){release(service);return true;}
+        } else {if(dict)CFRelease(dict);if(properties)CFRelease(properties);}
+    }
+    // CoreBrightness may load before the asynchronous first DCS read.
+    // Qualify the same L12 board contract now so its native software-curve
+    // startup guard is installed before the backlight service arrives.
+    // This does not publish a service or substitute a hardware readback.
+    uint32_t (*entry)(uint32_t,const char *)=dlsym(RTLD_DEFAULT,"IORegistryEntryFromPath");
+    CFTypeRef (*property)(uint32_t,CFStringRef,CFAllocatorRef,uint32_t)=dlsym(RTLD_DEFAULT,"IORegistryEntryCreateCFProperty");
+    if(!entry || !property)return false;
+    uint32_t chosen=entry(0,"IODeviceTree:/chosen");if(!chosen)return false;
+    CFTypeRef data=property(chosen,CFSTR("diting-dsi-backlight"),NULL,0);release(chosen);
+    static const struct {uint64_t base;uint32_t span,maximum,minimum,swapped,channel,version;} board={
+        0xae94000,0x400,4095,1,1,0,1};
+    _Static_assert(sizeof(board)==32,"Diting backlight ADT wire size");
+    bool qualified=data && CFGetTypeID(data)==CFDataGetTypeID() &&
+        CFDataGetLength((CFDataRef)data)==(CFIndex)sizeof(board) &&
+        !memcmp(CFDataGetBytePtr((CFDataRef)data),&board,sizeof(board));
+    if(data)CFRelease(data);return qualified;
+}
 static void brightness18_image(const struct mach_header *header,intptr_t slide)
 {
     if(brightness18_slider_original || strcmp(getprogname(),"backboardd") || header->magic!=MH_MAGIC_64)return;
@@ -711,17 +744,7 @@ static void brightness18_image(const struct mach_header *header,intptr_t slide)
         lc=(const void *)((const char *)lc+lc->cmdsize);
     }
     if(!matched)return;
-    // Restrict the adapter to the actually published NT37705 DCS service.
-    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
-    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
-    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
-    if(!matching||!get||!release)return;
-    CFMutableDictionaryRef dict=matching("IOService");
-    const void *key=CFSTR("DitingPanel"),*value=CFSTR("NT37705 Visionox / SM8475 DSI0");
-    CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
-    CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
-    uint32_t service=get(0,dict);if(!service)return;release(service);
+    if(!brightness18_diting_board())return;
     // Same exact 22H374 CoreBrightness UUID and actual Diting panel as below.
     // Its optional telemetry expects DisplayBrightness/NitsPhysical to be a
     // calibration dictionary; the board's native scalar state is not one.
@@ -749,6 +772,41 @@ static void brightness18_image(const struct mach_header *header,intptr_t slide)
     if(!install_compositor_code(header,slide,offset,expected,jump,sizeof(expected),"CoreBrightness fallback mapping initialization")) {
         brightness18_slider_original=NULL;(void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);
     }
+}
+
+/* Earlier software-only builds could persist zero without dimming the panel.
+ * When real backlight control is first enabled, that stale value makes the
+ * AMOLED effectively black. Migrate only an exact saved zero, once, before
+ * SpringBoard initializes its brightness controller. Later user choices,
+ * including the lowest slider value, retain their native behavior. */
+static void brightness18_initial_preference(void)
+{
+    if(!brightness18_diting_board())return;
+    const CFStringRef domain=kCFPreferencesCurrentApplication;
+    const CFStringRef marker=CFSTR("DitingBacklight18InitialValueMigrated");
+    CFTypeRef done=CFPreferencesCopyAppValue(marker,domain);
+    bool complete=done && CFEqual(done,kCFBooleanTrue);
+    if(done)CFRelease(done);
+    if(complete)return;
+    CFTypeRef previous=CFPreferencesCopyAppValue(CFSTR("SBBacklightLevel2"),domain);
+    double level=0.0;
+    bool zero=previous && CFGetTypeID(previous)==CFNumberGetTypeID() &&
+        CFNumberGetValue((CFNumberRef)previous,kCFNumberFloat64Type,&level) && level==0.0;
+    if(previous)CFRelease(previous);
+    if(zero) {
+        double visible=0.5;
+        CFNumberRef value=CFNumberCreate(NULL,kCFNumberFloat64Type,&visible);
+        if(!value)return;
+        CFPreferencesSetAppValue(CFSTR("SBBacklightLevel2"),value,domain);
+        CFRelease(value);
+    }
+    CFPreferencesSetAppValue(marker,kCFBooleanTrue,domain);
+    if(!CFPreferencesAppSynchronize(domain)) {
+        CFPreferencesSetAppValue(marker,NULL,domain);
+        fprintf(stderr,"Diting brightness18: initial preference migration could not be saved\n");
+        return;
+    }
+    if(zero)fprintf(stderr,"Diting brightness18: migrated saved zero slider to 0.5 before native controller initialization\n");
 }
 
 /* This build's generated deviceSupportsDynamicIsland getter calls
@@ -2015,6 +2073,7 @@ __attribute__((constructor)) static void diting_ui18_start(void)
     }
     if(!strcmp(name,"Sileo")){sileo_directories();return;}
     if(!strcmp(name,"SpringBoard")) {
+        brightness18_initial_preference();
         keyboard_retire_old_images();
         keyboard_defaults();_dyld_register_func_for_add_image(keyboard_native_image);
         diting_audio_volume18_start();

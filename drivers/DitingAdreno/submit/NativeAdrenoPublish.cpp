@@ -882,6 +882,17 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     const bool kernel=owningTask==kernel_task;
     char opener[20]={};
     proc_selfname(opener,sizeof opener);
+    if(!kernel) {
+        static const char *const excluded[]={
+            "cameracaptured","mediaanalysisd","mediaanalysisd-",
+            "photoanalysisd","nebulad","chronod","com.apple.MapKi",
+            "searchpartyd","biomesyncd","spotlightknowle","parsec-fbf"
+        };
+        for(const char *name:excluded)if(!strncmp(opener,name,15)) {
+            connection->release();
+            return kIOReturnNotPermitted;
+        }
+    }
     if(!kernel && (macf || resolver!=uint32_t(kIOReturnSuccess))) {
         connection->setProperty("NativeSandboxGrant",kOSBooleanTrue);
         native_adreno_metal_diag.grants=native_adreno_metal_diag.grants+1;

@@ -1,0 +1,27 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7986,6 +7986,13 @@
+ 	return execve(p, &init_exec_args, retval);
+ }
+ 
++#if defined(XNU_DITING_GPU_RUNTIME_INSTALL) && XNU_DITING_GPU_RUNTIME_INSTALL
++#if !defined(DITING) || !DEVELOPMENT || SECURE_KERNEL || !XNU_OWNER_CACHE_MOUNT || !XNU_OWNER_DATA_UFS || XNU_OWNER_UNION_SYSTEMOS
++#error GPU runtime bootstrap requires the bound Diting development UFS OS
++#endif
++#include "DitingGpuRuntimeInstall.h"
++#endif
++
+ static const char * init_programs[] = {
+ #if DEBUG && !defined(DITING)
+ 	"/usr/appleinternal/sbin/launchd.debug",
+@@ -8070,6 +8077,9 @@
+ 	    (unsigned long long)native_owner_data_seed_size);
+ #endif
+ 	}
++#if defined(XNU_DITING_GPU_RUNTIME_INSTALL) && XNU_DITING_GPU_RUNTIME_INSTALL
++	diting_gpu_runtime_prepare(p, (user_addr_t)scratch_addr);
++#endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();
+ #endif /* CONFIG_MEMORYSTATUS */

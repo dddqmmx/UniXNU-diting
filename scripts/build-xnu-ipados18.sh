@@ -12,9 +12,47 @@ for header in DitingSt61yProtocol.h DitingGeniSpi.h; do
   }
 done
 
+
+# Resolve the Adreno firmware once, before any compile. Explicit environment wins, then
+# the device repository's local.toml [diting_build] entry, then its staged default. The
+# selected platform fails the build when its five inputs are absent instead of linking a
+# kernel without the driver.
+if [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ]; then
+  if [ -z "${DITING_NATIVE_DRIVER_SOURCE:-}" ]; then
+    echo 'refusing XNU_DITING_ADRENO_PLATFORM=1 before compile: DITING_NATIVE_DRIVER_SOURCE is unset, so the firmware input cannot be resolved' >&2
+    exit 1
+  fi
+  ADRENO_FW=$(python3 - <<'PY'
+import os, sys
+from pathlib import Path
+src = os.environ.get('DITING_NATIVE_DRIVER_SOURCE')
+sys.path.insert(0, str(Path(src) / 'scripts') if src else 'scripts')
+import diting_native_inputs as inputs
+import diting_paths
+explicit = os.environ.get('DITING_ADRENO_FIRMWARE')
+if explicit:
+    print(Path(explicit).expanduser())
+    raise SystemExit
+option = inputs.options().get('adreno_firmware')
+if option:
+    path = Path(option).expanduser()
+    print(path if path.is_absolute() else inputs.ROOT / path)
+    raise SystemExit
+found = diting_paths.adreno_firmware()
+print(found if found is not None else inputs.ROOT / 'out/ipados18/firmware/adreno730')
+PY
+)
+  export ADRENO_FW
+  for name in a730_sqe.fw gmu_gen70000.bin a730_zap.mdt a730_zap.b01 a730_zap.b02; do
+    if [ ! -f "$ADRENO_FW/$name" ]; then
+      echo "refusing XNU_DITING_ADRENO_PLATFORM=1 before compile: missing $ADRENO_FW/$name; set DITING_ADRENO_FIRMWARE, add [diting_build] adreno_firmware to local.toml, or stage out/ipados18/firmware/adreno730" >&2
+      exit 1
+    fi
+  done
+fi
 # Refuse Wi-Fi and backlight before any XNU compile when their trees are absent.
 # The later builders still refuse on their own; this only moves that refusal forward.
-if [ "${XNU_DITING_POWER:-0}" = 1 ]; then
+if [ "${XNU_DITING_WIFI:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
   if [ -z "${DITING_NATIVE_DRIVER_SOURCE:-}" ]; then
     echo 'refusing before compile: DITING_NATIVE_DRIVER_SOURCE is unset, so Wi-Fi and backlight inputs cannot be resolved' >&2
     exit 1
@@ -112,14 +150,22 @@ while IFS= read -r LATE_PATCH; do
   fi
 done < <(python3 - <<'PY_LATE_PATCHES'
 from pathlib import Path
-patches = [p.resolve() for p in Path('patches/xnu').glob('zz*diting*.patch')]
+patches = [p.resolve() for d in ('patches/xnu', 'patches/xnu-ipados18') for p in Path(d).glob('zz*diting*.patch')]
 patches += [Path('patches/xnu/zzz-boot-progress.patch').resolve(),
             Path('patches/xnu/zzy-native-gpu-addon-mount.patch').resolve()]
 for patch in sorted(set(patches), reverse=True):
     print(patch)
 PY_LATE_PATCHES
 )
-PATCHES=("$ROOT"/patches/xnu/*.patch)
+# The board patches of a format 2 repository live in patches/xnu-ipados18; the SoC
+# series can be empty (SM8475 carries its patches in the board aggregate).
+shopt -s nullglob
+PATCHES=("$ROOT"/patches/xnu/*.patch "$ROOT"/patches/xnu-ipados18/*.patch)
+shopt -u nullglob
+if [ ${#PATCHES[@]} -eq 0 ]; then
+  echo 'no XNU patches found under patches/xnu or patches/xnu-ipados18' >&2
+  exit 1
+fi
 if [ "$XNU_VERSION" = "10063.141.1" ]; then
   PATCHES+=("$ROOT"/kits/NativePrelink/patches/*.patch)
 fi
@@ -279,15 +325,11 @@ if [ "${XNU_NATIVE_UFS:-0}" = 1 ] && [ -n "${DITING_NATIVE_DRIVER_SOURCE:-}" ]; 
 fi
 if [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
   # The Wi-Fi stack needs inputs that are not part of any public restore.
-  # Point DITING_WIFI_SOURCE/DITING_WIFI_BUILD/DITING_WIFI_FIRMWARE (or the flags
-  # below) at them; refuse rather than silently building without a backend.
-  WIFI_SOURCE=${DITING_WIFI_SOURCE:-/Volumes/Untitled/Diting-iPadOS18/wifi-source-7.0.14}
-  WIFI_BUILD=${DITING_WIFI_BUILD:-/Volumes/Untitled/Diting-iPadOS18/wifi-ath11k-build}
+  # Flags/environment/local.toml resolve in diting_native_inputs. Keep the
+  # archive in this same tree; never link a previous branch's wireless stack.
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-ath11k.py" \
-    --linux "$WIFI_SOURCE" \
-    --output-dir "$WIFI_BUILD"
-  python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-wifi-native.py" --tree "$ROOT" \
-    --ath11k "$WIFI_BUILD/libDitingAth11k.a"
+    --output-dir "$ROOT/build/diting-ath11k" --jobs "${JOBS:-4}"
+  python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-wifi-native.py" --tree "$ROOT"
 fi
 if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_BACKLIGHT:-0}" = 1 ]; then
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-power-native.py" --tree "$ROOT"
@@ -298,6 +340,9 @@ else
 fi
 POWER_ARCHIVE=$ROOT/build/diting-power/libDitingPower.a
 test -f "$POWER_ARCHIVE"
+if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "${XNU_DITING_ADRENO_PLATFORM:-0}" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
+  python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-smmu4k.py" --tree "$ROOT"
+fi
 if [ ! -f "$KERNEL_SDKROOT/usr/local/lib/kernel/libfirehose_kernel.a" ]; then
   bash scripts/build-firehose.sh
 fi
@@ -512,6 +557,11 @@ if [ "$SHENG_PMGR" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
   echo 'The sheng PMGR instrument requires the original-component kernel configuration' >&2
   exit 1
 fi
+# The stamps below live in the object directory the build creates later; make sure it
+# exists before the first write on a clean tree.
+DITING_OBJ_DIR=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING
+mkdir -p "$DITING_OBJ_DIR"
+
 SHENG_PMGR_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.sheng-pmgr-mode
 if [ "$(cat "$SHENG_PMGR_STAMP" 2>/dev/null || echo 0)" != "$SHENG_PMGR" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/bsd_init.o"
@@ -680,7 +730,63 @@ if [ "$(cat "$NATIVE_AIR_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_AIR_INIT" ];
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
   printf '%s\n' "$NATIVE_AIR_INIT" > "$NATIVE_AIR_STAMP"
 fi
-EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_DITING_APFS_DEBUG=$DITING_APFS_DEBUG -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_OWNER_DATA_UFS=$OWNER_DATA_UFS -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
+DITING_GPU_RUNTIME_INSTALL=0
+if [ -n "${DITING_GPU_RUNTIME_ARCHIVE:-}" ]; then
+  if [ "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP:$OWNER_DATA_UFS:$OWNER_UNION_SYSTEMOS:${XNU_NATIVE_UFS:-0}:${XNU_DITING_ADRENO_PLATFORM:-0}:${XNU_SOURCE_CORECRYPTO14:-0}" != 1:1:1:0:1:1:0 ]; then
+    echo 'GPU runtime bootstrap requires the bound Diting development UFS OS and matching Adreno ABI' >&2
+    exit 1
+  fi
+  python3 - "$DITING_GPU_RUNTIME_ARCHIVE" <<'PY_GPU_STAGE'
+import json, sys
+from pathlib import Path
+archive = Path(sys.argv[1]).resolve()
+report = json.loads((archive.parent / 'build-report.json').read_text())
+if (not archive.is_file() or not report.get('build_complete') or
+    (report.get('runtime_format'), report.get('guest'), report.get('native_abi'), report.get('chip_id')) !=
+    ('diting-gpu-boot-stage-v1', '22H374', 1, '0x07030002') or
+    Path(report['archive']).resolve() != archive or not 0 < report['packed_bytes'] <= 64 << 20):
+    raise SystemExit('build the complete matching GPU boot stage before linking')
+PY_GPU_STAGE
+  DITING_GPU_RUNTIME_INSTALL=1
+fi
+export XNU_DITING_GPU_RUNTIME_INSTALL=$DITING_GPU_RUNTIME_INSTALL
+DITING_UI_RUNTIME_INSTALL=0
+if [ -n "${DITING_UI_RUNTIME_ARCHIVE:-}" ]; then
+  if [ "$DITING_GPU_RUNTIME_INSTALL" != 1 ]; then
+    echo 'UI update requires the bound guest APFS installation helpers' >&2
+    exit 1
+  fi
+  python3 - "$DITING_UI_RUNTIME_ARCHIVE" <<'PY_UI_STAGE'
+import json, sys
+from pathlib import Path
+archive = Path(sys.argv[1]).resolve()
+report = json.loads((archive.parent / 'build-report.json').read_text())
+if (not archive.is_file() or not report.get('build_complete') or
+    (report.get('runtime_format'), report.get('guest'), report.get('board')) !=
+    ('diting-ui-boot-stage-v1', '22H374', 'SM8475-Diting') or
+    Path(report['archive']).resolve() != archive or not 64 <= report['packed_bytes'] <= 4 << 20):
+    raise SystemExit('build the complete matching UI boot stage before linking')
+PY_UI_STAGE
+  DITING_UI_RUNTIME_INSTALL=1
+fi
+UI_RUNTIME_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-ui-runtime-mode
+if [ "$(cat "$UI_RUNTIME_STAMP" 2>/dev/null || echo 0)" != "$DITING_UI_RUNTIME_INSTALL" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_UI_RUNTIME_INSTALL" > "$UI_RUNTIME_STAMP"
+fi
+export XNU_DITING_UI_RUNTIME_INSTALL=$DITING_UI_RUNTIME_INSTALL
+DITING_USB_DIAGNOSTICS=${XNU_DITING_POWER:-0}
+USB_DIAGNOSTIC_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-usb-diagnostic-mode
+if [ "$(cat "$USB_DIAGNOSTIC_STAMP" 2>/dev/null || echo 0)" != "$DITING_USB_DIAGNOSTICS" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_USB_DIAGNOSTICS" > "$USB_DIAGNOSTIC_STAMP"
+fi
+GPU_RUNTIME_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.diting-gpu-runtime-mode
+if [ "$(cat "$GPU_RUNTIME_STAMP" 2>/dev/null || echo 0)" != "$DITING_GPU_RUNTIME_INSTALL" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
+  printf '%s\n' "$DITING_GPU_RUNTIME_INSTALL" > "$GPU_RUNTIME_STAMP"
+fi
+EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_DITING_USB_DIAGNOSTICS=$DITING_USB_DIAGNOSTICS -DXNU_DITING_GPU_RUNTIME_INSTALL=$DITING_GPU_RUNTIME_INSTALL -DXNU_DITING_UI_RUNTIME_INSTALL=$DITING_UI_RUNTIME_INSTALL -I$DITING_NATIVE_DRIVER_SOURCE/kits/DitingPlatform24 -DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_DITING_APFS_DEBUG=$DITING_APFS_DEBUG -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_OWNER_DATA_UFS=$OWNER_DATA_UFS -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
 OWNER_CACHE_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/.owner-cache-mount-mode
 if [ "$(cat "$OWNER_CACHE_STAMP" 2>/dev/null || echo 0:0:0)" != "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP:$DITING_APFS_DEBUG" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/bsd/DEVELOPMENT/kern_exec.o"
@@ -1011,8 +1117,12 @@ if [ "$DITING_ADRENO_PLATFORM" != 0 ] && [ "$DITING_ADRENO_PLATFORM" != 1 ]; the
   exit 1
 fi
 if [ "$DITING_ADRENO_PLATFORM" = 1 ]; then
+  if [ -z "${ADRENO_FW:-}" ] || [ ! -f "$ADRENO_FW/a730_sqe.fw" ]; then
+    echo "adreno: the platform is enabled but its firmware is missing at ${ADRENO_FW:-<unset>}" >&2
+    exit 1
+  fi
   python3 "$DITING_NATIVE_DRIVER_SOURCE/scripts/build-diting-adreno-platform.py" \
-    --guest-build 22H374 --tree "$ROOT" --output-dir "$ROOT/build/diting-adreno"
+    --guest-build 22H374 --tree "$ROOT" --firmware-dir "$ADRENO_FW" --output-dir "$ROOT/build/diting-adreno"
   test -f "$ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
 fi
 if [ "$ARM_DT_PLATFORM" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
@@ -1054,8 +1164,22 @@ PY_RAM_BLOCK_BINDINGS
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
     PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $ROOT/build/diting-adreno/libDitingAdrenoPlatform.a"
   fi
+  if [ "$DITING_GPU_RUNTIME_INSTALL" = 1 ]; then
+    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$DITING_GPU_RUNTIME_ARCHIVE"
+    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $DITING_GPU_RUNTIME_ARCHIVE"
+  fi
+  if [ "$DITING_UI_RUNTIME_INSTALL" = 1 ]; then
+    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$DITING_UI_RUNTIME_ARCHIVE"
+    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $DITING_UI_RUNTIME_ARCHIVE"
+  fi
   PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"
   PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $POWER_ARCHIVE"
+  if [ "${XNU_DITING_POWER:-0}" = 1 ] || [ "$DITING_ADRENO_PLATFORM" = 1 ] || [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
+    SMMU4K_ARCHIVE=$ROOT/build/diting-smmu4k/libDitingSmmu4K.a
+    test -f "$SMMU4K_ARCHIVE"
+    PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$SMMU4K_ARCHIVE"
+    PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $SMMU4K_ARCHIVE"
+  fi
   if [ "${XNU_DITING_WIFI:-0}" = 1 ]; then
     WIFI_ARCHIVE=$ROOT/build/diting-wifi/libDitingWifiNative.a
     test -f "$WIFI_ARCHIVE"

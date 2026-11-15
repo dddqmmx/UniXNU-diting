@@ -1,0 +1,105 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -73,7 +73,8 @@
+ 	kFBMethodGetDigitalOutState     = 25,
+ 	kFBMethodGetDotPitch            = 28,
+ 	kFBMethodGetDisplayArea         = 29,
+-	kFBMethodSetColorRemapMode      = 33,
++	kFBMethodVideoPowerSavings      = 33,
++	kFBMethodSetColorRemapMode      = 51,
+ 	kFBMethodSwapCancel             = 52,
+ 	kFBMethodGetColorRemapMode      = 57,
+ 	kFBMethodNotifications          = 72,
+@@ -83,6 +84,7 @@
+ 	kFBMethodGetBlock               = 79,
+ 	kFBMethodSwapCancelAll          = 81,
+ 	kFBMethodGetProtectionOptions   = 82,
++	kFBMethodFinalizeNotifications  = 88,
+ };
+ 
+ /* 22H374 _kern_SwapEnd sends 0x514 bytes from client+0x18. SwapBegin
+@@ -482,18 +484,32 @@
+ 	 * well as IOMFB mode timing; without it AppleDisplay retains its 60 Hz
+ 	 * minimum despite a faster synthetic vsync timer. A fixed step does not
+ 	 * claim APT/VRR that this framebuffer does not implement. */
+-	OSDictionary *refresh = OSDictionary::withCapacity(2);
+-	OSNumber *interval = OSNumber::withNumber((1ULL << 32) / refreshHz(), 32);
+-	OSNumber *step = OSNumber::withNumber(0ULL, 32);
+-	if (!refresh || !interval || !step) {
+-		OSSafeReleaseNULL(interval); OSSafeReleaseNULL(step); OSSafeReleaseNULL(refresh);
+-		return failStart(provider);
+-	}
+-	refresh->setObject("displayMinRefreshInterval", interval);
+-	refresh->setObject("displayRefreshStepMachTime", step);
+-	setProperty("IOMFBDisplayRefresh", refresh);
+-	OSSafeReleaseNULL(interval); OSSafeReleaseNULL(step); OSSafeReleaseNULL(refresh);
+-	IOLog("MiniIOMobileFramebuffer: Diting fixed refresh %u Hz, 1080x2412 NT37705 mode; GPU frame rate observed separately\n", refreshHz());
++	/* 22H374 publishes six refresh attributes. Intervals are 32.32
++	 * seconds; their MachTime partners are absolute-clock ticks. Publish
++	 * the complete fixed-rate contract, including equal minimum/maximum
++	 * and a zero step. This remains a software clock over firmware scanout. */
++	uint64_t period;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
++	const uint64_t interval = (1ULL << 32) / refreshHz();
++	const char *keys[] = {
++		"displayMinRefreshInterval", "displayMinRefreshIntervalMachTime",
++		"displayMaxRefreshInterval", "displayMaxRefreshIntervalMachTime",
++		"displayRefreshStep", "displayRefreshStepMachTime"
++	};
++	const uint64_t values[] = { interval, period, interval, period, 0, 0 };
++	OSDictionary *refresh = OSDictionary::withCapacity(6);
++	if (!refresh) return failStart(provider);
++	bool refreshReady = true;
++	for (unsigned i = 0; i < 6; ++i) {
++		OSNumber *number = OSNumber::withNumber(values[i], 64);
++		if (!number || !refresh->setObject(keys[i], number)) refreshReady = false;
++		OSSafeReleaseNULL(number);
++		if (!refreshReady) break;
++	}
++	refreshReady = refreshReady && setProperty("IOMFBDisplayRefresh", refresh);
++	refresh->release();
++	if (!refreshReady) return failStart(provider);
++	IOLog("MiniIOMobileFramebuffer: requested software refresh %u Hz period=%llu ticks; physical panel rate unmeasured\n", refreshHz(), period);
+ 	fStartingDisplayNode = createDisplayNode();
+ 	if (fStartingDisplayNode == NULL) {
+ 		IOLog("MiniIOMobileFramebuffer: incomplete display DT node; service not published\n");
+@@ -1371,13 +1387,16 @@
+ 		count = ++fVSyncCount;
+ 		/* Registration can replace/release fPorts after this lock drops.
+ 		 * Keep our own send right until notification delivery finishes. */
++		uint64_t period = 0, absNow = mach_absolute_time(), contNow = mach_continuous_time();
++		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
++		uint64_t cont = now <= absNow ? contNow - (absNow - now) : contNow + (now - absNow);
+ 		setAsyncReference64(ref, (mach_port_t) port, fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
+ 		args[0] = (uint32_t) now;
+ 		args[1] = now >> 32;
+-		args[2] = (uint32_t) now;
+-		args[3] = now >> 32;
+-		args[4] = (uint32_t) fVSyncCount;
+-		args[5] = fVSyncCount >> 32;
++		args[2] = (uint32_t) cont;
++		args[3] = cont >> 32;
++		args[4] = (uint32_t) period;
++		args[5] = period >> 32;
+ 		send = true;
+ 		armVSync();
+ 	}
+@@ -1388,6 +1407,9 @@
+ 		if (count <= 2) {
+ 			IOLog("MiniIOMobileFramebuffer: refresh notification %llu result=%x\n", count, result);
+ 		}
++#if XNU_DITING_ADRENO_PLATFORM
++		ditingDisplayTrace(25, count, result, now, refreshHz());
++#endif
+ 	}
+ }
+ 
+@@ -1496,6 +1518,8 @@
+ 	case kFBMethodSwapCancelAll:
+ 	case kFBMethodRequestPowerChange:
+ 	case kFBMethodChangeFrameInfo:
++	case kFBMethodVideoPowerSavings:
++	case kFBMethodFinalizeNotifications:
+ 		return kIOReturnSuccess;
+ 
+ 	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */

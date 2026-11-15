@@ -156,8 +156,17 @@ static id openDevice(unsigned port)
      if(!sysctlbyname("kern.bootargs",args,&size,nullptr,0)) {
       if(strstr(args,"diting_gpu_trace=1")){setenv("SHENG_GPU_TRACE","1",1);setenv("SHENG_DIAG","1",1);}
       if(strstr(args,"diting_gpu_pixels=1"))setenv("SHENG_GPU_PIXELS","1",1);
-     }}
-    setenv("TU_DEBUG","sysmem,nocb",1);
+      // services194: default to Turnip per-pass GMEM/sysmem autotune (nocb),
+      // with tu_gmem_transfer_swap_fixup active in Turnip.
+      // 0 = forced sysmem, 1 = per-pass autotune, 2 = forced GMEM.
+      const char *policy="nocb";
+      if(const char *tu=strstr(args,"diting_tu=")) {
+       if(tu[10]=='0')policy="sysmem,nocb";
+       else if(tu[10]=='1')policy="nocb";
+       else if(tu[10]=='2')policy="gmem,nocb";
+      }
+      setenv("TU_DEBUG",policy,1);
+     } else setenv("TU_DEBUG","nocb",1);}
     // Diting implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
@@ -207,6 +216,18 @@ static id openDevice(unsigned port)
     return result;
 }
 
+static bool excludedBackgroundDaemon(const char *process)
+{
+    static const char *const excluded[]={
+        "cameracaptured","mediaanalysisd","mediaanalysisd-service",
+        "photoanalysisd","nebulad","chronod",
+        "com.apple.MapKit.SnapshotService","searchpartyd","biomesyncd",
+        "spotlightknowledged","parsec-fbf","siriknowledged",
+        "routined","suggestd","knowledgeconstructiond","intelligenceplatformd"
+    };
+    for(const char *name:excluded)if(!strcmp(process,name))return true;
+    return false;
+}
 static bool selectedClient()
 {
     const char *process=getprogname();
@@ -231,7 +252,7 @@ static bool selectedClient()
             line[strcspn(line,"\r\n")]=0;
             if(!strcmp(line,process)
 #if DITING_GUEST_22H374
-                || !strcmp(line,"*")
+                || (!strcmp(line,"*") && !excludedBackgroundDaemon(process))
 #endif
             ){selected=true;break;}
         }

@@ -1,6 +1,119 @@
 schema_version = 1
 
 [[area]]
+id = "services193-settings-brightness"
+status = "device-verified"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingPower/DitingBacklight.cpp", "drivers/DitingPower/DitingBacklightProtocol.h", "drivers/DitingPower/README.backlight.md", "userland/ui_compat18.c", "tests/test_diting_backlight.py", "tests/diting_backlight_protocol.cpp", "tests/diting_backlight_compat.c", "tests/diting_backlight_migration.c", "kits/DitingPlatform24/DitingUiRuntimeArchive.h", "kits/DitingPlatform24/DitingUiRuntimeInstall.h", "scripts/build-diting-ui-stage.py", "migration/ipados18/services193-ui-brightness.md"]
+inputs = ["真实Diting L12 ADT与DSI0/DCS0x51/0x52，控制范围0–4095，回读4倍", "匹配22H374 AppleARMBacklight/CoreBrightness与实际设置BKS事务", "用户授权低优先级构建、稀疏boot_b、临时boot及只读Recovery，不影响独立GPU工作"]
+configuration = ["services193/ui-brightness-20261115-06；八核，120Hz请求，services182的33792字节loader", "私有源码/对象缓存，nice19/ionice3/jobs1；不写共享XNU缓存或GPU/USB/电池/ADSP源码", "UI-only guest installer；Data/SystemOS保留，镜像哈希/审计/回读跳过"]
+procedure = ["真实协议及有效测量后发布服务；非阻塞最新请求邮箱，独立IOWorkLoop，FIFO完成所有权与渐变", "原始回读4倍换算，最高16383饱和；精确零SBBacklightLevel2一次迁移到0.5，后续选择保持原生行为", "完整内核/八核打包，稀疏boot_b及同镜像临时启动；真实BKS低/高/中/恢复事务，只读IOKit核对DCS；Recovery当前checkpoint有界取证后回正常系统"]
+findings = ["第三版全范围、超上限、500ms渐变、连续请求、相同目标和恢复PASS；恢复旧零偏好的DBV1导致用户看到黑屏", "第四版迁移实际保存0.5及完成标记；用户确认亮度正常图标不显示，滑块后level=goal501、requests805/writes473/reads474", "后续用户正值0.12231758236885071及标记保留；第六版BKS低1024/4096、高3072/12288、中2048/8192、恢复623/2492四步PASS，failures0", "第六版UI安装ID3d4f894a-5231-44f3-8ed9-b552dc3cb1d1、stage6/error0；回正常系统level=goal623、requests1/writes1/reads2"]
+completion = ["12项协议/ADT/保护/迁移ASan/UBSan检查PASS，严格UI编译链接、完整内核与八核打包PASS", "第四版真实设置滑块用户PASS，第六版实际BKS事务及面板回读PASS；device-verified仅覆盖这些亮度结果"]
+limits = ["第四版UIScreen setter未触发系统请求的FAIL保留，不覆盖真实滑块用户PASS；第六版滑块视觉和本轮熄屏恢复待观察", "图标第四版视觉FAIL，第六版候选另见下一area；GPU安装仍stage1/error17/files-written0，120fps未通过", "源码未提交/推送，私有系统输入、二进制与原始日志仅留本机"]
+next_action = ["保持正常第六版系统，打开设置取得图标日志及画面反馈，补验熄屏后亮屏恢复；不把亮度PASS作为GPU性能证据"]
+evidence = [
+  {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services193-ui-brightness.md", result = "12项ASan/UBSan检查和UI严格编译/完整内核/八核打包PASS；私有缓存与单编译任务，GPU/USB来源隔离检查PASS"},
+  {kind = "device", reported_kind = "user-observation", reference = "migration/ipados18/services193-ui-brightness.md", result = "第四版用户原话亮度正常图标不显示；USB真实滑块请求及后续正值偏好独立存证"},
+  {kind = "device", reported_kind = "device-capture", reference = "migration/ipados18/services193-ui-brightness.md", result = "第六版实际BKS四步RESULT PASS failures0；当前APFS只读219块取证，无guest mount或partition write；已返回匹配第六版正常系统，UI6/0、实际623/623"}
+]
+
+[[area]]
+id = "services193-settings-icon-cache"
+status = "implemented"
+components = ["DitingPlatform24"]
+paths = ["userland/settings_icons18.h", "userland/settings_compat18.c", "migration/ipados18/services192-settings-icons.md", "migration/ipados18/services193-ui-brightness.md"]
+inputs = ["第四版实机图标不显示，Preferences旧修复安装日志", "匹配22H374 SwiftUI的imageForDescriptor:与getImageForImageDescriptor:completion:实际调用入口及一个IFImage回调ABI", "MobileCoreTypes原始188项图形声明与现有原厂IconServices资源路径"]
+configuration = ["仅Preferences的ISTypeIcon实例覆盖；不替换ISConcreteIcon的共享方法或其他进程GPU策略", "保留真实位图、原描述器和异步调度；透明空图私有32x32像素检查，按已安装声明回退"]
+procedure = ["确认原修复已加载；匹配缓存/存储命中会绕过生成函数，覆盖两个实际读取入口", "核对12项原厂ABI、188项资源及block所有权；重编包含头文件的设置编译单元，集成第六版并刷入", "候选包含一次性10种真实缓存getter像素/颜色差和一次异步Wi-Fi检查；生产库不含测试"]
+findings = ["第四版用户视觉FAIL，新增安装日志证实旧修复加载；资源存在不等于实际渲染成功", "第六版完整编译、打包、部署与UI安装PASS；首次Recovery图标测试日志MISSING，需打开设置后读取"]
+completion = ["源码实现、主机接口/资源/捕获检查与部署完成；可见图标验收尚未完成"]
+limits = ["第六版图标没有视觉PASS或设备像素PASS；local=bitmap、像素检查及刷机OKAY均不能代替可见图标验收", "没有改全局渲染策略或独立GPU工作，不将图标候选声明为120fps性能通过"]
+next_action = ["正常系统打开设置，反馈Wi-Fi/蓝牙/通用图标；读取图标一次性日志及新Preferences恢复记录，若仍失败按实际结果继续定位"]
+evidence = [
+  {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services193-ui-brightness.md", result = "12项实际缓存getter ABI、188项资源与block捕获检查PASS；设置编译单元严格重编，完整内核链接与八核打包PASS"},
+  {kind = "device", reported_kind = "device-boot", reference = "migration/ipados18/services193-ui-brightness.md", result = "第六版稀疏boot_b与同镜像临时启动OKAY，UI安装6/0，已回正常系统；图标实际测试尚待打开设置"}
+]
+
+[[area]]
+id = "services192-usb-gpu-clock-snapshot"
+status = "device-verified"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingAdreno/DitingAdrenoClockSnapshot.h", "drivers/DitingAdreno/DitingAdrenoPlatform.cpp", "drivers/DitingUsb/DitingUsbDevice.h", "scripts/diting-usb-command.py", "scripts/decode-gpu-trace.py", "tests/diting_gpu_clock.cpp", "tests/test_diting_gpu_clock.py", "tests/test_gpu_trace.py", "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md"]
+inputs = ["services191 实机性能 FAIL 与连续 USB trace", "固定 NothingOSS c402fcdb3a1523d10b15ef1123bced45456f7592 GPUCC/PLL/RCG 与已有 A7XX RBBM counter 契约", "用户目标120fps，每帧8.333ms；当前只有Linux主机"]
+configuration = ["持久boot_b与最近临时boot均为services192；八核，ST61Y，services182实测RAM/FD/template/33792字节loader", "fb_hz=120、fb_beat=0、diting_gpu_trace=2，实际boot args1006字节", "复用services187 GPU archive/install ID 0912509e-45dd-4e4b-8852-2683ee553258；Data/SystemOS保留"]
+procedure = ["成功CP启动后release/acquire发布reader；真实GX供电满足后只读GPUCC，最多38次读取，配置改变报告CHANGED", "固定有界读取GMU与已有RBBM counter，最多三次high/low/high；不写时钟、不改变投票或渲染策略", "独立gpu命令和缓存status；完整链接/八核打包，稀疏boot_b及临时boot，后续USB回复独立存证"]
+findings = ["192实机ffff:0128 Diting XNU console /dev/ttyACM0，完整status与两份gpu回复，command_errors=0", "requested_hz=900000000/DDR=11是投票；PLL0 programmed output1.8GHz不能当GX输出；GMU RCG200MHz、HUB RCG150MHz", "RBBM delta182466610/header uptime delta204875us，约0.891GHz计数速率；gate与采样时刻限制精度", "ADSP stage13/error0、SCM0:0、PMIC_online1；电池stage4/percent100/flags0x7", "GPU性能仍FAIL，最新191用户反馈极其卡顿；192没有新的UI/触控/流畅度验收"]
+completion = ["8个clock guard场景ASan/UBSan与9项trace decoder测试PASS，完整内核与八核打包PASS，原生未解析符号0", "192稀疏boot_b两块4.467s、临时boot2.554s OKAY；后续USB/status/gpu只读取证PASS", "device-verified仅覆盖明确列出的USB及硬件读数；120fps性能目标未完成"]
+limits = ["无物理panel latch/fps证据，不能由频率投票、软件通知或GPU copy宣称120fps", "原始安装回执hardware_boot_confirmed=false/UNTESTED保持原时点，引用独立后续USB证据；192命令重启未重复验收", "电量UI/插拔、PCM、Mux/Finder及长期稳定未验收；GMEM策略未实施，没有193候选", "源码有大量未提交修改，独立电池/ADSP全部保留；共享services169 XNU缓存内容现对应192，镜像哈希/审计/回读跳过"]
+next_action = ["本次仅文档交接，保持192系统运行；无活动构建/部署/采集或goal/代理", "恢复实现后通过USB取192连续操作trace及UI观察，核对厂商GMU/HUB consumer与复杂sysmem提交成本，按120fps/8.333ms继续修复"]
+evidence = [
+  {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "clock8与decoder9 PASS；native kernel63678600字节，_diting_gpu_snapshot_text强符号，未解析0；八核boot101183488字节、args1006字节"},
+  {kind = "device", reported_kind = "device-boot", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "2026-11-14T14:05:21.403438Z部署结束，diting/unlocked/b/192MiB检查；稀疏boot_b与临时boot均OKAY；传输不等于UI验收"},
+  {kind = "device", reported_kind = "device-capture", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "2026-11-14T14:15:49Z至14:15:51Z完整status与两份gpu，command_errors0、ADSP13/error0/SCM0:0/PMIC_online1；时钟原值与解码限制独立存证，hardware_performance_pass=false"}
+]
+
+[[area]]
+id = "services191-refresh-and-live-gpu-trace"
+status = "implemented"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingAdreno/submit/NativeGpuTraceStream.h", "drivers/DitingAdreno/submit/NativeGpuTrace.h", "drivers/DitingAdreno/submit/NativeGpuTrace.inc", "drivers/DitingAdreno/submit/NativeGpuTraceStore.h", "drivers/DitingMetal/NativeGpuTrace.h", "drivers/DitingUsb/DitingUsbDevice.h", "scripts/capture-diting-gpu-live.py", "scripts/diting_usb_session.py", "scripts/decode-gpu-trace.py", "tests/*diting_gpu_stream*", "tests/test_gpu_trace.py", "patches/xnu-ipados18/*-diting-display-refresh.patch", "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md"]
+inputs = ["匹配22H374原生刷新实现与六项属性", "services190用户反馈动画跳到终态及真实USB managed RAM", "有界16384条live ring与既有trace ABI，目标120fps"]
+configuration = ["services191，八核，ST61Y与services182 RAM/FD/loader，复用services187 runtime", "fb_hz=120、fb_beat=0、trace=2；原190 gRefreshHz与191匹配内核实机RAM均为120"]
+procedure = ["补齐六项刷新字段；trace AFTER COUNT每次最多20条，完整分帧与base64，显式记录skip/missing/cursor", "完整内核和八核打包部署；单CDC会话连续采集25秒，匹配内核RAM定位；ACK后自主回Fastboot部署192"]
+findings = ["services190并非旧描述中的60Hz对照，真实gRefreshHz字节78 00 00 00=120；191同样确认120请求", "25.116秒/2377命令/16792事件；显式跳过23626旧序号，已检查位置缺失0，kernel drops0", "保留事件uptime125.666–224.604秒，含采集开始前ring；提交开始至CPU退役p95=17.576ms，CP p95=15.471562ms", "1211次确认GPU copy，无不成功/未确认latch记录，无保留GPU recovery；offer到copy完成p95=16.458ms，250ms阈值内copy间隔p95=47.962ms", "event25软件通知3051次均send成功、目标120，CPU间隔p50=8.331ms/p95=9.174ms；不代表物理刷新", "用户实测反馈还是极其卡顿，GPU性能FAIL"]
+completion = ["刷新字段和游标采集已实现，8项stream/framing检查与12项回归通过；完整构建/八核打包/部署PASS", "USB实时采集、匹配RAM、命令回Fastboot有实机证据；120fps流畅度验收未通过"]
+limits = ["无物理panel latch/fps与完整输入延迟，长间隔不直接算掉帧；已检查范围无缺失不等于完整历史无损", "trace=2未启用前端详细事件；CP ticks按19.2MHz换算，不能当微秒", "保留TU_DEBUG=sysmem,nocb颜色行为，GMEM策略仅讨论未实施；当前候选192仅增加只读时钟诊断"]
+next_action = ["参见192当前交接，结合时钟与复杂提交/显示链证据继续达到120fps，不因启动、通知成功或无记录fault宣布性能通过"]
+evidence = [
+  {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "191刷新patch应用/reverse-check、8项stream检查、12项回归、完整内核与八核打包PASS"},
+  {kind = "device", reported_kind = "device-capture", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "191 live-01 capture.json/trace.bin/decoded-120fps-with-refresh.json与managed RAM独立本机保存；16792事件，范围内missing0/kernel drops0；无物理fps证据"},
+  {kind = "device", reported_kind = "user-observation", reference = "migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md", result = "2026-11-14T13:25:46.469595Z用户反馈还是极其卡顿；hardware-observation.json status=FAIL，hardware_performance_pass=false"}
+]
+
+[[area]]
+id = "services190-usb-diagnostics"
+status = "device-verified"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingUsb/**", "drivers/DitingPower/DitingAdspArchive.h", "scripts/diting_adsp_firmware.py", "kits/DitingPlatform24/DitingUsbBootCapture.h", "scripts/diting-usb-command.py", "scripts/capture-diting-usb-console.py", "scripts/capture-diting-gpu-files.py", "tests/*diting_usb*", "tests/*diting_adsp*", "patches/xnu-ipados18/*-diting-usb-diagnostics.patch", "migration/ipados18/services190-usb-diagnostics.md"]
+inputs = ["用户指定 USB 实时日志、命令回 Fastboot 和有界 RAM 诊断为首要目标", "本机 Recovery FDT与实际rail读数、NothingOSS c402fcdb repeater consumer、Linux6.12 DWC3与Darwin24源码", "本机services171签名ADSP固件与0x9fd00000/49MiB reservation"]
+configuration = ["八核，ST61Y、services182 RAM/FD/template/33792字节loader、services187 GPU runtime", "services190当时持久boot_b=services190，boot args986字节，Data/SystemOS保留；ADSP builtin显式选择；当前192见顶部area"]
+procedure = ["真实独立DMA与board PHY成功后退役DWC3；DEVCTRLHLT、软复位后申请SID0", "文件优先，ENOENT时显式解压本机签名固件并继续原MDT/PAS路径；关闭时释放", "raw-mode/DTR/队列握手，CDC完整分帧、1..512字节managed RAM读取、可选Data快照"]
+findings = ["真实EFI_NOT_FOUND与全零handoff下独立接管成功；没有伪造loader flags", "device override=6:0x50/7:0/8:0x63；smpb10无init-mode不写模式；ldob2工作3075mV与provider init3072mV区分", "原始ADSP内嵌造成prelink重叠；无损zlib存储缩为11547284字节，保留23503272字节签名内容与固定Apple地址", "主机tty初始ECHO污染命令已通过DTR/raw/队列握手修正；GPU性能仍FAIL"]
+completion = ["5项USB与8项ADSP ASan/UBSan、真实固件native解压、完整内核/八核打包/部署通过", "CDC实时日志、help/status、64字节真实RAM与地址0拒绝通过；70秒复测无command_errors", "reboot accepted与END均收到，主机随后检出本机Fastboot；USB首轮目标完成"]
+limits = ["device-verified仅指本轮CDC/诊断/重启与真实ADSP/PMIC；Mux/Finder、插拔、长期稳定与PCM尚未验收", "190当时电池stage4/percent100/flags0xb，界面电量未验证；后续用户确认动画仍跳到终态，191仍极其卡顿；最新192见顶部area", "保留独立电池任务全部修改；镜像哈希、审计与回读跳过；源码未提交"]
+next_action = ["USB首轮目标已完成；当前192继续使用USB实时取证，按120fps/8.333ms诊断GPU性能FAIL"]
+evidence = [{kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services190-usb-diagnostics.md", result = "USB5与ADSP8项ASan/UBSan PASS；完整签名字节native解压一致；强符号、零未解析、完整链接与八核打包PASS"}, {kind = "device", reported_kind = "device-capture", reference = "migration/ipados18/services190-usb-diagnostics.md", result = "190稀疏boot_b两块4.552s、临时boot2.507s OKAY；真实CDC/status/log/RAM/拒绝/ACK-Fastboot与70秒复测PASS；ADSP13/error0/SCM0:0/PMIC_online1"}]
+
+[[area]]
+id = "services187-gpu-runtime"
+status = "implemented"
+components = ["DitingPlatform24"]
+paths = ["kits/DitingPlatform24/DitingGpuRuntime*.h", "scripts/*gpu*", "scripts/diting_gpu_build_host.py", "userland/gpu*", "tests/*gpu*", "patches/xnu-ipados18/*-diting-gpu-runtime-install.patch", "migration/ipados18/services187-gpu-runtime.md"]
+inputs = ["官方 GPU 文档、A730 0x07030002/2MiB GMEM、NativeAdreno ABI1、匹配22H374 restore", "Linux工具链、固定Mesa与metal2vulkan、services186 ST61Y、services182实测RAM/FD/template/33792字节loader"]
+configuration = ["八核，rootful=1，GPU runtime install=1，trace=1，GPU pool=0；保留当前Data/SystemOS"]
+procedure = ["实际签名运行时；原生guest APFS在launchd前安装；完整内核/预链接/打包；稀疏boot_b并临时boot；Recovery指定文件只读采集与trace解码。"]
+findings = ["安装ID 0912509e-45dd-4e4b-8852-2683ee553258 匹配，三份真实trace含backboardd提交、退役与GPU显示拷贝完成。", "用户确认进系统、触控可操作，但滑动和动画仍明显卡顿，性能FAIL。", "退役CP时钟为19.2MHz ticks，不能当微秒；最多16384条live ring、metadata不扩展覆盖。"]
+completion = ["运行时安装、真实GPU执行与拷贝已取得设备日志；严格UI性能验收尚未通过，任务未完成。"]
+limits = ["短快照不是完整五分钟性能统计；无物理panel latch时间；静止/睡眠/未捕获间隔不直接算掉帧。", "GPU源码未提交；原始回执与后续观察分开；显式186软件回退候选尚未实机测试。"]
+next_action = ["比较services188轻量trace，按真实CPU/提交/显示瓶颈继续修复；不因构建、启动或事件减少宣布性能通过。"]
+evidence = [{kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services187-gpu-runtime.md", result = "Turnip/bridge/plugin、实际签名归档、完整内核和八核打包通过；六项boot-stage及七项trace测试PASS。"}, {kind = "device", reported_kind = "device-capture", reference = "migration/ipados18/services187-gpu-runtime.md", result = "Recovery未挂载guest卷；当前APFS安装标记和三份trace可读，真实submit/retire/GPU copy完成；用户仍报告明显卡顿，性能FAIL。"}]
+
+[[area]]
+id = "services188-gpu-light-trace"
+status = "implemented"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingAdreno/submit/NativeGpuTrace.*", "drivers/DitingMetal/NativeGpuTrace.h", "kits/DitingPlatform24/build-support/merged-scripts/build-ipados18-prelinked-boot.py", "migration/ipados18/services188-gpu-light-trace.md"]
+inputs = ["services187 GPU runtime及真实短窗口trace", "前端trace=1同时启用SHENG_DIAG和大分配backtrace的源码"]
+configuration = ["八核，trace=2，复用services187安装ID，保持ST61Y、services182内存和FD/loader配对"]
+procedure = ["重编native trace与完整内核；954字节启动参数和101183488字节镜像；稀疏boot_b、临时boot；约五分钟操作后Recovery只读取证。"]
+findings = ["内核保留submit/retire/display，既有前端不启用详细事件或SHENG_DIAG。", "用户确认已进系统、触控正常，仍明显卡顿；关闭详细追踪未解决卡顿，性能FAIL。"]
+completion = ["本地构建、八核打包、传输、进入系统和基本触控通过；GPU性能仍未通过。"]
+limits = ["188真实trace已采集与解码；没有物理panel刷新率或端到端延迟实测。", "Data/SystemOS未替换；源码未提交；shared XNU cache现对应192，188产物仍独立保留。"]
+next_action = ["系统内USB已由190–192打通；继续依据真实轻量样本和时钟证据修复120fps动画与GPU瓶颈，性能仍FAIL。"]
+evidence = [{kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services188-gpu-light-trace.md", result = "完整内核exit0，模式2 include实际重编；八核打包通过。"}, {kind = "device", reported_kind = "user-observation", reference = "migration/ipados18/services188-gpu-light-trace.md", result = "03:59:39UTC稀疏boot_b两块OKAY 4.272s，临时boot OKAY 2.448s；用户确认进系统触控正常，仍明显卡顿。"}]
+
+[[area]]
 id = "services186-st61y-touch"
 status = "device-verified"
 components = ["DitingPlatform24"]
@@ -10,8 +123,8 @@ configuration = ["services186，八核，保留services182 FD/template/33792字�
 procedure = ["实际wire/初始化/多指/复位与GENI owner测试，精确DT/ADT资源契约，两个日志关闭编译模式，完整原生内核与八核打包。"]
 findings = ["旧内核发送Goodix协议，Recovery确认实际ST61Y；新实现按GPIO119选择，真实READY/ID/SysInfo/flush echo后提交scan。", "共享GCC RMW保票，按真实HWCG分支检查；GENI bit0/bit12所有权、完整RX/真实DONE/迟到完成，以及10us CS保持。", "7项ASan/UBSan与资源测试、增量patch应用、两套shell语法、workflow预检、resources-only与touch ramoops关闭编译、完整链接和八核打包通过；09:27部署后用户确认进系统、点按和滑动正常，随后确认熄屏后亮屏触控恢复正常。"]
 completion = ["主机源码与构建检查通过；device-verified仅覆盖本轮用户确认的进系统、点按、滑动和熄屏后亮屏触控恢复。"]
-limits = ["双指手势尚未测试，长期稳定和其他外围未作本轮验收；当前boot_b/运行系统为services186。", "不刷触控firmware、不校准/写工厂数据，不以scan提交或主机测试当成硬件成功。"]
-next_action = ["保持services186运行，有可缩放照片或网页时补验双指手势；新问题出现再取本轮日志，保留services185回退。"]
+limits = ["双指手势尚未测试，长期稳定和其他外围未作本轮验收；services186为触控历史基线，当前部署见device summary。", "不刷触控firmware、不校准/写工厂数据，不以scan提交或主机测试当成硬件成功。"]
+next_action = ["后续USB/GPU候选保留services186触控实现；有可缩放照片或网页时补验双指手势。"]
 evidence = [{kind = "device", reported_kind = "user-observation", reference = "migration/ipados18/services186-st61y-touch.md", command = "fastboot -s 1d4eb066 boot /home/dddqmmx/UniXNU/diting-work/build/services186/boot/diting-xnu-initial.img", revision = "4d478a59fb9404e7689ef7843f44b9a9c54a31be", result = "09:27稀疏写boot_b并临时boot均OKAY；用户确认已进系统、触屏点按和滑动正常，随后确认亮屏恢复正常、暂未测试双指。"}, {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services186-st61y-touch.md", command = "python3 -m unittest discover -s tests -p test_diting_touch.py -v", revision = "4d478a59fb9404e7689ef7843f44b9a9c54a31be", result = "7 tests PASS；两个日志关闭编译模式、完整原生内核及八核打包PASS；主机结果与后续用户观察分别记录。"}]
 
 [[area]]
@@ -36,17 +149,17 @@ paths = ["scripts/diting_build_host.py", "scripts/build-*", "scripts/diting_usb_
 inputs = ["Sirius UniXNU Linux toolchain", "pinned Darwin24 public sources", "local 22H374 kernelcache", "existing local QCA6490/A730 firmware", "userdata run 43358740511 volume-layout"]
 configuration = ["diting_ipados18_defconfig", "8 CPU", "format2 hardware DTB", "DITING_WIFI_FIRMWARE_SOURCE=local"]
 procedure = ["Build complete kernel and native archives on Linux using runtime recipe overlay; build DarwinBoot24 with CLANGPDB; prelink and package locally."]
-findings = ["services186完整原生内核链接、八核预链接和本地打包通过；用户已确认进入系统、点按、滑动和熄屏后亮屏触控恢复正常，双指尚未测试。", "services169 full native kernel and loader compiled on Arch Linux; boot image is 101191680 bytes, arguments 896 ASCII bytes.", "Data size fixed to 8192 MiB with GPT; userland APFS preparation alone uses existing macOS workflow at 44e63bf."]
-completion = ["Linux原生内核、DarwinBoot24和启动镜像已构建；services169曾安装匹配userdata，services186仅稀疏写boot_b并临时启动，未更新userdata。"]
+findings = ["当前192完整原生内核链接、八核打包与部署通过；系统内USB/status/gpu有实机证据，GPU120fps性能仍FAIL，192无新的UI观察。", "services186历史完整原生内核链接、八核预链接和本地打包通过；用户确认进入系统、点按、滑动和熄屏后亮屏触控恢复正常，双指尚未测试。", "services169 full native kernel and loader compiled on Arch Linux; boot image is 101191680 bytes, arguments 896 ASCII bytes.", "Data size fixed to 8192 MiB with GPT; userland APFS preparation alone uses existing macOS workflow at 44e63bf."]
+completion = ["Linux原生内核、DarwinBoot24和启动镜像已构建；services169曾安装匹配userdata，services186–192接续boot/runtime修复，192未替换Data/SystemOS或重写userdata镜像。"]
 limits = ["services186长期稳定性及Wi-Fi/音频/Metal功能尚未验收；旧轮限制保留为历史。", "Local Wi-Fi firmware active-slot provenance unverified; no fabricated recovery capture metadata.", "services169曾记录缺TFA功放容器；本轮Wi-Fi联网、PCM和Metal仍需独立实机验收，不能沿用旧轮UI待确认结论。", "核心默认catalog没有DitingPlatform24条目；以既有allow_custom_components=True检查社区组件记录。"]
-next_action = ["保持services186运行，补验双指手势并记录本轮外围与长期稳定性观察。"]
+next_action = ["本次交接保持services192运行；恢复实现后经USB采集120fps场景，外围与长期稳定另行验收。"]
 evidence = [{kind = "device", reported_kind = "user-observation", reference = "migration/ipados18/services186-st61y-touch.md", command = "fastboot -s 1d4eb066 boot /home/dddqmmx/UniXNU/diting-work/build/services186/boot/diting-xnu-initial.img", revision = "4d478a59fb9404e7689ef7843f44b9a9c54a31be", result = "09:27稀疏写boot_b并临时boot均OKAY；用户确认已进系统、触屏点按和滑动正常，随后确认亮屏恢复正常、暂未测试双指。"}, {kind = "source", reported_kind = "user-observation", reference = "migration/ipados18/services185-bdf-power-boot.md", result = "services185 完整原生内核链接、八核预链接和本地打包通过；用户已确认进入系统，触屏不工作。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services169-linux-build.md", result = "Complete Darwin24 native link, CLANGPDB loader link and 8 CPU prelinked Android boot v4 packaging succeeded locally; image hashes/audits skipped by user preference."}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services169-linux-build.md", result = "2026-11-13: userdata 23 sparse writes OKAY in 276.246s; raw boot flash stalled, sparse boot_b retry 2 writes OKAY in 4.880s; reboot OKAY. UI, launchd and peripheral operation unconfirmed."}]
 
 [device]
 name = "diting"
 soc = "SM8475"
 os_profile = "ipados-18.7.10-22H374"
-summary = "Redmi K50 Ultra (diting/SM8475), iPadOS 18.7.10 / Darwin 24. On 2026-11-14 the user confirmed services185 entered the system, with a working display and physical buttons but nonworking touch. services186 subsequently passed system entry and tap/swipe acceptance and touch recovery after a screen-off/on cycle; current boot_b is services186, eight CPUs; two-finger gestures have not been tested. Long-term stability and other peripherals remain unverified in this build. Older areas preserve inherited evidence and do not replace current device acceptance."
+summary = "Redmi K50 Ultra (diting/SM8475), iPadOS 18.7.10 / Darwin24. Persistent boot_b and running kernel are services193/ui-brightness-20261115-06, eight CPUs, requested120Hz and services182 measured RAM/FD/33792-byte loader. Fourth revision user confirms brightness works while Settings icons are absent. Sixth revision real Settings BKS low/high/middle/restore and Diting DCS readback all PASS, failures0; UI install3d4f894a-5231-44f3-8ed9-b552dc3cb1d1 stage6/error0, normal system restored with level=goal623. Icons fourth revision visual FAIL; sixth revision cached getter recovery deployed, Preferences test log not yet created and visible icon acceptance pending. This low-priority task used private source/cache, nice19/ionice3/jobs1 and preserved independent GPU/USB/battery/ADSP sources and shared cache. GPU runtime install remains stage1/error17/files-written0; target120fps/8.333ms remains FAIL. USB/ADSP13/error0/PMIC_online1 observed, Data/SystemOS retained. Current UI handoff is migration/ipados18/services193-ui-brightness.md; source uncommitted, no UI-task build/deployment/capture running, leave revision06 in normal XNU awaiting Settings observation and sleep/wake acceptance."
 
 [[area]]
 id = "configuration"
@@ -84,7 +197,7 @@ paths = ["drivers/ArmCpu/**", "drivers/ArmDTPlatform/**", "scripts/build-diting-
 inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
 configuration = ["board.toml、diting_ipados18_defconfig 与对应板级配置"]
 procedure = ["使用 0x000..0x700 affinity、GICv3 和 19.2 MHz timer。"]
-findings = ["当前 services186 已进入系统并保持八核；services183/184 有效 OEM minidump 已确认 services179–182 全部八核上线。下方 CPU1/未上线判断均为历史时点。",
+findings = ["当前 services192 保持八核配置与services186触控基线，USB/status/gpu取证通过，192 UI尚未重新验收；services183/184有效OEM minidump已确认services179–182全部八核上线。下方CPU1/未上线判断均为历史时点。",
     "2026-11-14 接续 services181：修复 OFF 被 >= RUNNING 当成成功、共享缓存行/异常槽及未完成异常被消费的问题，RUNNING 移到 initCPU 最后；首个真正 panic 在 debugger 前保存。补丁应用、实际对象检查、本地八核链接和打包通过，已稀疏写 boot_b（4.651 秒）并临时启动（2.453 秒）；用户仍报告黑屏自动重启，无新错误。当前 boot_b=services181，services180 后的临时 Recovery root ADB 取证中 pstore 为空且 debugfs 不受支持。黑屏根因与副核上线未确认，见 migration/ipados18/services181-secondary-fault-publication.md。",
     "2026-11-13 services171 八核和单核仍触发 IOSecureBSDRoot 的 pe 断言；未证实的平台注册顺序改动已撤回。services172 实机 platform=6 cpu=11 error=0，范围为首次启动提交循环，尚不能确定阻塞核。services173 沿 processor_boot 锁/调度、secondary startup 与每核 initCPU/IRQ 安装细分软件快照，补丁应用、本地内核链接和八核打包通过，2026-11-13 05:38 UTC 临时启动 Sending/Booting OKAY；2026-11-14 实机反馈 firstboot=7/29，缺同轮 init/irq，不能确定 PSCI/GIC 根因。services174 修正 PE void 转发丢弃必需 CPU 启动失败的问题，在首个实际 PSCI 失败处保留固件状态/异常/复位边界；补丁应用、本地链接与八核打包通过，101191680 字节。services174 稀疏刷 boot_b 两块全 OKAY（4.823 秒），随后临时启动 Sending/Booting OKAY（2.469 秒），没有写 userdata；实机 CPU1 start timeout reset=5 kernel=1 TTBR1=0x906c06000。services175 补齐动态页表 PoC clean 并延后 VBAR 到 KVA，已编译/打包/刷 boot_b 并启动；实机直接黑屏重启，没有可读新错误，不能确认修复。services176 已部署，CPU1 early exception reset=7 kernel=1 ESR=0x81000100 ELR=0xfffffff0089b00b0，对应 phystokv 第一条 NEON。services177/178 已部署，实机均黑屏重启。services179 针对仍有隐式 SIMD 的 cpu_timebase_init，补齐 Linux 内核与原生驱动 -mno-implicit-float；本地链接及相关指令检查、八核打包和 boot_b 部署通过；services179 实机仍黑屏自动重启，故障未解决。services180 扩展 KVA 早期异常捕获，已本地链接、八核打包、稀疏写 boot_b 和临时启动；用户仍报告黑屏自动重启，无新错误。当前 boot_b=services180，用户要求停止本轮尝试并交接，详见 migration/ipados18/交接-2026-11-14-services186-启动与触控正常.md。", "services90基于services89八核first boot完成记录，新增非RT/非绑定线程的空闲核心排序X2→A710→A510；保留全部native推荐核心、RT和绑定规则，编译通过，实机性能待确认。", "services81实际启动8核，EPSS最高非boost请求为CPU0-3 1804800kHz、CPU4-6 2496000kHz、CPU7 2995200kHz；性能问题不能简单归因于没有开启多核。", "drivers/ArmCpu、drivers/ArmDTPlatform 改为 Chengdong-Yu/diting-arm-cpu、diting-arm-dt-platform submodule。"]
 completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
@@ -194,15 +307,15 @@ evidence = [{kind = "source", reported_kind = "host-build", reference = "migrati
 id = "power"
 status = "implemented"
 components = ["DitingPlatform24"]
-paths = ["drivers/DitingPower/**", "configs/diting-power-sm8475.json", "userland/sleepserver/**"]
-inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore"]
+paths = ["drivers/DitingPower/**", "configs/diting-power-sm8475.json", "userland/sleepserver/**", "scripts/build-diting-power-native.py", "kits/DitingPlatform24/build-support/merged-scripts/build-diting-power-native.py", "tests/diting_battery_protocol.c", "tests/test_diting_battery.py", "migration/ipados18/services188-battery-recognition.md"]
+inputs = ["Pong live Android DT、NothingOSS SM8475源码与匹配22H374 restore", "本轮电池协议：LineageOS/android_kernel_xiaomi_sm8450@eff4b40407a1b6f1b1ab84554cbb540bcb495175 的 qti_battery_charger.h/.c", "Diting PMIC_RTR_ADSP_APPS 通道与实际 Darwin24 IOPMPowerSource API"]
 configuration = ["board.toml、diting_ipados18_defconfig 与对应板级配置"]
-procedure = ["SM8475 ADSP/RPMh、PMIC battery管理和Diting电源策略。"]
-findings = ["services184/185：GPU/WLAN/音频共用 APSS DRV2 active TCS0–2，sleep3–4/wake5–6/fast7 保留；真实完成后回收、超时保留所有权。WLAN/ADSP 共用 AOSS QMP owner。", "services90对照Nothing qti_battery_charger修正0x04通知订阅为TYPE_NOTIFY，兼容精确匹配的订阅响应，继续向IOPMPowerSource发布真实状态；充电显示待实机确认。", "services84按Nothing协议使用USB_ADAP_TYPE=7识别源，并按最大电流/输入限值描述适配器；不改固件充电控制。", "services86同轮fresh快照、真实VBUS存在判断、两轮source确认和5秒刷新，充电控制仍归固件。", "services112 REC: ADSP stage9 failed at whole-carveout CPU mapping, leaving battery/audio unavailable. services113 loads bounded physical slices with original Diting PAS/MDT inputs; device result pending.", "drivers/DitingPower 改为 Chengdong-Yu/diting-power submodule。"]
-completion = ["在设备上观察该接口的实际工作结果并保存对应日志"]
-limits = ["动态充电图标、充放电和插拔更新仍需设备观察。"]
-next_action = ["保留修正的共享供电所有权；独立验收 PAS、PCM、电池和背光。"]
-evidence = [{"kind" = "source", "reported_kind" = "source-and-device-capture", "reference" = "migration/ipados18/services185-bdf-power-boot.md", "result" = "services184/185：GPU/WLAN/音频共用 APSS DRV2 active TCS0–2，sleep3–4/wake5–6/fast7 保留；真实完成后回收、超时保留所有权。WLAN/ADSP 共用 AOSS QMP owner。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services127-native-audio-rootful.md", result = "services126 logs external VBUS through charging/FULL; services127 separates completed-cycle charger validity and retains real state across timeout/debounce; actual UI state after temporary boot pending."}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services110-adsp-poster-textinput.md", result = "services109 REC: ADSP stage9 ENOMEM removed physical audio/battery sources, SBRenderer Neutrino abort follows refused Metal connection, keyboard list persisted but not shown. services110 early PAS/bounce allocation, 10 isolated GPU client scopes and native TextInput refresh compiled; device effects unverified. Timed restart stays off."}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services107-interface-namer-handshake.md", result = "services107 timed REC complete: native InterfaceNamer timeout completion unblocks wifid manager and SpringBoard; real device count1, 29 scanned BSS, first visible frame and continuing swaps. Native audio UID preference and PowerUI retained; Settings association, PCM route and audible output remain unconfirmed."}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services104-system-peripheral-order.md", result = "services103: ADSP ready/channel up, actual battery 100% 4428mV republished, QCA6490 en0 scanned 10 BSS after 64MiB DMA fix. Native Wi-Fi manager still timed out; no audio StartIO or confirmed VAD route. services104 runtime corrections pending device evidence."}, {kind = "source", reference = "migration/ipados18/services74-source-audit.md", result = "共享资源与启动调用已实际链接，未进行设备运行。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services83-official-peripherals.md", result = "按官方四份文档核对传输、服务和Darwin24接口，实际修补已完整编译，设备结果待确认。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services84-peripheral-interfaces.md", result = "本轮板级接口、按键去抖、音频插件和显示资源复用已完整编译，实际功能效果待设备反馈。"}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services92-peripherals-latency.md", result = "services92 completed timed REC capture after 72 MiB OS update. User confirms brightness adjustment works; native IOHID report device now opens. Wi-Fi remains unavailable to user, no association or PCM StartIO observed; no BV/OOM error in this capture. Source repairs and remaining interface faults recorded separately."}]
+procedure = ["SM8475 ADSP/RPMh、PMIC battery管理和Diting电源策略。", "services188-battery：只读协议与发布策略的有界故障测试，独立树编译电池及完整电源归档；不使用共享内核缓存或设备。"]
+findings = ["services188-battery：按固定 Xiaomi 属性表修正温度、电荷计数与预计时间单位；基础读数先发布、可选失败退避，未知容量不伪报0%，满充只由固件STATUS确认。", "services188-battery：5秒刷新、2秒超时、两个独立周期确认插拔，工作循环串行发布并处理通道代次；11项ASan/UBSan测试和两套入口ARM64电源归档编译PASS，实机尚未验收。", "services184/185：GPU/WLAN/音频共用 APSS DRV2 active TCS0–2，sleep3–4/wake5–6/fast7 保留；真实完成后回收、超时保留所有权。WLAN/ADSP 共用 AOSS QMP owner。", "services90对照Nothing qti_battery_charger修正0x04通知订阅为TYPE_NOTIFY，兼容精确匹配的订阅响应，继续向IOPMPowerSource发布真实状态；充电显示待实机确认。", "services84按Nothing协议使用USB_ADAP_TYPE=7识别源，并按最大电流/输入限值描述适配器；不改固件充电控制。", "services86同轮fresh快照、真实VBUS存在判断、两轮source确认和5秒刷新，充电控制仍归固件。", "services112 REC: ADSP stage9 failed at whole-carveout CPU mapping, leaving battery/audio unavailable. services113 loads bounded physical slices with original Diting PAS/MDT inputs; device result pending.", "drivers/DitingPower 改为 Chengdong-Yu/diting-power submodule。"]
+completion = ["电量识别源码、11项主机测试与独立ARM64归档编译完成；本轮未进行设备验收。", "在设备上观察该接口的实际工作结果并保存对应日志"]
+limits = ["动态充电图标、充放电和插拔更新仍需设备观察。", "本轮代码未打包或部署；services188-battery目录不代表运行镜像。协议无transaction ID，同通道同属性异常迟到回复无法完全区分。"]
+next_action = ["保留修正的共享供电所有权；独立验收 PAS、PCM、电池和背光。", "在GPU并行任务结束后的匹配内核中核对PMIC通道、真实电量与IOPMPowerSource属性，并观察插拔和亮屏恢复。"]
+evidence = [{kind = "host", reported_kind = "host-test", reference = "migration/ipados18/services188-battery-recognition.md", command = "python3 -m unittest discover -s tests -p test_diting_battery.py -v", revision = "bd21ea788120fc48037e4f5981f3893e8dbaa4c3", result = "该基线加本轮未提交电池源码：11项ASan/UBSan测试PASS，包含5000组确定性畸形帧；未操作设备。"}, {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services188-battery-recognition.md", revision = "bd21ea788120fc48037e4f5981f3893e8dbaa4c3", result = "最终电池源码的独立libDitingBattery.a、主入口完整libDitingPower.a及生产runtime overlay的merged recipe完整归档均编译PASS；未链接完整内核或验证硬件显示。"}, {"kind" = "source", "reported_kind" = "source-and-device-capture", "reference" = "migration/ipados18/services185-bdf-power-boot.md", "result" = "services184/185：GPU/WLAN/音频共用 APSS DRV2 active TCS0–2，sleep3–4/wake5–6/fast7 保留；真实完成后回收、超时保留所有权。WLAN/ADSP 共用 AOSS QMP owner。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services127-native-audio-rootful.md", result = "services126 logs external VBUS through charging/FULL; services127 separates completed-cycle charger validity and retains real state across timeout/debounce; actual UI state after temporary boot pending."}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services110-adsp-poster-textinput.md", result = "services109 REC: ADSP stage9 ENOMEM removed physical audio/battery sources, SBRenderer Neutrino abort follows refused Metal connection, keyboard list persisted but not shown. services110 early PAS/bounce allocation, 10 isolated GPU client scopes and native TextInput refresh compiled; device effects unverified. Timed restart stays off."}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services107-interface-namer-handshake.md", result = "services107 timed REC complete: native InterfaceNamer timeout completion unblocks wifid manager and SpringBoard; real device count1, 29 scanned BSS, first visible frame and continuing swaps. Native audio UID preference and PowerUI retained; Settings association, PCM route and audible output remain unconfirmed."}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services104-system-peripheral-order.md", result = "services103: ADSP ready/channel up, actual battery 100% 4428mV republished, QCA6490 en0 scanned 10 BSS after 64MiB DMA fix. Native Wi-Fi manager still timed out; no audio StartIO or confirmed VAD route. services104 runtime corrections pending device evidence."}, {kind = "source", reference = "migration/ipados18/services74-source-audit.md", result = "共享资源与启动调用已实际链接，未进行设备运行。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services83-official-peripherals.md", result = "按官方四份文档核对传输、服务和Darwin24接口，实际修补已完整编译，设备结果待确认。"}, {kind = "source", reported_kind = "host-build", reference = "migration/ipados18/services84-peripheral-interfaces.md", result = "本轮板级接口、按键去抖、音频插件和显示资源复用已完整编译，实际功能效果待设备反馈。"}, {kind = "source", reported_kind = "device-capture", reference = "migration/ipados18/services92-peripherals-latency.md", result = "services92 completed timed REC capture after 72 MiB OS update. User confirms brightness adjustment works; native IOHID report device now opens. Wi-Fi remains unavailable to user, no association or PCM StartIO observed; no BV/OOM error in this capture. Source repairs and remaining interface faults recorded separately."}]
 
 [[area]]
 id = "packaging"

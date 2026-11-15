@@ -5,9 +5,9 @@ Diting 的电源、ADSP 与音频：PAS1 加载签名 ADSP 固件，GENI I2C 驱
 ## 适配硬件
 
 - SM8475 APSS：SMEM `80900000/200000`、TCSR mutex3 `1f43000`、IPCC `ed18000` / INTID261、AOSS `c300000`；DRV2 active TCS0–2、sleep TCS3–4、wake TCS5–6、fast TCS7
-- LPASS ADSP：PAS1、40 MiB 预留内存、SMP2P 与 GLINK
+- LPASS ADSP：PAS1、49 MiB 本机预留内存、SMP2P 与 GLINK
 - 音频：GENI I2C `a94000`（`qupv3_se13_i2c_active`，GPIO48/49），TFA9873 双功放地址 `0x34/0x35`，复位 GPIO1/89，WCD938x，tertiary MI2S SD1
-- 电池/充电器：按 NothingOSS `qti_battery_charger.c` 的单电池属性编号解码，不写充电限值
+- 电池/充电器：按 Xiaomi SM8450 `qti_battery_charger.{h,c}` 的 battery 0 属性解码，通过 `IOPMPowerSource` 上报，不写充电限值
 - 背光：NT37705 Visionox OLED（1080×2412），面板 DCS `0x51` 写、`0x52` 回读，SM8475 DSI v2.6 @ `0x0ae94000`
 
 ## 仓库关系
@@ -23,14 +23,14 @@ Diting 专属实现。协议与服务结构参照 UniXNU-sheng 的 Qualcomm 实�
 
 ## 已接入的代码
 
-- `DitingAdsp.cpp`：手机自身 signed ADSP 固件、PAS1、40 MiB 预留内存、SMP2P、GLINK、ready/fatal 通知和有界等待。
+- `DitingAdsp.cpp`：手机自身 signed ADSP 固件、PAS1、49 MiB 本机预留内存、SMP2P、GLINK、ready/fatal 通知和有界等待。
 - 实际 SMEM `80900000/200000`、TCSR mutex3 `1f43000`、IPCC `ed18000` / INTID261、AOSS `c300000`。不使用 Sheng 的 SM8550 IPCC、固件或 PAS36 DTB。
 - 通过 `gPhysBase/gPhysSize` 检查 DarwinBoot 实际 RAM 所有权；若覆盖 ADSP carveout，停止加载，不覆盖 XNU RAM。
 - 电源、WLAN 与 GPU 通过 `DitingPlatformResources` 共用 APSS active TCS0–2 的完整交易锁。按真实命令完成和 idle 状态回收；超时保留所有权，不覆盖 sleep/wake/fast TCS。只保留启动 minima，不在 handover 时降掉共享电源投票。
 - ADSP 与 WLAN 共用 AOSS QMP owner，分别发送补零的 100/64 字节消息。超时不清空未消费邮箱，AOP 真实清零后才处理迟到完成与后续请求。
 - 触屏加入共享RPMh owner，ldoc2按本机provider请求1.8V/mode7；touch/WLAN/USB/audio共用
   GCC62008投票锁与回读。只有带HWCG的AHB分支允许idle halt；core/core2x/SE必须真实运行。
-- `DitingBattery.cpp` / `ShengBattmgr.c`：沿用 UniXNU 协议 API，以 NothingOSS `qti_battery_charger.c` 的单电池属性编号解码；不访问 Xiaomi BOARD_GET 扩展、不写充电限值。
+- `DitingBattery.cpp` / `ShengBattmgr.c`：保留 UniXNU 协议 API 和诊断字段编号，按本机 Xiaomi 属性表、单位和通知消息读取 battery 0；不读取双电量计扩展、不发送充电属性写入。
 - `DitingAudio.cpp`：`adsp_apps`、APM speaker/playback graph、TFA9873 配置、独立 SID1801 DMA 和输出环；只有真实初始化完成才发布 `DitingAudio`。尚无真机播放成功记录。
 
 ## 板级音频约束
@@ -45,6 +45,46 @@ Diting 是 TFA98xx 双功放（I2C `a94000`，地址 `34/35`）及 WCD938x，不
 
 RPMh和APPSSMMU lease由独立 `DitingPlatformResources` 提供，不再定义在无线对象内。GPU/Wi-Fi/音频共享唯一 `libDitingSmmu4K.a`；SID1801使用与其他客户端相同的禁用context编程、回读和TLBSYNC顺序。公开来源及私有输入路径见 `configs/diting-native-sources.toml` 和 `local.toml.example`。详见[源码审计](https://github.com/Chengdong-Yu/UniXNU-pong/blob/main/migration/ipados18/services74-source-audit.md)；HAL加载和服务发布仍不是实际PCM发声证据。
 
+## 电量识别（2026-11-14，代码与主机验证完成）
+
+电池协议来自 [Xiaomi SM8450 的公开头文件](https://github.com/LineageOS/android_kernel_xiaomi_sm8450/blob/eff4b40407a1b6f1b1ab84554cbb540bcb495175/drivers/power/supply/qti_battery_charger.h)
+和[属性转换实现](https://github.com/LineageOS/android_kernel_xiaomi_sm8450/blob/eff4b40407a1b6f1b1ab84554cbb540bcb495175/drivers/power/supply/qti_battery_charger.c)，
+固定 revision `eff4b40407a1b6f1b1ab84554cbb540bcb495175`，与 services186 触屏参考同一源码版本。
+原 Nothing 属性表在 `BATT_CONSTANT_CURRENT=12` 后与本机错位；温度、计数、容量和剩余时间已修正。
+
+| 读取项 | opcode / property | 原始值 → 发布值 |
+| --- | --- | --- |
+| 电量 | `0x30 / 4` | 0.01% → 四舍五入百分比；`CurrentCapacity` / `MaxCapacity=100` |
+| 电压、电流 | `0x30 / 7,9` | µV → mV；放电为正的 µA → 充电为正的 mA |
+| 温度 | `0x30 / 13` | 0.01°C，`2750` 表示 27.50°C，不再误读充电电流 |
+| 电荷计数 | `0x30 / 15` | mAh → `AppleRawCurrentCapacity`，保留真实零值 |
+| 满充、设计容量、循环 | `0x30 / 18,17,16` | µAh → mAh；循环数不换算 |
+| 预计充满、放空时间 | `0x30 / 20,21` | 分钟、秒 → 分钟 |
+| 电源类型 | `0x32 / 7` | USB adapter enum，支持 PD/PPS、Apple 充电器与 Xiaomi HVDCP |
+
+八项基础读数完成后先发布电量，再读取可选信息。5秒周期刷新、2秒请求超时、10分钟慢速刷新；
+失败的可选字段延后重试，缺失适配器信息不会阻止百分比更新。owner、type、opcode、property、长度和数值范围全部核对。
+未读到容量时不发布默认 0%；后续容量失败或通道断开保留上次读数并标记 `DitingBatteryStale`。
+`DitingBatteryValidFields`、`FreshFields`、`MissingFields` 与 `TransportEpoch` 区分保留值、失败字段和通道代次。
+
+物理 VBUS 与充电状态分开处理，100% 不自行认定满充。电源变化需要两个独立采样周期确认；
+同一周期的基础和可选信息更新只计一次，低电量策略在确认后计算。通道 down/up 即使合并到一次工作循环，
+也会重置请求和订阅、丢弃旧接收消息及 PMIC 发送队列，保留上次真实状态。
+首次 `updateStatus()` 在 `registerService()` 之前完成，匹配者读取到的是已准备好的属性。
+
+两套构建入口均支持 `--battery-only`，在独立、已准备头文件的 `--tree` 内生成 `libDitingBattery.a`；
+它用于编译检查，不替代完整 `libDitingPower.a`。主机验证命令：
+
+```sh
+python3 -m unittest discover -s tests -p test_diting_battery.py -v
+python3 scripts/build-diting-power-native.py --tree <独立的已准备树> --battery-only
+```
+
+11项 ASan/UBSan 测试及 Darwin24 ARM64 电池对象、完整电源归档编译通过；生产 merged recipe 也已独立编译。
+本轮没有编译共享内核缓存、打包、刷机或操作手机。真实 PMIC 响应、iPadOS 电量显示和插拔更新尚待实机验收。
+需要本机 `/diting/firmware/adsp.mbn`、真实 ADSP ready 与 PMIC 通道，失败时正常启动继续，不能以编译成功代替硬件读数。
+详见[电量识别实现与验证记录](../../migration/ipados18/services188-battery-recognition.md)。
+
 参考：UniXNU 官方 `docs/zh/porting/power.md`；UniXNU-sheng `0e1f6e5` 的 Qualcomm 协议/服务结构（保留原 BSD-2-Clause-Patent 声明）；NothingOSS `android_kernel_msm-5.10_nothing_sm8475` `sm8475/t` 的 PAS 与电池驱动。
 
 构建成功只说明接口完成链接；需下一轮 REC 日志确认 PAS、通道响应及真实电池服务发布，不能据此声称已经出声或硬件已可用。
@@ -57,6 +97,8 @@ SID1801 的 DMA 映射，尚未完成 graph。services46 合并官方 power.md
 在 staged 目录，未据此宣称系统播放已接通。
 
 ## 当前实机状态（2026-11-14）
+
+services190 已完整链接并实机启动：使用本机0x9fd00000/0x3100000 reservation和显式本机签名固件，实时USB status读到ADSP stage13/error0、SCM0:0、PMIC_online1与增长的RX/TX。电池诊断stage4/percent100/flags0xb；界面电量、插拔、PCM尚未验收。文件优先；仅ENOENT且diting_adsp_builtin=1使用受限zlib解压的本地builtin，保持真实PAS并在关闭时释放缓冲。固件与产物不进Git。见 [services190](../../migration/ipados18/services190-usb-diagnostics.md)。以下保留services186历史记录。
 
 services186 已由用户确认进入系统，触屏点按、滑动及熄屏后亮屏触控恢复正常。此前共享 RPMh 的10个host场景、
 QMP 的 8 个 host 场景和完整原生内核构建通过；本轮 PAS、PCM 播放、充电状态与背光
