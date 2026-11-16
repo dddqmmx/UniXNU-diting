@@ -1,0 +1,46 @@
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -1653,13 +1653,31 @@
+       tu_desc_set_format<CHIP>(desc, tex_format);
+    }
+ 
+-   /* When loading/storing GMEM we always load the full image and don't do any
+-    * swizzling or swapping, that's done in the draw when reading/writing
+-    * GMEM, so we need to fixup the swizzle and swap.
++   /* Tiled storage uses its GMEM transfer representation. Linear storage,
++    * including imported IOSurface pages, keeps the image format's byte
++    * order in memory: removing its texture swap interprets BGRA bytes as
++    * RGBA before the load draw writes the tile. Preserve the memory-side
++    * format for linear sources, just as a normal sampled image does.
+     */
+-   if (override_swap)
++   const bool linear_source =
++      pkt_field_get(A6XX_RB_MRT_BUF_INFO_COLOR_TILE_MODE,
++                    iview->view.RB_MRT_BUF_INFO) == TILE6_LINEAR;
++   if (override_swap && !linear_source)
+       tu_desc_set_swap<CHIP>(desc, WZYX);
+    tu_desc_set_swiz<CHIP>(desc, tu_swiz(X, Y, Z, W));
++
++   if (override_swap) {
++      const unsigned swap = CHIP >= A8XX ?
++         pkt_field_get(A8XX_TEX_MEMOBJ_3_SWAP, desc[3]) :
++         pkt_field_get(A6XX_TEX_MEMOBJ_0_SWAP, desc[0]);
++      const bool mutableen = CHIP >= A8XX ?
++         bool(desc[5] & A8XX_TEX_MEMOBJ_5_MUTABLEEN) :
++         bool(desc[1] & A6XX_TEX_MEMOBJ_1_MUTABLEEN);
++      /* Site 1 observes the actual system-memory source descriptor. Sites
++       * 0, 2 and 3 observe the GMEM side of stores/resolves/input fetch.
++       */
++      tu_note_gmem_side(cmd, iview, 1, linear_source, mutableen, swap);
++   }
+ 
+    r3d_src_common<CHIP>(cmd, cs, desc,
+                         iview->view.layer_size * layer,
+@@ -1674,7 +1692,6 @@
+                   const struct tu_image_view *iview,
+                   uint32_t layer)
+ {
+-   tu_note_gmem_side(cmd, iview, 1, iview->image->layout[0].tile_mode == TILE6_LINEAR, false, WZYX);
+    r3d_src_load<CHIP>(cmd, cs, iview, layer, VK_FILTER_NEAREST, true);
+ }
+ 

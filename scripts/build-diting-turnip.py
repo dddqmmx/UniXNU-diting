@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-build the Darwin Turnip library for Diting's iOS16.6.1 userland.
+"""Cross-build the Darwin Turnip library for Diting's selected arm64 userland.
 
 Mesa must already contain the UniXNU Darwin backend patches. This compiles
 the library only: it does not install an ICD, publish a GPU, run a workload,
@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -28,17 +29,26 @@ def main():
     p.add_argument('--developer-dir', type=Path, default=diting_paths.developer_dir())
     a = p.parse_args()
     backend = a.mesa / 'src/freedreno/vulkan/tu_knl_darwin.cc'
-    if 'MIN2(tu_get_system_heap_size(device), info->va_size)' not in backend.read_text():
+    if a.guest_build == '22H374':
+        marker = a.mesa / '.diting-mesa.json'
+        if not marker.is_file():
+            raise SystemExit('Prepare a new source directory with scripts/prepare-diting-mesa.py first')
+        prepared = json.loads(marker.read_text())
+        if (prepared.get('schema'), prepared.get('guest'), prepared.get('native_abi')) != (1, '22H374', 1):
+            raise SystemExit('The prepared Mesa source is not the matching Diting ABI1/22H374 input')
+        if 'tu_darwin_sync_host_batch' not in backend.read_text():
+            raise SystemExit('The prepared source lacks the matching host-ownership backend')
+    elif 'MIN2(tu_get_system_heap_size(device), info->va_size)' not in backend.read_text():
         subprocess.run(['git', 'apply', str(ROOT / 'patches/mesa/0001-diting-scoped-gpu-heap.patch')],
                        cwd=a.mesa, check=True)
-    if 'NativeAdrenoMethodSubmitBatch' not in backend.read_text():
+    if a.guest_build != '22H374' and 'NativeAdrenoAbiVersion = 2' not in (a.abi_directory/'NativeAdrenoABI.h').read_text() and 'NativeAdrenoMethodSubmitBatch' not in backend.read_text():
         subprocess.run(['git','apply',str(ROOT/'patches/mesa/0003-diting-atomic-batches-and-fence-wait.patch')],cwd=a.mesa,check=True)
     copies = a.mesa / 'src/freedreno/vulkan/tu_clear_blit.cc'
-    if 'reserve_buffer_copy_step' not in copies.read_text():
+    if a.guest_build != '22H374' and 'reserve_buffer_copy_step' not in copies.read_text():
         subprocess.run(['git', 'apply', str(ROOT / 'patches/mesa/0004-diting-buffer-copy-allocation-errors.patch')],
                        cwd=a.mesa, check=True)
     abi=a.abi_directory/'NativeAdrenoABI.h'
-    if 'NativeAdrenoMethodSubmitBatch' not in abi.read_text():
+    if 'NativeAdrenoMethodSubmitBatch' not in abi.read_text() and 'NativeAdrenoAbiVersion = 2' not in abi.read_text():
         raise SystemExit('Use the Diting ABI header with negotiated 128-IB submissions: '+str(abi))
     out = a.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -57,11 +67,19 @@ def main():
             env=env, text=True).strip()
 
     sdk = sdk_read('--show-sdk-path')
+    def compiler_tool(tool):
+        if sys.platform == 'linux' and tool in ('ar', 'strip'):
+            found = shutil.which('llvm-' + tool)
+            if not found:
+                raise SystemExit('Linux userland needs llvm-' + tool)
+            return found
+        return sdk_read('--find', tool)
+
     flags = ['-target', 'arm64-apple-ios'+minimum, '-isysroot', sdk,
              '-fstack-protector-strong']
     cross = out/('diting-'+a.guest_build+'.cross')
     cross.write_text('[binaries]\n' + ''.join(
-        name+' = '+repr(sdk_read('--find', tool))+'\n'
+        name+' = '+repr(compiler_tool(tool))+'\n'
         for name, tool in [('c', 'clang'), ('cpp', 'clang++'), ('objc', 'clang'),
                            ('ar', 'ar'), ('strip', 'strip')]) +
         "pkg-config = '/usr/bin/false'\n"
@@ -77,23 +95,30 @@ def main():
         '-Dfreedreno-kmds=darwin', '-Dtu-darwin-abi-dir='+str(a.abi_directory.resolve()),
         '-Dplatforms=macos', '-Dglx=disabled', '-Degl=disabled', '-Dgbm=disabled',
         '-Dopengl=false', '-Dgles1=disabled', '-Dgles2=disabled', '-Dllvm=disabled',
-        '-Dshared-glapi=disabled', '-Dxmlconfig=disabled', '-Dshader-cache=disabled',
+        '-Dshared-glapi=disabled', '-Dxmlconfig=disabled',
+        '-Dshader-cache='+('enabled' if a.guest_build=='22H374' else 'disabled'),
         '-Dtools=', '-Dbuild-tests=false', '-Dvideo-codecs=', '-Dvulkan-layers=',
         '-Dlibunwind=disabled', '-Dlmsensors=disabled', '-Dvalgrind=disabled',
-        '-Dexpat=disabled', '-Dzstd=disabled', '-Dbuildtype=release', '-Db_ndebug=true',
+        '-Dexpat=disabled', '-Dzstd=disabled', '-Dbuildtype=release', '-Doptimization=3', '-Db_ndebug=true',
         # No raw offline variant pack is accepted or generated in this build.
         # Normal runtime IR3 compilation remains available; empty source ID
         # leaves the optional pack exporter inactive rather than relabelling it.
         '-Dtu-builtin-source-id=', '-Dtu-builtin-pack-header=']
+    if 'NativeAdrenoAbiVersion = 2' in abi.read_text():
+        options += ['-Dtu-build-id=87bf1f920b5ab40afb70012cb7ce080d55a2cceb']
     meson = str(a.venv/'bin/meson')
-    command = ([meson, 'configure', str(out)] if (out/'build.ninja').exists()
-        else [meson, 'setup', str(out), str(a.mesa.resolve()),
-              '--wrap-mode=nodownload', '--cross-file', str(cross)]) + options
+    # SDK/compiler-wrapper changes must not reuse failed capability probes.
+    command = [meson, 'setup', str(out), str(a.mesa.resolve()),
+               '--wrap-mode=nodownload', '--cross-file', str(cross)]
+    if (out/'build.ninja').exists():
+        command += ['--reconfigure', '--clearcache']
+    command += options
     with (out/'configure.log').open('w') as log:
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise SystemExit('Turnip configure failed: '+str(out/'configure.log'))
-    build = [diting_paths.tool('ninja', 'DITING_NINJA', ('/opt/local/bin/ninja',)), '-C', str(out), '-j6']
+    build = [diting_paths.tool('ninja', 'DITING_NINJA', ('/opt/local/bin/ninja',)),
+             '-C', str(out), '-j6', 'src/freedreno/vulkan/libvulkan_freedreno.dylib']
     with (out/'build.log').open('w') as log:
         result = subprocess.run(build, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:

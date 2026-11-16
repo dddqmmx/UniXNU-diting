@@ -1,19 +1,23 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent
  * Included by kern_exec.c after the UUID-bound SystemOS/Data mount helpers.
- * First installation only, before PID 1 runs; uses the real guest APFS writer.
+ * Install or upgrade before PID 1 runs; uses the real guest APFS writer.
  */
 #ifndef DITING_GPU_RUNTIME_INSTALL_H
 #define DITING_GPU_RUNTIME_INSTALL_H
 #include "DitingGpuRuntimeArchive.h"
 #include <libkern/zlib.h>
+#include <sys/stdio.h>
 
 extern const uint8_t DitingGpuRuntimeData[], DitingGpuRuntimeEnd[];
 volatile int diting_gpu_runtime_stage, diting_gpu_runtime_error;
 volatile unsigned diting_gpu_runtime_written;
+volatile unsigned diting_gpu_runtime_step;
 #define DGR_EXT "/System/Library/Extensions/"
 #define DGR_BUNDLE DGR_EXT "DitingAdrenoMetal.bundle"
 #define DGR_TEMP DGR_BUNDLE ".diting-stage"
 #define DGR_ID "/.diting-native-gpu-runtime-v1"
+#define DGR_PENDING DGR_EXT "DitingAdrenoMetal.installing"
+#define DGR_READY DGR_EXT "DitingAdrenoMetal.installed"
 static const char *const dgr_names[DitingGpuRuntimeFiles] = {
     "Info.plist", "DitingAdrenoMetal", "DitingMetalBridge.dylib", "libvulkan_freedreno.dylib",
     DGR_EXT "DitingAdrenoMetal.clients", DGR_EXT "DitingAdrenoMetal.publish",
@@ -37,17 +41,48 @@ static int dgr_stat(const char *path, enum vtype type, uint64_t size, uint32_t m
     return error;
 }
 
-static int dgr_id_equal(const char *path, const uint8_t *id)
+static int dgr_read_id(const char *path, uint8_t id[16])
 {
-    if (dgr_stat(path, VREG, 16, 0644)) return 0;
+    int error = dgr_stat(path, VREG, 16, 0644);
+    if (error) return error;
     vnode_t vp = NULLVP;
     vfs_context_t ctx = vfs_context_current();
-    if (vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx)) return 0;
-    uint8_t old[16]; int resid = 0;
-    int error = vn_rdwr(UIO_READ, vp, (caddr_t)old, sizeof(old), 0, UIO_SYSSPACE,
+    error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
+    if (error) return error;
+    int resid = 0;
+    error = vn_rdwr(UIO_READ, vp, (caddr_t)id, 16, 0, UIO_SYSSPACE,
         IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
     int close_error = vnode_close(vp, FREAD, ctx);
-    return !error && !close_error && !resid && !memcmp(old, id, sizeof(old));
+    return error ? error : close_error ? close_error : resid ? EIO : 0;
+}
+static inline int dgr_id_equal(const char *path, const uint8_t *id)
+{
+    uint8_t old[16];
+    return !dgr_read_id(path, old) && !memcmp(old, id, sizeof(old));
+}
+
+/* Read-only comparison: preflight must not open a file for creation on a
+ * read-only root. The small publication flag needs no allocation on reboot. */
+static int dgr_equal(const char *path, const uint8_t *data, uint64_t bytes, uint32_t mode)
+{
+    int error = dgr_stat(path, VREG, bytes, mode);
+    if (error) return error;
+    vnode_t vp = NULLVP; vfs_context_t ctx = vfs_context_current();
+    error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
+    if (error) return error;
+    uint8_t small[16], *buffer = small;
+    size_t chunk = bytes < 65536 ? (size_t)bytes : 65536;
+    if (chunk > sizeof(small)) buffer = kalloc_data(chunk, Z_WAITOK);
+    if (!buffer) error = ENOMEM;
+    for (uint64_t at = 0; !error && at < bytes; at += chunk) {
+        int amount = (int)(bytes - at < chunk ? bytes - at : chunk), resid = 0;
+        error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, amount, (off_t)at, UIO_SYSSPACE,
+            IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+        if (!error && (resid || memcmp(buffer, data + at, amount))) error = EEXIST;
+    }
+    if (buffer && buffer != small) kfree_data(buffer, chunk);
+    int closed = vnode_close(vp, FREAD, ctx);
+    return error ? error : closed;
 }
 
 static voidpf dgr_zalloc(voidpf opaque __unused, uInt items, uInt size)
@@ -147,12 +182,14 @@ static int dgr_mkdir(proc_t p, user_addr_t scratch, const char *path)
     if (!error) error = mkdir(p, &request, &result);
     return error ? error : dgr_stat(path, VDIR, 0, 0);
 }
-static int dgr_rename(proc_t p, user_addr_t scratch, const char *from, const char *to)
+static int dgr_rename_flags(proc_t p, user_addr_t scratch, const char *from, const char *to, unsigned flags)
 {
-    struct rename_args request = {.from = scratch + 0xc00, .to = scratch + 0xd00}; int32_t result = 0;
+    struct renameatx_np_args request = {.fromfd = AT_FDCWD, .from = scratch + 0xc00,
+        .tofd = AT_FDCWD, .to = scratch + 0xd00, .flags = flags | RENAME_NOFOLLOW_ANY};
+    int32_t result = 0;
     int error = copyout(from, request.from, strlen(from) + 1);
     if (!error) error = copyout(to, request.to, strlen(to) + 1);
-    if (!error) error = rename(p, &request, &result);
+    if (!error) error = renameatx_np(p, &request, &result);
     if (!error) {
         char parent[256]; strlcpy(parent, to, sizeof(parent));
         char *slash = strrchr(parent, '/');
@@ -163,6 +200,10 @@ static int dgr_rename(proc_t p, user_addr_t scratch, const char *from, const cha
         if (!error) { error = VNOP_FSYNC(vp, MNT_WAIT, ctx); vnode_put(vp); }
     }
     return error;
+}
+static int dgr_rename(proc_t p, user_addr_t scratch, const char *from, const char *to)
+{
+    return dgr_rename_flags(p, scratch, from, to, 0);
 }
 static int dgr_upgrade(proc_t p, user_addr_t scratch)
 {
@@ -186,14 +227,26 @@ static int dgr_upgrade(proc_t p, user_addr_t scratch)
     return error;
 }
 
+static void dgr_target(unsigned i, char path[256])
+{
+    if (i < 4) snprintf(path, 256, DGR_BUNDLE "/%s", dgr_names[i]);
+    else strlcpy(path, dgr_names[i], 256);
+}
+static int dgr_optional_regular(const char *path)
+{
+    int error = dgr_stat(path, VREG, 0, 0);
+    return error == ENOENT ? 0 : error;
+}
+
 static int dgr_install(proc_t p, user_addr_t scratch)
 {
     const uint8_t *archive = DitingGpuRuntimeData;
     uintptr_t start = (uintptr_t)archive, end = (uintptr_t)DitingGpuRuntimeEnd;
     struct DitingGpuRuntimeEntry entries[DitingGpuRuntimeFiles];
-    diting_gpu_runtime_stage = 1;
+    diting_gpu_runtime_stage = 1; diting_gpu_runtime_step = 1;
     if (end < start || !diting_gpu_runtime_parse(archive, end - start, entries)) return EINVAL;
     int rootful = 0; PE_parse_boot_argn("diting_rootful", &rootful, sizeof(rootful));
+    diting_gpu_runtime_step = 2;
     if (rootful != 1 || !rootvnode || native_owner_data_status || native_owner_data_readonly ||
         native_owner_cache_status || !native_owner_cache_authorized ||
         !native_owner_cache_root_recheck || native_owner_cache_current_root != (uintptr_t)rootvnode ||
@@ -202,24 +255,77 @@ static int dgr_install(proc_t p, user_addr_t scratch)
     if (!error) error = dgr_stat("/diting", VDIR, 0, 0);
     if (!error) error = dgr_stat("/System/Library/LaunchDaemons", VDIR, 0, 0);
     if (error) return error;
+
+    /* Ownership and candidate identity are different facts. An earlier
+     * Diting ID authorizes an upgrade; it must not be treated as foreign. */
+    diting_gpu_runtime_step = 3;
     int bundle = dgr_stat(DGR_BUNDLE, VDIR, 0, 0);
     if (bundle && bundle != ENOENT) return bundle;
-    int owned = !bundle && !dgr_stat(DGR_BUNDLE DGR_ID, VREG, 16, 0644);
-    int installed = owned && dgr_id_equal(DGR_BUNDLE DGR_ID, archive + 32);
-    if (!bundle && !owned) return EEXIST;
-    if (installed) {
+    uint8_t old_id[16], pending_id[16], ready_id[16];
+    int owned = !bundle;
+    if (owned) {
+        error = dgr_read_id(DGR_BUNDLE DGR_ID, old_id);
+        if (error) return error == ENOENT ? EEXIST : error;
+    }
+    int pending = dgr_read_id(DGR_PENDING, pending_id);
+    if (pending && pending != ENOENT) return pending;
+    int ready = dgr_read_id(DGR_READY, ready_id);
+    if (ready && ready != ENOENT) return ready;
+    const int current = owned && !memcmp(old_id, archive + 32, 16);
+    const int committed = current && !ready && !memcmp(ready_id, archive + 32, 16) && pending == ENOENT;
+    diting_gpu_runtime_step = 4;
+    if (current) {
         unsigned present = 0; char path[256];
         for (unsigned i = 0; i < DitingGpuRuntimeFiles; ++i) {
-            if (i < 4) snprintf(path, sizeof(path), DGR_BUNDLE "/%s", dgr_names[i]);
-            else strlcpy(path, dgr_names[i], sizeof(path));
+            dgr_target(i, path);
             int found = dgr_stat(path, VREG, entries[i].bytes, dgr_modes[i]);
             if (i < 4 && found) return found;
             if (!found) ++present;
         }
-        if (present == DitingGpuRuntimeFiles) { diting_gpu_runtime_stage = 6; return 0; }
+        if (committed && present == DitingGpuRuntimeFiles &&
+            !dgr_equal(dgr_names[4], (const uint8_t *)"*\n", 2, 0644) &&
+            !dgr_equal(dgr_names[5], (const uint8_t *)"1\n", 2, 0644)) {
+            diting_gpu_runtime_stage = 6; diting_gpu_runtime_step = 17; return 0;
+        }
     }
-    /* Validate every stream before requesting a write mount or creating files. */
-    diting_gpu_runtime_stage = 2;
+
+    /* A durable intent precedes mkdir. After power loss, it authorizes
+     * repair of our incomplete stage even if its internal ID was not yet
+     * written. A foreign stage without either marker is never adopted. */
+    diting_gpu_runtime_step = 5;
+    int temporary = dgr_stat(DGR_TEMP, VDIR, 0, 0);
+    if (temporary && temporary != ENOENT) return temporary;
+    int stage_owned = 0;
+    if (!temporary) {
+        uint8_t stage_id[16];
+        int marker = dgr_read_id(DGR_TEMP DGR_ID, stage_id);
+        if (marker && pending)
+            return marker == ENOENT ? EEXIST : marker;
+        stage_owned = !marker || !pending;
+        error = dgr_optional_regular(DGR_TEMP DGR_ID);
+        if (error) return error;
+        for (unsigned i = 0; i < 4; ++i) {
+            char path[256]; snprintf(path, sizeof(path), DGR_TEMP "/%s", dgr_names[i]);
+            error = dgr_optional_regular(path);
+            if (error) return error;
+        }
+        error = dgr_optional_regular(DGR_TEMP DGR_ID ".diting-gpu-stage");
+        if (error) return error;
+    }
+    error = dgr_optional_regular(DGR_PENDING ".diting-gpu-stage");
+    if (!error) error = dgr_optional_regular(DGR_EXT "DitingAdrenoMetal.publish.diting-disabled");
+    if (error) return error;
+    for (unsigned i = 4; i < DitingGpuRuntimeFiles; ++i) {
+        char path[256]; snprintf(path, sizeof(path), "%s.diting-gpu-stage", dgr_names[i]);
+        error = dgr_optional_regular(path);
+        if (error) return error;
+        error = dgr_optional_regular(dgr_names[i]);
+        if (error) return error;
+    }
+
+    /* Validate all compressed inputs and all unowned destinations before
+     * a write mount. No partial candidate is exposed to a running process. */
+    diting_gpu_runtime_stage = 2; diting_gpu_runtime_step = 6;
     uint8_t *raw[DitingGpuRuntimeFiles] = {0};
     for (unsigned i = 0; i < DitingGpuRuntimeFiles; ++i) {
         raw[i] = kalloc_data((size_t)entries[i].bytes, Z_WAITOK);
@@ -233,80 +339,106 @@ static int dgr_install(proc_t p, user_addr_t scratch)
         if (entries[i].bytes < 32 || diting_gpu_runtime_u32(raw[i]) != 0xfeedfacf ||
             diting_gpu_runtime_u32(raw[i] + 4) != 0x0100000c) { error = EINVAL; goto done; }
     }
-    diting_gpu_runtime_stage = 3;
+    diting_gpu_runtime_step = 7;
+    if (!owned) {
+        for (unsigned i = 4; i < DitingGpuRuntimeFiles; ++i) {
+            int found = dgr_stat(dgr_names[i], VREG, 0, 0);
+            if (found == ENOENT) continue;
+            error = found ? found : dgr_equal(dgr_names[i], raw[i], entries[i].bytes, dgr_modes[i]);
+            // A first installation interrupted after disabling discovery has
+            // no live bundle yet. Its durable intent owns the zero flag.
+            if (error && !found && i == 5 && !pending)
+                error = dgr_equal(dgr_names[i], (const uint8_t *)"0\n", 2, 0644);
+            if (error) goto done;
+        }
+        if (pending && !stage_owned) {
+            // A filename alone cannot authorize replacing foreign staging
+            // files on a first install. Exact candidate contents are reusable.
+            for (unsigned i = 4; i < DitingGpuRuntimeFiles; ++i) {
+                char path[256]; snprintf(path, sizeof(path), "%s.diting-gpu-stage", dgr_names[i]);
+                int found = dgr_stat(path, VREG, 0, 0);
+                if (found == ENOENT) continue;
+                error = found ? found : dgr_equal(path, raw[i], entries[i].bytes, dgr_modes[i]);
+                if (error) goto done;
+            }
+            int found = dgr_stat(DGR_PENDING ".diting-gpu-stage", VREG, 0, 0);
+            if (found != ENOENT) {
+                error = found ? found : dgr_equal(DGR_PENDING ".diting-gpu-stage", archive + 32, 16, 0644);
+                if (error) goto done;
+            }
+            found = dgr_stat(DGR_EXT "DitingAdrenoMetal.publish.diting-disabled", VREG, 0, 0);
+            if (found != ENOENT) {
+                error = found ? found : dgr_equal(DGR_EXT "DitingAdrenoMetal.publish.diting-disabled",
+                    (const uint8_t *)"0\n", 2, 0644);
+                if (error) goto done;
+            }
+        }
+    }
+    diting_gpu_runtime_stage = 3; diting_gpu_runtime_step = 8;
     error = dgr_upgrade(p, scratch);
     if (error) goto done;
-    if (bundle == ENOENT) {
+    diting_gpu_runtime_step = 9;
+    error = dgr_write_new(p, scratch, DGR_PENDING ".diting-gpu-stage", archive + 32, 16, 0644, 1);
+    if (!error) error = dgr_rename(p, scratch, DGR_PENDING ".diting-gpu-stage", DGR_PENDING);
+    if (error) goto done;
+
+    diting_gpu_runtime_step = 10;
+    if (!current) {
         error = dgr_mkdir(p, scratch, DGR_TEMP);
-        if (error) goto done;
-        error = dgr_write_new(p, scratch, DGR_TEMP DGR_ID, archive + 32, 16, 0644, 0);
         if (error) goto done;
         for (unsigned i = 0; i < 4; ++i) {
             char path[256]; snprintf(path, sizeof(path), DGR_TEMP "/%s", dgr_names[i]);
             error = dgr_write_new(p, scratch, path, raw[i], entries[i].bytes, dgr_modes[i], 1);
             if (error) goto done;
         }
-    } else if (!installed) {
-        error = dgr_write_new(p, scratch, DGR_BUNDLE DGR_ID ".diting-gpu-stage", archive + 32, 16, 0644, 1);
+        error = dgr_write_new(p, scratch, DGR_TEMP DGR_ID ".diting-gpu-stage", archive + 32, 16, 0644, 1);
+        if (!error) error = dgr_rename(p, scratch, DGR_TEMP DGR_ID ".diting-gpu-stage", DGR_TEMP DGR_ID);
         if (error) goto done;
-        for (unsigned i = 0; i < 4; ++i) {
-            char target[256], path[256];
-            snprintf(target, sizeof(target), DGR_BUNDLE "/%s", dgr_names[i]);
-            snprintf(path, sizeof(path), DGR_BUNDLE "/%s.diting-gpu-stage", dgr_names[i]);
-            if (!dgr_stat(target, VREG, entries[i].bytes, dgr_modes[i]) &&
-                !dgr_write_new(p, scratch, target, raw[i], entries[i].bytes, dgr_modes[i], 0))
-                continue;
-            error = dgr_write_new(p, scratch, path, raw[i], entries[i].bytes, dgr_modes[i], 1);
-            if (error) goto done;
-        }
     }
-    diting_gpu_runtime_stage = 4;
+    diting_gpu_runtime_stage = 4; diting_gpu_runtime_step = 11;
     for (unsigned i = 4; i < DitingGpuRuntimeFiles; ++i) {
         char path[256]; snprintf(path, sizeof(path), "%s.diting-gpu-stage", dgr_names[i]);
         error = dgr_write_new(p, scratch, path, raw[i], entries[i].bytes, dgr_modes[i], 1);
         if (error) goto done;
     }
-    if (bundle == ENOENT) {
-        error = dgr_rename(p, scratch, DGR_TEMP, DGR_BUNDLE);
+
+    /* Revoke discovery only after staging is complete. On a later commit
+     * failure, publication remains zero; boot records the real error and
+     * continues without loading mixed versions. APFS exchanges the entire
+     * bundle atomically and retains the old bundle in the owned stage. */
+    diting_gpu_runtime_step = 12;
+    error = dgr_write_new(p, scratch, DGR_EXT "DitingAdrenoMetal.publish.diting-disabled",
+        (const uint8_t *)"0\n", 2, 0644, 1);
+    if (!error) error = dgr_rename(p, scratch, DGR_EXT "DitingAdrenoMetal.publish.diting-disabled", dgr_names[5]);
+    if (error) goto done;
+    diting_gpu_runtime_step = 13;
+    if (!current) {
+        error = dgr_rename_flags(p, scratch, DGR_TEMP, DGR_BUNDLE,
+            bundle == ENOENT ? RENAME_EXCL : RENAME_SWAP);
         if (error) goto done;
-    } else if (!installed) {
-        for (unsigned i = 0; i < 4; ++i) {
-            char target[256], path[256];
-            snprintf(target, sizeof(target), DGR_BUNDLE "/%s", dgr_names[i]);
-            snprintf(path, sizeof(path), DGR_BUNDLE "/%s.diting-gpu-stage", dgr_names[i]);
-            int staged = dgr_stat(path, VREG, entries[i].bytes, dgr_modes[i]);
-            if (staged == ENOENT) continue;
-            if (staged) { error = staged; goto done; }
-            error = dgr_rename(p, scratch, path, target);
-            if (error) goto done;
-        }
     }
-    diting_gpu_runtime_stage = 5;
-    /* The publication flag is committed after the complete bundle and helpers. */
-    static const unsigned order[] = {6, 7, 4, 5};
+    diting_gpu_runtime_stage = 5; diting_gpu_runtime_step = 14;
+    static const unsigned order[] = {6, 7, 4};
     for (unsigned n = 0; n < sizeof(order) / sizeof(order[0]); ++n) {
         unsigned i = order[n]; char path[256];
         snprintf(path, sizeof(path), "%s.diting-gpu-stage", dgr_names[i]);
-        int existing = dgr_stat(dgr_names[i], VREG, entries[i].bytes, dgr_modes[i]);
-        if (!existing) {
-            error = dgr_write_new(p, scratch, dgr_names[i], raw[i], entries[i].bytes, dgr_modes[i], 0);
-            if (!error) {
-                error = dgr_unlink(p, scratch, path);
-                if (error) goto done;
-                continue;
-            }
-            if (error != EEXIST || !owned) goto done;
-        } else if (existing != ENOENT && !(owned && existing == EINVAL && !dgr_stat(dgr_names[i], VREG, 0, 0))) {
-            error = existing; goto done;
-        }
         error = dgr_rename(p, scratch, path, dgr_names[i]);
         if (error) goto done;
     }
-    if (bundle != ENOENT && !installed) {
-        error = dgr_rename(p, scratch, DGR_BUNDLE DGR_ID ".diting-gpu-stage", DGR_BUNDLE DGR_ID);
-        if (error) goto done;
+    diting_gpu_runtime_step = 15;
+    error = dgr_rename(p, scratch, DGR_PENDING, DGR_READY);
+    if (error) goto done;
+    diting_gpu_runtime_step = 16;
+    error = dgr_rename(p, scratch, DGR_EXT "DitingAdrenoMetal.publish.diting-gpu-stage", dgr_names[5]);
+    if (error) {
+        // rename may have succeeded before the directory fsync failed. Try
+        // to revoke discovery again while retaining the original error.
+        if (!dgr_write_new(p, scratch, DGR_EXT "DitingAdrenoMetal.publish.diting-disabled",
+            (const uint8_t *)"0\n", 2, 0644, 1))
+            (void)dgr_rename(p, scratch, DGR_EXT "DitingAdrenoMetal.publish.diting-disabled", dgr_names[5]);
+        goto done;
     }
-    diting_gpu_runtime_stage = 6;
+    diting_gpu_runtime_stage = 6; diting_gpu_runtime_step = 17;
 done:
     for (unsigned i = 0; i < DitingGpuRuntimeFiles; ++i)
         if (raw[i]) kfree_data(raw[i], (size_t)entries[i].bytes);
@@ -318,11 +450,13 @@ static void diting_gpu_runtime_prepare(proc_t p, user_addr_t scratch)
     if (!PE_parse_boot_argn("diting_gpu_runtime_install", &enabled, sizeof(enabled)) || enabled != 1) return;
     int error = dgr_install(p, scratch);
     diting_gpu_runtime_error = error;
-    printf("DITING GPU runtime: %s stage=%d error=%d files-written=%u; hardware/performance untested\n",
-        error ? "SKIP" : "PASS", diting_gpu_runtime_stage, error, diting_gpu_runtime_written);
+    printf("DITING GPU runtime: %s stage=%d step=%u error=%d files-written=%u; hardware/performance untested\n",
+        error ? "FAIL" : "PASS", diting_gpu_runtime_stage, diting_gpu_runtime_step, error, diting_gpu_runtime_written);
 }
 #undef DGR_EXT
 #undef DGR_BUNDLE
 #undef DGR_TEMP
 #undef DGR_ID
+#undef DGR_PENDING
+#undef DGR_READY
 #endif

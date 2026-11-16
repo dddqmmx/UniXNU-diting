@@ -11,15 +11,41 @@ Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓
 - 本设备：[格式 2 配置](migration/format2/README.zh.md)、[系统迁移](migration/ipados18/README.zh.md)、
   [结构化移植记录](porting.toml)、[AGENTS.md](AGENTS.md)
 
-## 当前亮度与图标状态（2026-11-15）
+2026-11-17 停止状态：用户认为当前性能“已经很不错”，要求暂停GPU优化并提交、推送。
+手机保留临时运行services213，完整八核构建、链接、打包、GMU/CP与匹配USB均PASS，持久boot_b仍为198。
+212的142项颜色矩阵通过，用户确认正常界面“闪烁已消失”；地图和全部颜色尚未完整验收。
+213增加实际render-mode计数并使用gmem,nocb，一次自动UI功能3/4 PASS、设置前台前提FAIL，
+物理120fps仍UNQUALIFIED。无活动测试或后台构建/采集。最新源码、证据和暂停约束见
+[services213任务交接](migration/ipados18/交接-2026-11-17-services213-GPU优化暂停.md)。
 
-持久 boot_b 与运行内核为 services193 的 `ui-brightness-20261115-06`，保持八核、120 Hz请求和
+## USB GPU自动化历史状态（2026-11-15）
+
+services198已完成完整内核、八核打包和部署，GPU/UI安装均stage6/error0。通过USB自动运行
+Vulkan/Metal固定负载、桌面滑动、应用打开/关闭及多任务手势，采集framebuffer和内核trace，
+生成JSON、Markdown与JUnit评估；无需人工操作手机。
+
+一次完整矩阵已执行97项，固定颜色60项、GPU负载18组通过；三类系统动画仍FAIL，校准的
+panel VSYNC时间戳节奏约60.489Hz。目标保持 **120 fps / 8.333 ms**，物理新合成帧和其他系统颜色
+仍未认证。27,085条trace的missing/skipped/kernel drops/recovery均0。自动化体系的成功执行
+不能作为GPU性能达标的证据。
+
+```bash
+python3 scripts/run-diting-gpu-tests.py --profile all --policies auto sysmem gmem \
+  --output-dir /home/dddqmmx/UniXNU/diting-work/logs/diting/services198/automatic-next-01
+```
+
+输出目录必须为新目录；相同实现已有完整证据时先离线分析，不重复实机测试。主机先完成整批可预见修复与检查，
+下一候选再运行一次矩阵。入口和验收边界见 [USB GPU自动化](migration/ipados18/services197-gpu-automation.md)。
+
+## 亮度与图标历史状态（2026-11-15）
+
+当时持久 boot_b 与运行内核为 services193 的 `ui-brightness-20261115-06`，保持八核、120 Hz请求和
 services182的33,792字节loader。第四版用户确认“亮度正常图标不显示”；第六版实际设置BKS事务的
 低、中、高亮度及恢复原值均得到正确DCS回读，failures=0。亮度通过；图标第四版视觉失败，新的缓存读取修复
 已刷入第六版，仍待打开设置后的图标日志和可见画面验收。熄屏恢复本轮未验收。
 
-UI安装stage6/error0，设备已从只读Recovery回到正常系统。GPU安装仍stage1/error17/files-written0，
-120 fps性能仍未通过。此低优先级任务使用私有源码/缓存、nice19/ionice3和单编译任务，没有改动GPU工作源码或
+UI安装stage6/error0，设备已从只读Recovery回到正常系统。当时GPU安装stage1/error17/files-written0，
+后续已由services198的6/0安装状态替代，120 fps性能仍未通过。此低优先级任务使用私有源码/缓存、nice19/ionice3和单编译任务，没有改动GPU工作源码或
 共享XNU缓存。实现、设备证据和未完成项见 [services193亮度与设置图标](migration/ipados18/services193-ui-brightness.md)。
 
 ## USB与GPU历史状态（截至2026-11-14）
@@ -37,7 +63,7 @@ UI安装stage6/error0，设备已从只读Recovery回到正常系统。GPU安装
 Data/SystemOS 保留。最新 ADSP stage13/error0、SCM0:0、PMIC_online1，电池 stage4/percent100/flags0x7；
 界面电量、插拔和 PCM 播放尚未验收。源码含大量未提交改动，独立电池/ADSP 工作必须保留。
 完整证据、USB 命令、构建入口和下一步见
-[services192 当前交接](migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md)。
+[services192 历史交接](migration/ipados18/交接-2026-11-14-services192-USB已打通-GPU120fps未达标.md)。
 
 触控历史基线：services186 已进入系统，用户确认点按、滑动及熄屏后亮屏触控恢复正常。
 本机 Recovery 已确认触控器为 **ST61Y**；旧驱动使用 Goodix 协议。
@@ -54,7 +80,7 @@ Data/SystemOS 保留。最新 ADSP stage13/error0、SCM0:0、PMIC_online1，电�
 - 已验证的设备布局（userdata `0x2F8A00..0x3ADF3FA`，4 KiB LBA）：
   OS `0x100000`、SystemOS `0x198100000`、Data `0x285000000`，SHNGROOT v1 清单；
   三个卷 UUID 与内核内嵌的 `XNU_OWNER_*_VOLUME_UUID` 一致。
-- 当前停点：准备用户态的 `launchd_cache_loader` 在 restore 模式下以
+- 早期停点：准备用户态的 `launchd_cache_loader` 在 restore 模式下以
   `Failed to verify code directory` 退出。按 `migration/ipados18/services.md`（services9）的既有结论，
   启动参数需要 `launchd_unsecure_cache=1`；该参数已写入 `board.toml` 的 `kernel_args`。
 - 固件从 `0xA7000000` 读取 console，services182 另补 pmsg 导出，再用 Advanced Logger

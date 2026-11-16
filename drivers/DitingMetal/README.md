@@ -1,5 +1,7 @@
 # DitingMetal
 
+services213 每32次完成回调采样一次进程级 Turnip render-mode 累计计数，并在设备打开时记录初始值。事件84保留实际 `TU_DEBUG` 策略、`nocb` 标志与计数器可用性；计数描述已编码的 render pass，不能代表完成帧、DDR带宽或物理fps。前端观测不改变渲染策略，213通过启动参数选择 `gmem,nocb`；实际Turnip库与Rust translator保持212实现。严格编译、链接、签名和匹配安装通过，实机已收到有效计数；120fps自动验收尚未通过。用户认为当前性能已很好，GPU优化已暂停，见[最新交接](../../migration/ipados18/交接-2026-11-17-services213-GPU优化暂停.md)。
+
 Diting 的 Adreno 730 Metal 前端：面向 22H374 的 `DitingAdrenoMetal.bundle`、GOP wire、扫描输出呈现与 pipeline cache 导出。
 
 ## 适配硬件

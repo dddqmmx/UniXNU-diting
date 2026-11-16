@@ -30,7 +30,11 @@ static int save(io_connect_t connection,uint32_t type,const char *path) {
  }
  IOConnectUnmapMemory64(connection,type,mach_task_self(),address);return result;
 }
+extern int diting_gpu_test_daemon(void);
+extern int diting_gpu_test_worker(int, char **);
 int main(int argc, char **argv) {
+ if(argc==2 && !strcmp(argv[1],"--daemon"))return diting_gpu_test_daemon();
+ if(argc>1 && !strcmp(argv[1],"--worker"))return diting_gpu_test_worker(argc,argv);
  int pixels=argc==2 && !strcmp(argv[1],"--pixels");
  if(argc>1 && !pixels)return 64;
  if(geteuid())return 77;

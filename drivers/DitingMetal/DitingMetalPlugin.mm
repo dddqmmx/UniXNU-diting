@@ -150,13 +150,14 @@ static id openDevice(unsigned port)
     if(base)[candidates addObject:[[base stringByAppendingPathComponent:@"DitingMetal"] stringByAppendingPathComponent:process]];
     // main 461a842: let Turnip choose GMEM/sysmem for each attachment/pass.
     // Diting's BR/BV scheduling still requires concurrent binning disabled.
-    // Official 8-bit BGRA policy: GPU system-memory rendering. This still
-    // runs on Adreno/Metal; it avoids the GMEM load/store channel permutation.
+    // The matching Turnip build fixes linear BGRA GMEM transfers. nocb means
+    // NO_CONCURRENT_BINNING; it does not disable the colour cache.
     {char args[1024]={};size_t size=sizeof args;
      if(!sysctlbyname("kern.bootargs",args,&size,nullptr,0)) {
       if(strstr(args,"diting_gpu_trace=1")){setenv("SHENG_GPU_TRACE","1",1);setenv("SHENG_DIAG","1",1);}
+      if(strstr(args,"diting_gpu_trace=3"))setenv("DITING_GPU_TIMING","1",1);
       if(strstr(args,"diting_gpu_pixels=1"))setenv("SHENG_GPU_PIXELS","1",1);
-      // services194: default to Turnip per-pass GMEM/sysmem autotune (nocb),
+      // Default to Turnip per-pass GMEM/sysmem selection (nocb),
       // with tu_gmem_transfer_swap_fixup active in Turnip.
       // 0 = forced sysmem, 1 = per-pass autotune, 2 = forced GMEM.
       const char *policy="nocb";
@@ -166,7 +167,14 @@ static id openDevice(unsigned port)
        else if(tu[10]=='2')policy="gmem,nocb";
       }
       setenv("TU_DEBUG",policy,1);
-     } else setenv("TU_DEBUG","nocb",1);}
+     } else setenv("TU_DEBUG","nocb",1);
+     // Fixed USB test worker; other processes retain their selected policy.
+     if(!geteuid() && !strcmp(getprogname(),"gpu-capture18")) {
+      const char *test=getenv("DITING_GPU_TEST_POLICY");
+      if(test && !strcmp(test,"auto"))setenv("TU_DEBUG","nocb",1);
+      else if(test && !strcmp(test,"sysmem"))setenv("TU_DEBUG","sysmem,nocb",1);
+      else if(test && !strcmp(test,"gmem"))setenv("TU_DEBUG","gmem,nocb",1);
+     }}
     // Diting implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
@@ -216,18 +224,6 @@ static id openDevice(unsigned port)
     return result;
 }
 
-static bool excludedBackgroundDaemon(const char *process)
-{
-    static const char *const excluded[]={
-        "cameracaptured","mediaanalysisd","mediaanalysisd-service",
-        "photoanalysisd","nebulad","chronod",
-        "com.apple.MapKit.SnapshotService","searchpartyd","biomesyncd",
-        "spotlightknowledged","parsec-fbf","siriknowledged",
-        "routined","suggestd","knowledgeconstructiond","intelligenceplatformd"
-    };
-    for(const char *name:excluded)if(!strcmp(process,name))return true;
-    return false;
-}
 static bool selectedClient()
 {
     const char *process=getprogname();
@@ -252,7 +248,7 @@ static bool selectedClient()
             line[strcspn(line,"\r\n")]=0;
             if(!strcmp(line,process)
 #if DITING_GUEST_22H374
-                || (!strcmp(line,"*") && !excludedBackgroundDaemon(process))
+                || !strcmp(line,"*")
 #endif
             ){selected=true;break;}
         }

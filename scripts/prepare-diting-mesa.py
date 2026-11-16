@@ -14,6 +14,9 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[1]
 PIN = '85fda3b36405bcaea8bffc64aa4f2651dc90770d'
 PATCH = 'patches/mesa/parity167/diting-darwin22h374.patch'
+FOLLOWUPS = ['patches/mesa/parity207/0001-linear-gmem-event-format.patch',
+             'patches/mesa/parity210/0001-gmem-draw-destination-format.patch',
+             'patches/mesa/parity211/0001-linear-gmem-load-source-format.patch']
 
 
 def main():
@@ -30,9 +33,12 @@ def main():
         archive.extractall(destination, filter='data')
     subprocess.run(['git', 'apply', '--whitespace=nowarn', str(ROOT / PATCH)],
                    cwd=destination, check=True)
+    for patch in FOLLOWUPS:
+        subprocess.run(['git', 'apply', '--whitespace=nowarn', str(ROOT / patch)],
+                       cwd=destination, check=True)
     (destination / '.diting-mesa.json').write_text(json.dumps({
         'schema': 1, 'mesa': PIN, 'guest': '22H374', 'native_abi': 1,
-        'patch': PATCH, 'snapshot': 'services167',
+        'patch': PATCH, 'followups': FOLLOWUPS, 'snapshot': 'services211',
     }, indent=2) + '\n')
     print(destination)
 

@@ -1,5 +1,26 @@
 # DitingPower
 
+> 当前临时运行213，保留已验证的面板识别/120Hz请求、DDR/LLCC请求与有界显示诊断。212正常界面闪烁已由用户确认消失；用户认为当前性能已很好并要求暂停GPU优化。物理120fps、实际DDR频率及持续带宽仍未认证，见[最新交接](../../migration/ipados18/交接-2026-11-17-services213-GPU优化暂停.md)。下方编号段落保留各候选原始时点。
+
+services209 增加 `display fetch-swap MS`：沿用 services208 已实测恢复的控制器，在正常
+framebuffer fetch 下临时使用相反的红蓝 UNPACK 顺序。保持 FORMAT、alpha 与 CONSTANT_COLOR
+原值，不启用 solid fill、不写 framebuffer；范围1000–60000 ms，到期恢复并核对 flush。
+此对照用于区分正常取色与渲染/扫描问题，默认不运行，不作为颜色修复结论。
+
+services208 增加 USB 显式触发的 SSPP 纯色对照。默认不运行；只接受 blue/green/red 与
+1000–60000 ms。控制器核对当前双 VIG/CTL0/TE 配置后，保存 FORMAT、UNPACK 和 CONSTANT_COLOR，
+按固定 Xiaomi ABGR8888 契约设置常量色并一次 flush 两个 VIG。到期或 cancel 恢复六个原值，
+只有 flush 退休且硬件帧计数前进后才报告 restored=1。独立回调每次做有界寄存器操作，
+不在 USB 线程或 displayGate 内等待观察时长。电源关闭时不读写 DPU；恢复重试有上限，
+配置所有权改变时报告失败并保留诊断，不覆盖新配置。原面板时序、背光与 GPU copy 保持。
+主机恢复/超时/所有权检查通过；实机颜色与闪烁仍待确认。
+
+services204 私有候选增加 `gpu bandwidth`：仅在空闲、无未消费中断及保留计数的 BWMON4/5 上，
+各采样 12 ms，读取 1 ms 硬件窗口峰值，并核对原配置恢复。保持中断关闭及现有 CPU/GPU/DPU
+投票，恢复失败后拒绝再次借用。64 KiB 计数单位来自本机 DT；峰值按固定 Xiaomi
+`bimc-bwmon.c` 的非零 MAX 加一规则换算。它不能证明持续带宽上限或实际 DDR 频率。
+主机协议、所有权、无数据和恢复故障检查通过；尚未进行本候选实机测量。
+
 Diting 的电源、ADSP 与音频：PAS1 加载签名 ADSP 固件，GENI I2C 驱动功放，MI2S 输出到双功放，另有电池/充电器与面板背光。
 
 ## 适配硬件
@@ -8,7 +29,9 @@ Diting 的电源、ADSP 与音频：PAS1 加载签名 ADSP 固件，GENI I2C 驱
 - LPASS ADSP：PAS1、49 MiB 本机预留内存、SMP2P 与 GLINK
 - 音频：GENI I2C `a94000`（`qupv3_se13_i2c_active`，GPIO48/49），TFA9873 双功放地址 `0x34/0x35`，复位 GPIO1/89，WCD938x，tertiary MI2S SD1
 - 电池/充电器：按 Xiaomi SM8450 `qti_battery_charger.{h,c}` 的 battery 0 属性解码，通过 `IOPMPowerSource` 上报，不写充电限值
-- 背光：NT37705 Visionox OLED（1080×2412），面板 DCS `0x51` 写、`0x52` 回读，SM8475 DSI v2.6 @ `0x0ae94000`
+- 背光：Diting L12 OLED（1220×2712，42/02/0a 或 36/02/0b），面板 DCS `0x51` 写、`0x52` 回读，SM8475 DSI v2.6 @ `0x0ae94000`
+
+services203 在同一亮度工作循环中加入经 DDIC 身份和档位回读确认的 L12 120 Hz 时序切换，失败有界恢复，未退休命令保留 FIFO 所有权。候选尚未上机；接口、固定参考和硬件结果边界见 [亮度与面板时序](README.backlight.md)。
 
 ## 仓库关系
 

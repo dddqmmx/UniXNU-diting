@@ -11,6 +11,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 import diting_paths
 from diting_rpmh_contract import validate_live_dtb
+from diting_memory_contract import validate_live_dtb as validate_memory_dtb
 from diting_adsp_firmware import prepare as prepare_adsp_firmware
 def late_init(obj, filename, symbol):
  raw=bytearray(obj.read_bytes());at=32;sym=None
@@ -36,11 +37,12 @@ def late_init(obj, filename, symbol):
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--tree',type=Path,required=True)
  mode=p.add_mutually_exclusive_group()
- mode.add_argument('--resources-only',action='store_true',help='compile only DitingPlatformResources.cpp: the shared SMMU/power locks the UFS transport takes, without the audio firmware input')
+ mode.add_argument('--resources-only',action='store_true',help='compile DitingPlatformResources.cpp and the bounded probe recorder: the shared SMMU/power locks the UFS transport takes, without the audio firmware input')
  mode.add_argument('--battery-only',action='store_true',help='compile the PMIC codec and IOPMPowerSource into a separate libDitingBattery.a for isolated compile checks')
  a=p.parse_args()
  out=a.tree/'build/diting-power';out.mkdir(parents=True,exist_ok=True)
  validate_live_dtb(out/'rpmh-contract.json')
+ validate_memory_dtb(out/'memory-contract.json')
  adsp_report,adsp_assembly=prepare_adsp_firmware(out,os.environ) if not a.resources_only and not a.battery_only else ({'builtin':False},None)
  framework=a.tree/'.cache/fakeroot/System/Library/Frameworks/Kernel.framework/Versions/A'
  env=build_env()
@@ -59,7 +61,7 @@ def main():
   obj=out/'DitingAdspFirmware.o'
   subprocess.run(['xcrun','clang','-target','arm64-apple-ios18.0','-c',str(adsp_assembly),'-o',str(obj)],env=env,check=True)
   objects.append(obj)
- NAMES=('DitingPlatformResources.cpp',) if a.resources_only else ('ShengBattmgr.c','DitingBattery.cpp') if a.battery_only else ('QcomRpmh.c','QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','DitingFirmware.c','DitingAdsp.cpp','DitingBattery.cpp','DitingAudio.cpp','DitingAudioService.cpp','DitingPlatformResources.cpp','DitingPower.cpp','DitingBacklight.cpp')
+ NAMES=('../DitingProbe.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp') if a.resources_only else ('ShengBattmgr.c','DitingBattery.cpp') if a.battery_only else ('QcomRpmh.c','QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','DitingFirmware.c','DitingAdsp.cpp','DitingBattery.cpp','DitingAudio.cpp','DitingAudioService.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp','DitingPower.cpp','DitingBacklight.cpp','DitingDisplayTiming.cpp','../DitingProbe.cpp')
  for name in NAMES:
   source=(shared if name=='QcomRpmh.c' else ROOT/'drivers/DitingPower')/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]

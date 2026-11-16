@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #include "DitingAdrenoCp.h"
 #include "../DitingPower/DitingPlatformResources.h"
+#include "../DitingPower/DitingMemoryBandwidth.h"
+#include "../DitingPower/DitingMemoryPolicy.h"
 #include "DitingAdrenoCpProfile.h"
 #include "DitingAdrenoZap.h"
 #include "submit/NativeAdrenoSmmuContext.h"
@@ -300,6 +302,15 @@ static bool hardware_init()
         if(!wr(GEN7_CP_APERTURE_CNTL_HOST,pipe<<12) || !wr(GEN7_GRAS_NC_MODE_CNTL,bank<<5))return false;
     if(!wr(GEN7_CP_APERTURE_CNTL_HOST,0) || !wr(GEN7_RBBM_NC_MODE_CNTL,1))return false;
     for(const auto &p:DitingCpProtect)if(!wr(p[0],p[1]))return false;
+    // gen7_start configures the GPU's LLCC SCID only after the slice has
+    // actually activated. This runs before any client/ring work is exposed.
+    const bool cacheReady=diting_memory_gpu_cache()!=0;
+    if(cacheReady && (!wr(GEN7_GBIF_SCACHE_CNTL1,DitingMemory::gpuScache1()) ||
+        !wr(GEN7_GBIF_SCACHE_CNTL0,DitingMemory::gpuScache0()) ||
+        rd(GEN7_GBIF_SCACHE_CNTL1)!=DitingMemory::gpuScache1() ||
+        rd(GEN7_GBIF_SCACHE_CNTL0)!=DitingMemory::gpuScache0()))return false;
+    note("GPU LLCC SCID",cacheReady?0:1,
+        (uint64_t(rd(GEN7_GBIF_SCACHE_CNTL0))<<32)|rd(GEN7_GBIF_SCACHE_CNTL1));
     if(!wr(GEN7_CP_APRIV_CNTL,0x6f) || !wr(GEN7_CP_BV_APRIV_CNTL,0xf) || !wr(GEN7_CP_LPAC_APRIV_CNTL,0xf) ||
        !wr(GEN7_CP_CHICKEN_DBG,1) || !wr(GEN7_CP_BV_CHICKEN_DBG,1) || !wr(GEN7_CP_LPAC_CHICKEN_DBG,1) ||
        !wr(GEN7_GPU_GMU_AO_GMU_CGC_MODE_CNTL,0x20000) || !wr(GEN7_GPU_GMU_AO_GMU_CGC_DELAY_CNTL,0x10111) ||

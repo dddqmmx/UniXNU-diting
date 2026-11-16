@@ -8,9 +8,11 @@
  * Retire.value[4:6] are raw 19.2 MHz CP ticks, not CPU-clock timestamps.
  * Boot trace mode 1 includes userspace details; mode 2 keeps kernel events
  * without enabling the frontend's per-resource calls/allocation backtraces.
+ * Mode 3 adds bounded command timing, pipeline costs and optional two-frame
+ * pixel sampling; it leaves per-resource/frontend journals disabled.
  * Event fields and joins are documented by scripts/decode-gpu-trace.py. */
 enum { NativeGpuTraceVersion=1, NativeGpuTraceNote=3,
-       NativeGpuTraceDetailed=1, NativeGpuTraceKernelOnly=2,
+       NativeGpuTraceDetailed=1, NativeGpuTraceKernelOnly=2, NativeGpuTraceTiming=3,
        NativeGpuTraceMethod=0x7102, NativeGpuPixelMethod=0x7103,
        NativeGpuTraceCapacity=16384, NativeGpuTraceMetadata=4096, NativeGpuCaptureRecords=4096, NativeGpuPixelSlots=24,
        NativeGpuPixelBytes=65536, NativeGpuPixelChunk=1024 };
@@ -19,11 +21,15 @@ enum {
     GpuTraceSubmit=10, GpuTraceRetire=11, GpuTraceSwitch=12, GpuTraceRecovery=13,
     GpuTraceFenceQuery=14, GpuTraceImport=15,
     GpuTraceDisplay=20, GpuTraceDisplaySurface=21, GpuTraceDisplayFence=22,
-    GpuTraceDisplayLatch=23, GpuTraceDisplayPixel=24,
+    GpuTraceDisplayLatch=23, GpuTraceDisplayPixel=24, GpuTraceDisplayRefresh=25, GpuTraceDisplayHardware=26,
     GpuTraceCommand=30, GpuTraceSurface=31, GpuTraceEvent=32,
     GpuTraceAttachment=33, GpuTraceAttachmentFormat=34, GpuTraceTexture=35,
     GpuTracePass=36, GpuTraceGmem=37, GpuTraceVkSubmit=38, GpuTraceRuntime=39,
-    GpuTracePixel=40, GpuTraceDropped=41
+    GpuTracePixel=40, GpuTraceDropped=41,
+    GpuTraceTestCase=64,
+    GpuTraceHostSync=80, GpuTraceFrontendFrame=81,
+    GpuTraceFrontendStages=82, GpuTraceFrontendPipeline=83,
+    GpuTraceRenderModes=84
 };
 struct NativeGpuTraceRecord {
     uint64_t sequence,us;
@@ -37,7 +43,9 @@ struct NativeGpuTraceHeader {
 /* A sampled grid of raw texels, never colour converted. source_stride describes
  * the producer; row_bytes describes the grid. coordinates are floor(x*width/w).
  * colour_space: 0 unknown, 1 linear format, 2 sRGB format. flags: 1 GPU complete,
- * 2 displayed, 4 content changed during the CPU read. */
+ * 2 displayed, 4 content changed during the CPU read. Kernel stage 3 uses
+ * 16 for the completed copy's source and 32 for its pre-DPU scanout target;
+ * the command/fence IDs join that pair. Neither flag certifies panel output. */
 struct NativeGpuPixelHeader {
     uint32_t magic,version,pid,stage;
     uint64_t capture,us,command,surface,physical;

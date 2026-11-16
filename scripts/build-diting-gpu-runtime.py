@@ -96,6 +96,7 @@ def main():
     report = json.loads(path.read_text())
     report.update(runtime_format='diting-native-gpu-runtime-v1', native_abi=1,
                   device_extent=600, mesa=MESA, translator=TRANSLATOR,
+                  vulkan_headers=str(mesa / 'include'),
                   performance=dict(frontend_optimization=3, turnip_optimization=3,
                                    shader_cache=True, host_import_batch=64),
                   component_reports=dict(bridge=bridge, turnip=turnip),

@@ -21,6 +21,7 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include "NativeAdrenoUserClient.h"
+#include "NativeAdrenoFencePoll.h"
 #include "../DitingAdrenoScanout.h"
 #include "NativeGpuTrace.inc"
 extern "C" unsigned kauth_cred_getuid(void *);
@@ -93,6 +94,7 @@ static IOReturn runCore(AGXDeviceUserClient *,uint32_t method,const void *input,
 extern "C" int mac_iokit_check_open(void *cred,void *client,unsigned type);
 extern "C" void *kauth_cred_get(void);
 extern const struct io_filter_callbacks *gIOUCFilterCallbacks;
+#include "NativeGpuTestBroker.inc"
 
 extern "C" volatile uint32_t native_adreno_trace_stage;
 extern "C" {
@@ -182,6 +184,7 @@ class AGXDeviceUserClient : public IOUserClient {
     bool live_=false;
     bool closing_=false;
     bool handoffOnly_=false;
+    bool testOnly_=false;
     IOBufferMemoryDescriptor *traceSnapshots_[2]{};
     task_t handoffTask_=nullptr;
     bool kernel_=false;
@@ -203,6 +206,7 @@ class AGXDeviceUserClient : public IOUserClient {
     IOReturn run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size);
 public:
     void setHandoffOnly(task_t task) {handoffOnly_=true;handoffTask_=task;}
+    void setTestOnly() {testOnly_=true;}
     IOReturn mount(bool kernel);
     friend IOReturn runCore(AGXDeviceUserClient *,uint32_t,const void *,size_t,void *,size_t);
     friend void nativeAdrenoMailboxPoller(void *,wait_result_t);
@@ -425,11 +429,14 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
         buffer->setLength(size);traceSnapshots_[index]=buffer;buffer->retain();*memory=buffer;*options=kIOMapAnywhere|kIOMapReadOnly;return kIOReturnSuccess;
     }
     if(type==NativeAdrenoScanoutType) {
-        if(!live_ && !handoffOnly_)return kIOReturnNotReady;
-        IOMemoryDescriptor *scanout=native_gop_handoff_memory();
+        if(!live_ && !handoffOnly_ && !testOnly_)return kIOReturnNotReady;
+        if(testOnly_ && kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
+        IOMemoryDescriptor *scanout=nullptr;
+        if(testOnly_)diting_scanout_observe(nullptr,&scanout);
+        else scanout=native_gop_handoff_memory();
         if(!scanout)return kIOReturnNotReady;
         *memory=scanout;                        /* already retained for the caller */
-        *options=kIOMapAnywhere|kIOMapInhibitCache;   /* firmware framebuffer: device memory, never cached by the CPU */
+        *options=kIOMapAnywhere|kIOMapInhibitCache|(testOnly_?kIOMapReadOnly:0);
         return kIOReturnSuccess;
     }
     if(type==NativeAdrenoMailboxType) {
@@ -528,8 +535,22 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
     if(!diting_adreno_native_healthy())return kIOReturnNotReady;
     native_adreno_metal_diag.inflight=method+1;
     native_adreno_metal_diag.inflight_since_calls=native_adreno_metal_diag.calls;
-    IOReturn status;
-    if(method==NativeAdrenoMethodWaitFence && connection->live_ && input && input_size==sizeof(NativeAdrenoAbiWaitFence) && g.clock.now_us) {
+    IOReturn status=kIOReturnSuccess;
+    const bool submitting=method==NativeAdrenoMethodSubmit || method==NativeAdrenoMethodSubmitBatch;
+    if(submitting && input && input_size==NativeAdrenoUserClient::inputSize(method) &&
+        output && output_size==sizeof(NativeAdrenoAbiSubmitReply)) {
+        struct Header {uint32_t count,reserved;uint64_t queue,fence,timeout;} q{};
+        memcpy(&q,input,sizeof(q));
+        if(q.fence)status=native_adreno_poll_fence(g.clock,native_adreno_wait_us(q.timeout),[&]() {
+            IOLockLock(g.lock);
+            const IOReturn result=connection->live_ && !connection->closing_ && diting_adreno_native_healthy()?
+                connection->core_->pollSubmitDependency(method,input,input_size,&g.clock):kIOReturnNotReady;
+            IOLockUnlock(g.lock);return result;
+        });
+    }
+    if(status) {
+        // A timed-out or closing dependency never reaches BO reference holds.
+    } else if(method==NativeAdrenoMethodWaitFence && connection->live_ && input && input_size==sizeof(NativeAdrenoAbiWaitFence) && g.clock.now_us) {
         /* int-147: a fence wait polls under the lock but pauses outside it. int-146 slept inside the lock (up to the caller's 1 ms slice per
          * call), so every other thread's submit, map or allocation waited for the GPU to finish unrelated work: a frame could not be queued
          * while the previous one ran. Each poll is the core's own zero-timeout wait (same checks, retirement and statistics); the pause is the
@@ -609,7 +630,7 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         if(!status) {
             connection->core_->offerSystemPages(pages.descriptor?&pages:nullptr);
             if(method==NativeAdrenoMethodBoFree)connection->core_->collectFreedPages(&freed);
-            status=connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock);
+            status=connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock,submitting);
             connection->core_->offerSystemPages(nullptr);
             connection->core_->collectFreedPages(nullptr);
         }
@@ -628,10 +649,20 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
 }
 IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size)
 {
+    if(method>=DitingGpuTestPoll && method<=DitingGpuTestReadMode) {
+        if(!testOnly_ || kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
+        if(method==DitingGpuTestReadMode) {
+            if(input_size || !output || output_size!=sizeof(DitingScanoutModeInfo))return kIOReturnBadArgument;
+            return diting_scanout_observe(static_cast<DitingScanoutModeInfo *>(output),nullptr);
+        }
+        return gpuTestMethod(method,input,input_size,output,output_size);
+    }
+    if(testOnly_)return kIOReturnNotPermitted;
     if(method==NativeGpuTraceMethod) {
         if(!input || input_size!=sizeof(NativeGpuTraceRecord) || output_size)return kIOReturnBadArgument;
         const auto *record=static_cast<const NativeGpuTraceRecord *>(input);
-        if(record->event<30 || record->event>63)return kIOReturnBadArgument;
+        if((record->event<30 || record->event>GpuTraceTestCase) &&
+           (record->event<GpuTraceHostSync || record->event>GpuTraceRenderModes))return kIOReturnBadArgument;
         native_gpu_trace_record(record->event,proc_selfpid(),record->value,12);return kIOReturnSuccess;
     }
     if(method==NativeGpuPixelMethod) {
@@ -699,6 +730,9 @@ IOReturn AGXDeviceUserClient::action(OSObject *target,void *,IOExternalMethodArg
 IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *arguments,
     IOExternalMethodDispatch *,OSObject *target,void *reference)
 {
+    if(selector>=DitingGpuTestPoll && selector<=DitingGpuTestReadMode && arguments)
+        return run(selector,arguments->structureInput,arguments->structureInputSize,
+                   arguments->structureOutput,arguments->structureOutputSize);
     if((selector==NativeGpuTraceMethod || selector==NativeGpuPixelMethod) && arguments)
         return run(selector,arguments->structureInput,arguments->structureInputSize,
                    arguments->structureOutput,arguments->structureOutputSize);
@@ -766,8 +800,8 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     OSDictionary *properties,IOUserClient **handler,unsigned limit)
 {
     if(handler)*handler=nullptr;
-    if(!handler || !g.published || (type!=0x4754 && !diting_adreno_native_healthy()))return kIOReturnNotReady;
-    if(type==0x4754 && kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
+    if(!handler || !g.published || (type!=0x4754 && type!=DitingGpuTestOpenType && !diting_adreno_native_healthy()))return kIOReturnNotReady;
+    if((type==0x4754 || type==DitingGpuTestOpenType) && kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
     /* Progress markers: open types 0x4147xxxx (xxxx nonzero) are not connections. The plugin sends one before and after each step so
      * that a sandbox that admits neither selectors nor mapping, or a crash, still leaves a trace of how far it got. */
     if((type>>16)==NativeAdrenoPluginOpenType && (type&0xffff)) {
@@ -858,6 +892,10 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
     if(type==0x4754) {
         if(attach_state!=1){connection->release();return kIOReturnNotReady;}
         *handler=connection;return kIOReturnSuccess; // root read-only snapshots, no GPU/scanout slot
+    }
+    if(type==DitingGpuTestOpenType) {
+        if(attach_state!=1 || !gpuTestLockAcquire()){connection->release();return kIOReturnNotReady;}
+        connection->setTestOnly();*handler=connection;return kIOReturnSuccess;
     }
     if(type==NativeAdrenoHandoffOpenType) {
         const IOReturn handoff=diting_scanout_connect(owningTask);
@@ -953,6 +991,9 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
 {
     if(g.published || !vm || !submit || !ring || !clock || !clock->now_us)return kIOReturnBadArgument;
     gpuTraceInit();
+    // Optional diagnostics allocation failure leaves the normal GPU path
+    // available; USB reports broker-unavailable instead of blocking boot.
+    __atomic_store_n(&gpuTestLock,IOLockAlloc(),__ATOMIC_RELEASE);
     g.lock=IOLockAlloc();
     NativeAdrenoGpuPublished *service=new NativeAdrenoGpuPublished;
     if(!g.lock || !service || !service->init() || !service->attach(IOService::getPlatform())) {

@@ -32,6 +32,8 @@ class BootStageTests(unittest.TestCase):
         headers = cls.directory / 'libkern'
         headers.mkdir()
         (headers / 'zlib.h').write_text('#include <zlib.h>\n')
+        (cls.directory / 'sys').mkdir()
+        (cls.directory / 'sys/stdio.h').write_text('/* Host rename flags are defined by the VFS adapter. */\n')
         cls.obj = cls.directory / 'boot.o'
         cls.compiler = shutil.which('cc')
         subprocess.run([cls.compiler, '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined',
@@ -74,6 +76,26 @@ class BootStageTests(unittest.TestCase):
         output = subprocess.check_output([str(self.exe), str(self.root), scenario], text=True)
         return json.loads(output.splitlines()[-1])
 
+    def crash_boot(self, point):
+        result = subprocess.run([str(self.exe), str(self.root), 'crash-' + point], capture_output=True)
+        self.assertEqual(result.returncode, 99, result.stderr.decode(errors='replace'))
+
+    def runtime_update(self):
+        macho = struct.pack('<II', 0xfeedfacf, 0x0100000c) + bytes(24)
+        bodies = [b'<plist>updated fixture</plist>', macho + b'plugin-v2', macho + b'bridge-v2',
+                  macho + b'turnip-v2', b'*\n', b'1\n', macho + b'capture-v2', b'<plist>updated job</plist>']
+        self.make_executable(archive(bodies, install_id=bytes(range(16, 32))))
+        return bodies
+
+    def reset_runtime(self):
+        for entry in (self.root / 'System/Library/Extensions').iterdir():
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        (self.root / 'diting/gpu-capture18').unlink(missing_ok=True)
+        (self.root / 'System/Library/LaunchDaemons/dev.unixnu.diting.gpu-capture18.plist').unlink(missing_ok=True)
+
     def assert_no_writes(self, result):
         self.assertNotEqual(result['error'], 0)
         self.assertEqual((result['mounts'], result['writes']), (0, 0))
@@ -110,6 +132,27 @@ class BootStageTests(unittest.TestCase):
         extensions.rmdir()
         extensions.symlink_to(self.root / 'private/var', target_is_directory=True)
         self.assert_no_writes(self.run_boot())
+
+    def test_foreign_staging_directory_is_refused_before_any_write_mount(self):
+        stage = self.root / 'System/Library/Extensions/DitingAdrenoMetal.bundle.diting-stage'
+        stage.mkdir()
+        (stage / 'keep').write_bytes(b'foreign stage')
+        self.assert_no_writes(self.run_boot())
+        self.assertEqual((stage / 'keep').read_bytes(), b'foreign stage')
+
+    def test_foreign_helper_is_refused_before_bundle_creation(self):
+        helper = self.root / 'diting/gpu-capture18'
+        helper.write_bytes(b'foreign helper')
+        helper.chmod(0o755)
+        self.assert_no_writes(self.run_boot())
+        self.assertEqual(helper.read_bytes(), b'foreign helper')
+
+    def test_foreign_staged_helper_is_refused_before_write_mount(self):
+        helper = self.root / 'diting/gpu-capture18.diting-gpu-stage'
+        helper.write_bytes(b'foreign staged helper')
+        helper.chmod(0o755)
+        self.assert_no_writes(self.run_boot())
+        self.assertEqual(helper.read_bytes(), b'foreign staged helper')
 
     def test_wrong_root_prerequisites_never_mount_or_write(self):
         for scenario in ('rootful-off', 'wrong-fs', 'wrong-device'):
@@ -153,6 +196,82 @@ class BootStageTests(unittest.TestCase):
             new_id)
         result = self.run_boot()
         self.assertEqual((result['error'], result['writes'], result['mounts'], result['allocations']), (0, 0, 0, 0))
+
+    def test_power_loss_after_bundle_exchange_retains_one_complete_version_and_recovers(self):
+        self.assertEqual(self.run_boot()['error'], 0)
+        bundle = self.root / 'System/Library/Extensions/DitingAdrenoMetal.bundle'
+        stage = bundle.with_name(bundle.name + '.diting-stage')
+        names = ['Info.plist', 'DitingAdrenoMetal', 'DitingMetalBridge.dylib', 'libvulkan_freedreno.dylib']
+        before = [(bundle / name).read_bytes() for name in names]
+        bodies = self.runtime_update()
+        self.crash_boot('after-swap')
+        self.assertEqual([(bundle / name).read_bytes() for name in names], bodies[:4])
+        self.assertEqual([(stage / name).read_bytes() for name in names], before)
+        self.assertEqual((bundle.parent / 'DitingAdrenoMetal.publish').read_bytes(), b'0\n')
+        self.assertEqual(self.run_boot()['error'], 0)
+        self.assertEqual((bundle.parent / 'DitingAdrenoMetal.publish').read_bytes(), b'1\n')
+        self.assertEqual((bundle.parent / 'DitingAdrenoMetal.installed').read_bytes(), bytes(range(16, 32)))
+
+    def test_each_late_commit_boundary_resumes_without_loading_partial_runtime(self):
+        for point in ('after-disable', 'after-helper', 'after-ready'):
+            with self.subTest(point=point):
+                # Each point starts from the original complete installed ID.
+                extensions = self.root / 'System/Library/Extensions'
+                self.reset_runtime()
+                self.make_executable(archive())
+                self.assertEqual(self.run_boot()['error'], 0)
+                self.runtime_update()
+                self.crash_boot(point)
+                self.assertEqual((extensions / 'DitingAdrenoMetal.publish').read_bytes(), b'0\n')
+                self.assertEqual(self.run_boot()['error'], 0)
+                self.assertEqual((extensions / 'DitingAdrenoMetal.publish').read_bytes(), b'1\n')
+
+    def test_failed_final_publication_keeps_discovery_disabled_and_can_retry(self):
+        self.assertEqual(self.run_boot()['error'], 0)
+        self.runtime_update()
+        result = self.run_boot('fail-publish')
+        self.assertNotEqual(result['error'], 0)
+        self.assertEqual(result['step'], 16)
+        extensions = self.root / 'System/Library/Extensions'
+        self.assertEqual((extensions / 'DitingAdrenoMetal.publish').read_bytes(), b'0\n')
+        self.assertEqual(self.run_boot()['error'], 0)
+
+    def test_first_install_recovers_at_each_persistent_boundary(self):
+        for point in ('after-intent', 'after-stage', 'after-disable', 'after-bundle', 'after-helper', 'after-ready'):
+            with self.subTest(point=point):
+                self.reset_runtime()
+                self.make_executable(archive())
+                self.crash_boot(point)
+                self.assertEqual(self.run_boot()['error'], 0)
+                self.assertEqual((self.root / 'System/Library/Extensions/DitingAdrenoMetal.publish').read_bytes(), b'1\n')
+
+    def test_publish_directory_sync_failure_revokes_discovery_and_recovers(self):
+        self.assertEqual(self.run_boot()['error'], 0)
+        self.runtime_update()
+        result = self.run_boot('fail-publish-sync')
+        self.assertNotEqual(result['error'], 0)
+        self.assertEqual(result['step'], 16)
+        self.assertEqual((self.root / 'System/Library/Extensions/DitingAdrenoMetal.publish').read_bytes(), b'0\n')
+        self.assertEqual(self.run_boot()['error'], 0)
+
+    def test_new_candidate_recovers_an_older_torn_stage_without_an_internal_id(self):
+        result = self.run_boot('fail-write')
+        self.assertNotEqual(result['error'], 0)
+        stage = self.root / 'System/Library/Extensions/DitingAdrenoMetal.bundle.diting-stage'
+        self.assertFalse((stage / '.diting-native-gpu-runtime-v1').exists())
+        self.runtime_update()
+        self.assertEqual(self.run_boot()['error'], 0)
+
+    def test_new_candidate_recovers_an_interrupted_older_candidate(self):
+        self.assertEqual(self.run_boot()['error'], 0)
+        self.runtime_update()
+        self.crash_boot('after-swap')
+        final_id = bytes(range(32, 48))
+        self.make_executable(archive(install_id=final_id))
+        self.assertEqual(self.run_boot()['error'], 0)
+        extensions = self.root / 'System/Library/Extensions'
+        self.assertEqual((extensions / 'DitingAdrenoMetal.installed').read_bytes(), final_id)
+        self.assertEqual((extensions / 'DitingAdrenoMetal.publish').read_bytes(), b'1\n')
 
 
 if __name__ == '__main__':

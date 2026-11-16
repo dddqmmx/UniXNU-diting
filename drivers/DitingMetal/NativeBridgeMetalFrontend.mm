@@ -36,6 +36,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <sys/sysctl.h>
 #include "DitingMetalAbi.h"
+#include "DitingRenderModePolicy.h"
 
 extern "C" void sys_dcache_flush(void *start, size_t length);
 
@@ -44,8 +45,18 @@ static id gDeviceObject;
 static bool (*gFrameTransport)(uint32_t,const void *,uint32_t);
 static std::atomic<uint64_t> gFrameNumber{0},gFrameLost{0};
 static bool frameTraceOn(){static const bool on=getenv("SHENG_GPU_TRACE")!=nullptr;return on;}
+static bool frameTimingOn(){static const bool on=frameTraceOn() || getenv("DITING_GPU_TIMING")!=nullptr;return on;}
+static std::atomic<unsigned> gPixelCaptures{0};
+static bool framePixelsOn(){
+ if(!getenv("SHENG_GPU_PIXELS") || gPixelCaptures.load()>=(frameTraceOn()?3u:2u))return false;
+ const char *name=getprogname();return name && (strstr(name,"Poster") || !strcmp(name,"backboardd"));
+}
 template<typename... T> static void frameEvent(uint32_t event,T... args) {
- if(!frameTraceOn() || !gFrameTransport)return;
+ if(!frameTimingOn() || !gFrameTransport)return;
+ if(!frameTraceOn() && event!=GpuTraceCommand && event!=GpuTracePixel &&
+    event!=GpuTraceHostSync && event!=GpuTraceFrontendFrame &&
+    event!=GpuTraceFrontendStages && event!=GpuTraceFrontendPipeline &&
+    event!=GpuTraceRenderModes)return;
  NativeGpuTraceRecord rec{};rec.event=event;const uint64_t values[]={uint64_t(args)...};
  static_assert(sizeof...(args)<=12,"frame event fields");
  memcpy(rec.value,values,sizeof(values));
@@ -57,7 +68,7 @@ template<typename... T> static void frameEvent(uint32_t event,T... args) {
 }
 static void frameRuntime(uint32_t event,uint64_t id,uint64_t a,uint64_t b){frameEvent(event,id,a,b);}
 static void frameText(uint32_t event,const char *text) {
- if(!frameTraceOn() || !gFrameTransport || !text)return;
+ if(!frameTimingOn() || !gFrameTransport || !text)return;
  NativeGpuTraceRecord rec{};rec.event=event;strlcpy((char *)rec.value,text,sizeof(rec.value));
  (void)gFrameTransport(NativeGpuTraceMethod,&rec,sizeof(rec));
 }
@@ -67,6 +78,23 @@ static void frameText(uint32_t event,const char *text) {
 static uint64_t gRegistryID;
 static NSString *gName;
 static std::string gLoaderPath;
+using RenderModeRead=void (*)(uint64_t *);
+static std::atomic<RenderModeRead> gRenderModeRead{nullptr};
+static DitingRenderModePolicy::Policy gRenderPolicy{};
+static std::atomic<uint64_t> gRenderModeSamples{0};
+static std::mutex gRenderModeLock;
+static void frameRenderModes(uint64_t id,bool force=false) {
+ if(!frameTimingOn() || !gFrameTransport)return;
+ // One process snapshot every 32 completed commands, plus the real open.
+ // These counters describe encoded render passes, not completed GPU frames.
+ if(!force && (gRenderModeSamples.fetch_add(1,std::memory_order_relaxed)&31u)!=0)return;
+ std::lock_guard<std::mutex> lock(gRenderModeLock);
+ uint64_t counts[8]={};
+ const auto read=gRenderModeRead.load(std::memory_order_acquire);
+ if(read)read(counts);
+ frameEvent(GpuTraceRenderModes,id,gRenderPolicy.mode,gRenderPolicy.flags,read?1:0,
+  counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7]);
+}
 static std::atomic<uint32_t> gPriorityForeground{1},gPriorityBackground{3};
 static NBQueuePriorities gQueuePriorities;
 static std::mutex gPriorityLock;
@@ -92,6 +120,11 @@ static std::atomic<uint64_t> gPasses,gDraws,gPassPixels,gDispatches,gBlits,gBigg
 // Where the time goes on the CPU side of the bridge: pipeline, library and function creation (count, total and slowest, in microseconds), and the
 // last commits with what each held and how long the GPU took (commit to completion).
 static uint64_t nowUs() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000;}
+static void timingPipeline(uint32_t kind,uint64_t began,bool ok) {
+ if(!frameTimingOn())return;
+ const uint64_t elapsed=nowUs()-began;
+ if(elapsed>=1000)frameEvent(GpuTraceFrontendPipeline,kind,began,elapsed,ok);
+}
 struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
  void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();while(took>seen && !slowest.compare_exchange_weak(seen,took)){}}};
 static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
@@ -732,7 +765,7 @@ static std::string quartzCoreCallers();
   constants.push_back({v.dataType,group?0:v.index,group?v.name.UTF8String:nullptr,v.data,bytes});
  }
  const uint64_t functionBegan=nowUs();
- NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);
+ NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);timingPipeline(2,functionBegan,handle!=nullptr);
  std::string text;
  if(gJournalVerbose || !handle)for(const NmbConstant &c:constants) {
   char head[32];if(!c.name)snprintf(head,sizeof head,"#%llu",(unsigned long long)c.index);
@@ -820,7 +853,7 @@ static std::string quartzCoreCallers();
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
  const uint64_t functionBegan=nowUs();
- NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);
+ NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);timingPipeline(2,functionBegan,handle!=nullptr);
  if(!handle)return nil;
  NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.sourceName=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
  return (id<MTLFunction>)function;
@@ -1366,12 +1399,12 @@ static void captureColour(IOSurfaceRef surface,uint64_t capture) {
 }
 // Samples retain the IOSurface owner through the real completion callback.
 static void captureFrameSurfaces(NBCommandBuffer *cb) {
- if(!frameTraceOn() || !gFrameTransport || !getenv("SHENG_GPU_PIXELS"))return;
+ if(!framePixelsOn() || !gFrameTransport)return;
  const char *name=getprogname();const uint32_t stage=name && strstr(name,"Poster")?1:name && !strcmp(name,"backboardd")?2:0;
  if(!stage)return;
  static std::mutex gate;static unsigned taken;static uint64_t last;
  std::unique_lock<std::mutex> lock(gate,std::try_to_lock);if(!lock.owns_lock())return;
- const uint64_t now=nowUs();if(taken>=3 || (last && now-last<30000000))return;
+ const uint64_t now=nowUs();if(taken>=(frameTraceOn()?3u:2u) || (last && now-last<(frameTraceOn()?30000000u:500000u)))return;
  NBTexture *chosen=nil;uint64_t pixels=0;
  for(NBTexture *t in cb.surfaces) {
   const uint32_t usage=[cb.traceUsage[[NSValue valueWithPointer:t.handle]] unsignedIntValue];
@@ -1405,7 +1438,7 @@ static void captureFrameSurfaces(NBCommandBuffer *cb) {
   ok=gFrameTransport(NativeGpuPixelMethod,&piece,sizeof(piece));
  }
  frameEvent(40,h.command,stage,ok?0:2,h.surface,h.format,h.bytes,h.flags);
- if(ok){++taken;captureColour(surface,h.capture);}last=now;
+ if(ok){++taken;++gPixelCaptures;captureColour(surface,h.capture);}last=now;
 }
 
 @implementation NBCommandBuffer
@@ -1420,13 +1453,14 @@ static char kUserDictionaryKey;
 }
 - (instancetype)init {
  if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
- if(self){createdUs=nowUs();traceNumber=++gFrameNumber;if(frameTraceOn())_traceUsage=[NSMutableDictionary dictionary];}
+ if(self){createdUs=nowUs();traceNumber=++gFrameNumber;if(frameTraceOn() || framePixelsOn())_traceUsage=[NSMutableDictionary dictionary];}
  return self;
 }
 - (void)dealloc {nmb_command_buffer_release(_handle);}
 - (void)traceTexture:(NBTexture *)texture usage:(uint32_t)usage {
- if(!frameTraceOn() || !texture)return;
+ if((!frameTraceOn() && !framePixelsOn()) || !texture)return;
  NSValue *key=[NSValue valueWithPointer:texture.handle];_traceUsage[key]=@([_traceUsage[key] unsignedIntValue]|usage);
+ if(!frameTraceOn())return;
  const auto td=texture.descriptor;IOSurfaceRef surface=texture.surface;
  frameEvent(31,traceNumber,(uintptr_t)texture.handle,surface?IOSurfaceGetID(surface):0,
     surface?(uintptr_t)IOSurfaceGetBaseAddress(surface):0,surface?IOSurfaceGetAllocSize(surface):0,
@@ -1435,9 +1469,10 @@ static char kUserDictionaryKey;
     td.samples,td.type,td.usage,surface?IOSurfaceGetPixelFormat(surface):0);
 }
 - (void)tracePhase:(uint32_t)phase {
- if(!frameTraceOn())return;
+ if(!frameTimingOn())return;
  const uint64_t runtime=_handle?nmb_command_buffer_diagnostic_id(_handle):0;
  frameEvent(30,traceNumber,runtime,phase,self.status,encodedWork.passes,self.commitIndex,(uintptr_t)_handle);
+ if(!frameTraceOn())return;
  for(NBTexture *t in _surfaces)frameEvent(31,traceNumber,(uintptr_t)t.handle,t.surface?IOSurfaceGetID(t.surface):0,
     t.surface?(uintptr_t)IOSurfaceGetBaseAddress(t.surface):0,t.surface?IOSurfaceGetAllocSize(t.surface):0,
     t.descriptor.width,t.descriptor.height,t.rowBytes,t.descriptor.format,phase,
@@ -1636,7 +1671,7 @@ static char kUserDictionaryKey;
   self.completionSyncFailed=YES;self.encodeFailure=@"completed host-import acquire failed";
  }
  const uint64_t flushBegan=nowUs();flushSurfaces(_surfaces,kernelSynced);
- frameEvent(61,traceNumber,1,flushBegan-syncBegan,nowUs()-flushBegan,_surfaces.count,_resourceOwners.count,kernelSynced.size());
+ frameEvent(GpuTraceHostSync,traceNumber,1,flushBegan-syncBegan,nowUs()-flushBegan,_surfaces.count,_resourceOwners.count,kernelSynced.size());
  [self tracePhase:3];
  if(!self.failedLocally && self.status==MTLCommandBufferStatusCompleted)captureFrameSurfaces(self);
  ditingsurface::complete(displayHandoffs,self.completionSyncFailed || (!self.failedLocally && self.status!=MTLCommandBufferStatusCompleted));
@@ -1680,7 +1715,7 @@ static char kUserDictionaryKey;
   [self refuse:@"explicit imported-page publication failed"];
  if(!self.encodeFailure) {
   const uint64_t flushBegan=nowUs();flushSurfaces(_surfaces,kernelSynced);
-  frameEvent(61,traceNumber,2,flushBegan-syncBegan,nowUs()-flushBegan,_surfaces.count,_resourceOwners.count,kernelSynced.size());
+  frameEvent(GpuTraceHostSync,traceNumber,2,flushBegan-syncBegan,nowUs()-flushBegan,_surfaces.count,_resourceOwners.count,kernelSynced.size());
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
@@ -1735,6 +1770,22 @@ static void completed(void *context) {
  // Bounded real frame records complement the kernel's CP start/end stamps.
  // Include completion-side ownership/cache work, which precedes presentation.
  const uint64_t finished=nowUs();
+ if(frameTimingOn()) {
+  const uint64_t runtime=nmb_command_buffer_diagnostic_id(commandBuffer.handle);
+  frameEvent(GpuTraceFrontendFrame,commandBuffer->traceNumber,runtime,commandBuffer.committedUs-commandBuffer->createdUs,
+   scheduledUs>=0?uint64_t(scheduledUs):UINT64_MAX,callbackBegan-commandBuffer.committedUs,
+   finished-callbackBegan,commandBuffer.status,commandBuffer->encodedWork.passes,
+   commandBuffer->encodedWork.draws,commandBuffer->encodedWork.pixels,gPriorityForeground.load(),gPriorityBackground.load());
+  uint64_t stages[12]={};
+  if(nmb_command_buffer_stage_summary(commandBuffer.handle,stages)) {
+   auto delta=[&](unsigned end,unsigned begin)->uint64_t {
+    return stages[begin] && stages[end]>=stages[begin]?(stages[end]-stages[begin])/1000:UINT64_MAX;
+   };
+   frameEvent(GpuTraceFrontendStages,commandBuffer->traceNumber,runtime,delta(1,0),delta(2,1),delta(3,2),delta(4,3),
+    delta(5,4),delta(6,5),delta(7,6),delta(8,7),delta(9,8),stages[11]);
+  }
+  frameRenderModes(commandBuffer->traceNumber);
+ }
  static std::atomic<uint64_t> nextSlowLog{0};
  uint64_t next=nextSlowLog.load();
  if(finished-commandBuffer.committedUs>=33000 && finished>=next &&
@@ -2203,14 +2254,14 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
  const void *bytes=nullptr;size_t size=0;dispatch_data_t mapped=dispatch_data_create_map(data,&bytes,&size);
  const uint64_t libraryBegan=nowUs();
- NmbLibrary *handle=nmb_library_new(gDevice,bytes,size,false);(void)mapped;gTimeLibrary.add(libraryBegan);
+ NmbLibrary *handle=nmb_library_new(gDevice,bytes,size,false);(void)mapped;gTimeLibrary.add(libraryBegan);timingPipeline(1,libraryBegan,handle!=nullptr);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
  NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
 }
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)error {
  NSData *bytes=path?[NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error]:nil;if(!bytes)return nil;
  const uint64_t libraryBegan=nowUs();
- NmbLibrary *handle=nmb_library_new(gDevice,bytes.bytes,bytes.length,false);gTimeLibrary.add(libraryBegan);
+ NmbLibrary *handle=nmb_library_new(gDevice,bytes.bytes,bytes.length,false);gTimeLibrary.add(libraryBegan);timingPipeline(1,libraryBegan,handle!=nullptr);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
  NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
 }
@@ -2233,7 +2284,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  if(![(id)function isKindOfClass:[NBFunction class]]){if(error)*error=nbError(@"foreign function");return nil;}
  const NmbPipelineOptions creation={(uint64_t)options,nullptr,0};
  const uint64_t pipelineBegan=nowUs();
- NmbComputePipeline *handle=nmb_compute_pipeline_new_with_options(gDevice,[(NBFunction *)function handle],&creation);gTimePipeline.add(pipelineBegan);
+ NmbComputePipeline *handle=nmb_compute_pipeline_new_with_options(gDevice,[(NBFunction *)function handle],&creation);gTimePipeline.add(pipelineBegan);timingPipeline(3,pipelineBegan,handle!=nullptr);
  if(!handle)return failWith<id<MTLComputePipelineState>>(error,@"compute pipeline",nil);
  NBComputePipeline *state=[NBComputePipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLComputePipelineState>)state;
 }
@@ -2245,7 +2296,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  if(!pipelineArchives(d.binaryArchives,archives,error))return nil;
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
  const uint64_t pipelineBegan=nowUs();
- NmbComputePipeline *handle=nmb_compute_pipeline_new_with_descriptor(gDevice,&p,&creation);gTimePipeline.add(pipelineBegan);
+ NmbComputePipeline *handle=nmb_compute_pipeline_new_with_descriptor(gDevice,&p,&creation);gTimePipeline.add(pipelineBegan);timingPipeline(3,pipelineBegan,handle!=nullptr);
  if(!handle)return failWith<id<MTLComputePipelineState>>(error,@"compute pipeline",nil);
  NBComputePipeline *state=[NBComputePipeline new];state.handle=handle;state.label=d.label;gPipelines++;
  if(error)*error=nil;return (id<MTLComputePipelineState>)state;
@@ -2278,7 +2329,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
  const uint64_t pipelineBegan=nowUs();
  const NBCost costBegan=gJournalVerbose?NBCost::now():NBCost{};
- NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);delete p;gTimePipeline.add(pipelineBegan);
+ NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);delete p;gTimePipeline.add(pipelineBegan);timingPipeline(4,pipelineBegan,handle!=nullptr);
  journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),gJournalVerbose?NBCost::now().since(costBegan):std::string());
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;state.stateFormat=(uint32_t)d.colorAttachments[0].pixelFormat;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
@@ -2415,13 +2466,16 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  gLoaderPath=loader?loader:"";
  if(cache && *cache)configureShaderDiskCache(cache);
  gDevice=nmb_device_open(loader,cache);
- if(frameTraceOn() && loader) {
+ if(frameTimingOn() && loader) {
   void *library=dlopen(loader,RTLD_NOW|RTLD_NOLOAD);
   if(library)gFrameTransport=(bool (*)(uint32_t,const void *,uint32_t))dlsym(library,"tu_darwin_frame_diagnostic");
-  nmb_gpu_diagnostic_hook(frameRuntime);
+  gRenderPolicy=DitingRenderModePolicy::parse(getenv("TU_DEBUG"));
+  if(library)gRenderModeRead.store((RenderModeRead)dlsym(library,"tu_render_mode_stats"),std::memory_order_release);
+  if(frameTraceOn())nmb_gpu_diagnostic_hook(frameRuntime);
   frameText(46,getprogname());frameEvent(48,singleSample(),getenv("SHENG_GPU_PIXELS")!=nullptr);
   if(library)if(auto build=(const char *(*)())dlsym(library,"tu_darwin_frame_build_id"))frameText(58,build());
   frameText(59,getenv("TU_DEBUG")?getenv("TU_DEBUG"):"default");
+  frameRenderModes(0,true);
 #ifdef NATIVE_METAL_BUILD_ID
   frameText(47,NATIVE_METAL_BUILD_ID);
 #endif

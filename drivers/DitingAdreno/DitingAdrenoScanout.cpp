@@ -4,6 +4,7 @@
  * or submission scanout_gate. Only a real completed GPU copy retires a frame.
  */
 #include "DitingAdrenoScanout.h"
+#include "DitingScanoutPixels.h"
 #define NATIVE_GPU_TRACE_OPTIONAL
 #include "submit/NativeGpuTrace.h"
 #include <IOKit/IOLib.h>
@@ -12,11 +13,22 @@
 #include <kern/task.h>
 #include <pexpert/pexpert.h>
 extern "C" void diting_ramoops_diagnostic_write(const char *,int);
+extern "C" void diting_display_observe_copy(uint64_t) __attribute__((weak_import));
+extern "C" void diting_display_copy_ready(uint64_t) __attribute__((weak_import));
 namespace {
 IOLock *scanout_gate;
 IOMemoryDescriptor *scanout;
 task_t client;
 DitingScanoutModeInfo mode{};
+// These are the console's existing reserved-RAM mapping and physical extent.
+// They never expose an arbitrary physical-address reader to USB/user space.
+volatile uint32_t *scanoutPixels;
+uint64_t scanoutPhysical;
+unsigned pixelFrames;
+uint64_t pixelLast;
+bool pixelCapture;
+uint32_t *currentPixels;
+DitingScanoutPixels::Snapshot currentPixelSnapshot;
 bool waiting=false,workerReady=false,poisoned=false,idleNotify=false;
 uint64_t sequence=0,completed=0,sourceUse=0;
 uint32_t nextSource=1;
@@ -39,6 +51,60 @@ void note(const char *phase,uint64_t id,unsigned status)
     if(n>0){IOLog("%s",text);diting_ramoops_diagnostic_write(text,n);}
 }
 uint64_t deadline(unsigned ms){uint64_t d;clock_interval_to_deadline(ms,kMillisecondScale,&d);return d;}
+
+void capturePixels(const Source &source,uint32_t stride,uint64_t id)
+{
+    if(!pixelCapture || !scanoutPixels || pixelFrames>=2 || (stride&3) || id>UINT64_MAX/2-1 || !&native_gpu_pixel_put ||
+       !&native_gpu_trace_enabled || !native_gpu_trace_enabled())return;
+    uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    const uint64_t now=ns/1000;
+    // Leave boot rendering alone; capture two completed UI copies, once each.
+    // The scanout gate and framebuffer presenter keep the next copy/CPU write
+    // from racing these reads. The source descriptor remains wired/retained.
+    if(now<60000000 || (pixelLast && now-pixelLast<1000000))return;
+    pixelLast=now;
+    constexpr unsigned side=64, count=side*side, bytes=count*4;
+    auto *data=static_cast<uint32_t *>(IOMallocZero(2*bytes));
+    if(!data)return;
+    auto sample=[&](const volatile uint32_t *base,uint32_t row,uint32_t *out) {
+        for(unsigned y=0;y<side;++y)for(unsigned x=0;x<side;++x)
+            out[y*side+x]=base[size_t(y*mode.height/side)*(row/4)+x*mode.width/side];
+    };
+    IOMemoryMap *map=pixelFrames==0?source.memory->map(kIOMapAnywhere):nullptr;
+    bool paired=map && map->getVirtualAddress();
+    if(paired)sample(reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress()),stride,data);
+    sample(scanoutPixels,uint32_t(mode.stride),data+count);
+    unsigned mismatch=0, swapped=0, changed=0;
+    if(paired)for(unsigned i=0;i<count;++i) {
+        const uint32_t a=data[i]&0xffffff,b=data[count+i]&0xffffff;
+        mismatch+=a!=b;
+        swapped+=(((a&255)<<16)|(a&0xff00)|(a>>16))==b;
+    }
+    for(unsigned y=0;y<side;++y)for(unsigned x=0;x<side;++x)
+        changed+=data[count+y*side+x]!=scanoutPixels[size_t(y*mode.height/side)*(mode.stride/4)+x*mode.width/side];
+    if(map)map->release();
+    bool stored=true;
+    for(unsigned role=paired?0:1;role<2 && stored;++role) {
+        NativeGpuPixelPiece piece{};auto &h=piece.header;
+        h.magic=0x31585047;h.version=1;h.stage=3;h.capture=id*2+role;h.us=now;h.command=id;
+        h.surface=source.generation;h.physical=role?scanoutPhysical:0;
+        h.width=mode.width;h.height=mode.height;h.format=80;h.colour_space=0;
+        h.source_stride=role?mode.stride:stride;h.grid_width=h.grid_height=side;
+        h.row_bytes=side*4;h.bytes_per_pixel=4;h.bytes=bytes;h.fence=id;
+        h.flags=1|(role?32:16)|(role && changed?4:0);
+        for(unsigned at=0;at<bytes && stored;at+=piece.bytes) {
+            piece.offset=at;piece.bytes=bytes-at<NativeGpuPixelChunk?bytes-at:NativeGpuPixelChunk;
+            memcpy(piece.data,reinterpret_cast<uint8_t *>(data+role*count)+at,piece.bytes);
+            stored=native_gpu_pixel_put(&piece,0)==0;
+        }
+    }
+    gpuTraceEvent(GpuTraceDisplayPixel,0,id,source.generation,paired,stored,stride,mode.stride,
+        scanoutPhysical,count,mismatch,swapped,changed,now);
+    IOFree(data,2*bytes);
+    // Partial retained samples are immutable and are never overwritten/retried.
+    if(!stored)pixelCapture=false;
+    ++pixelFrames;
+}
 }
 extern "C" void diting_scanout_initialize(uint64_t address,size_t bytes,uint32_t stride,uint32_t width,uint32_t height)
 {
@@ -67,7 +133,48 @@ extern "C" void diting_scanout_initialize(uint64_t address,size_t bytes,uint32_t
     if(!scanout)return;
     scanout_gate=IOLockAlloc();if(!scanout_gate){scanout->release();scanout=nullptr;return;}
     mode={DitingScanoutVersion,DitingScanoutBgra,width,height,stride,rounded};
+    unsigned pixels=0;PE_parse_boot_argn("diting_gpu_pixels",&pixels,sizeof(pixels));
+    if(pixels==1 && width==1220 && height==2712 && stride==4880 && physical==0xb8000000) {
+        scanoutPixels=reinterpret_cast<volatile uint32_t *>(address);scanoutPhysical=physical;pixelCapture=true;
+        currentPixels=static_cast<uint32_t *>(IOMallocZero(DitingScanoutPixels::Count*sizeof(uint32_t)));
+    }
     note("actual framebuffer handoff available",0,0);
+}
+extern "C" unsigned diting_scanout_pixels_text(const char *request,char *out,unsigned bytes)
+{
+    using namespace DitingScanoutPixels;
+    Request q{};DitingDisplay::Text text{out,bytes};
+    if(!parse(request,q)) {
+        text.add("PIXELS schema=1 status=REJECT reason=use-display-pixels-or-bounded-grid-range\n");return text.used;
+    }
+    if(!scanout_gate || !scanoutPixels || !currentPixels || scanoutPhysical!=0xb8000000) {
+        text.add("PIXELS schema=1 status=SKIP reason=reserved-console-reader-unavailable\n");return text.used;
+    }
+    IOLockLock(scanout_gate);
+    if(q.capture) {
+        // The presenter gate serializes source lifetime and completed copies.
+        // Do not read a framebuffer still owned by an outstanding GPU write.
+        if(pending.offered && (!pending.done || pending.status)) {
+            IOLockUnlock(scanout_gate);
+            text.add("PIXELS schema=1 status=BUSY reason=scanout-copy-unretired\n");return text.used;
+        }
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        const uint64_t start=ns/1000;
+        auto at=[](unsigned index) {
+            const unsigned y=index/Side,x=index%Side;
+            return size_t(y*mode.height/Side)*(mode.stride/4)+x*mode.width/Side;
+        };
+        for(unsigned i=0;i<Count;++i)currentPixels[i]=scanoutPixels[at(i)];
+        __asm__ volatile("dmb oshld" ::: "memory");
+        unsigned changed=0;
+        for(unsigned i=0;i<Count;++i)changed+=currentPixels[i]!=scanoutPixels[at(i)];
+        absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        currentPixelSnapshot={currentPixelSnapshot.capture+1,completed,start,ns/1000,changed};
+    }
+    const unsigned used=currentPixelSnapshot.capture?format(out,bytes,currentPixelSnapshot,currentPixels,q):0;
+    IOLockUnlock(scanout_gate);
+    if(used)return used;
+    text.add("PIXELS schema=1 status=SKIP reason=capture-current-console-first\n");return text.used;
 }
 extern "C" IOReturn diting_scanout_connect(task_t owner)
 {
@@ -99,6 +206,20 @@ extern "C" IOMemoryDescriptor *diting_scanout_memory(task_t owner)
     if(!scanout_gate)return nullptr;
     IOLockLock(scanout_gate);auto *memory=client==owner && !poisoned?scanout:nullptr;
     if(memory)memory->retain();IOLockUnlock(scanout_gate);return memory;
+}
+extern "C" IOReturn diting_scanout_observe(DitingScanoutModeInfo *info,IOMemoryDescriptor **memory)
+{
+    // The root diagnostics connection enforces a read-only CPU map. This
+    // observer neither claims the presenter nor imports/retire its surfaces.
+    if(memory)*memory=nullptr;
+    if(!scanout_gate || (!info && !memory))return kIOReturnNotReady;
+    IOLockLock(scanout_gate);
+    IOReturn status=scanout?kIOReturnSuccess:kIOReturnNotReady;
+    if(scanout) {
+        if(info)*info=mode;
+        if(memory){scanout->retain();*memory=scanout;}
+    }
+    IOLockUnlock(scanout_gate);return status;
 }
 extern "C" bool diting_scanout_quarantined(void)
 {
@@ -208,6 +329,9 @@ extern "C" int diting_scanout_frame(IOMemoryDescriptor *source,size_t offset,uin
     if(!pending.delivered)workerReady=false; // a vanished waiter cannot stall every subsequent CPU frame
     bool ok=pending.done && !pending.status;
     gpuTraceEvent(GpuTraceDisplayLatch,0,pending.id,pending.status,0,ok?slot->generation:0,0);
+    if(ok && &diting_display_copy_ready)diting_display_copy_ready(pending.id);
+    if(ok && &diting_display_observe_copy)diting_display_observe_copy(pending.id);
+    if(ok)capturePixels(*slot,stride,pending.id);
     if(ok && completed++<3)note("GPU frame completed",pending.id,0);
     // v2 cache owns the preparation and mapping until eviction/disconnect;
     // only a confirmed copy (or never submitted frame) reaches this point.

@@ -9,6 +9,7 @@ import diting_paths
 from diting_memory import DEFAULT_MEMORY_MAP
 from emit_prelink import emit,COALESCED
 from native_prelink import arm64_image,macho,plan
+from diting_rootful_policy import apply as apply_rootful_policy
 
 def main():
  p=argparse.ArgumentParser(description=__doc__)
@@ -16,15 +17,18 @@ def main():
  p.add_argument('--original',type=Path,default=ROOT/'apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed')
  p.add_argument('--volume-layout',type=Path,default=diting_paths.volume_layout())
  p.add_argument('--output-dir',type=Path,required=True)
+ p.add_argument('--loader',type=Path,default=ROOT/'mac-build/darwinboot24/DarwinBoot24.efi')
  p.add_argument('--cpus',type=int,choices=range(1,9),default=8,
                 help='actual Diting CPU nodes; use --cpus 1 for isolated bring-up')
  p.add_argument('--window-size',type=lambda s:int(s,0),default=0x100000000)
  p.add_argument('--memory-map',type=Path,default=DEFAULT_MEMORY_MAP)
- p.add_argument('--loader',type=Path,default=ROOT/'mac-build/darwinboot24/DarwinBoot24.efi')
  p.add_argument('--template',type=Path,default=None)
  p.add_argument('--hardware-dtb',type=Path,default=None,
                 help='packaging tree override; preserves the recorded kernel build input')
  p.add_argument('--kernel-arg',action='append',default=[])
+ p.add_argument('--omit-kernel-arg',action='append',default=[],
+                choices=['diting_init_trace','diting_boot_snapshot','diting_poster_snapshot','fbtrace'],
+                help='omit a selected optional display/startup diagnostic to fit the loader ABI')
  a=p.parse_args()
  if (a.output_dir/'diting-xnu-initial.img').exists():raise SystemExit('Existing boot image retained; choose another --output-dir before prelinking')
  a.output_dir.mkdir(parents=True,exist_ok=True)
@@ -48,23 +52,36 @@ def main():
  closure=plan(native,original,roots,slide,verify_images=False)
  library&=set(closure['components'])
  candidate,selection=emit(native,original,roots,slide,verify_images=False,library_only_components=library)
+ # A single board-owned root-upgrade call is adapted after ordinary prelink.
+ # The native helper retains the stock policy unless explicitly requested.
+ candidate,selection['diting_rootful_policy']=apply_rootful_policy(candidate,native,original,slide,selection['components'])
  kernel=a.output_dir/'kernel-ipados18.macho';kernel.write_bytes(candidate)
  (a.output_dir/'prelink.json').write_text(json.dumps(selection,indent=2)+'\n')
  report['base_kernel']=report['kernel'];report['kernel']={'path':str(kernel),'bytes':len(candidate)};report['prelink']={'components':selection['components'],'library_only_components':selection['library_only_components']};report['image_verification']='skipped by request'
  result=a.output_dir/'DITING_BUILD_RESULT.json';result.write_text(json.dumps(report,indent=2)+'\n')
  layout=json.loads(a.volume_layout.read_text())
- opts=['diting_allow_unauthenticated_root=1','cs_enforcement_disable=1','cs_library_val_enable=0','amfi_get_out_of_my_way=1','-apfs_shared_datavolume','debug=0x14e','serial=0','diting_disable_swap=1','diting_skip_setup=1','diting_adsp=2','diting_audio=2','diting_ufs_readwrite=1','ignition_level=1','dyld_flags=0x8','launchd_rd=md0','diting_init_trace=1','applog=1','applog_name=launchd,backboardd,SpringBoard,containermanagerd,lsd,runningboardd,logd_helper,powerd','diting_software_keybag=1','diting_display=1','diting_software_ui=1','diting_ui_software=1','diting_touch=1','diting_buttons=1','diting_init_path=/diting/init','diting_build=ipados18-22H374','epoch='+str(int(time.time()))]
+ opts=['diting_allow_unauthenticated_root=1','cs_enforcement_disable=1','cs_library_val_enable=0','amfi_get_out_of_my_way=1','-apfs_shared_datavolume','debug=0x14e','serial=0','diting_disable_swap=1','diting_skip_setup=1','diting_ufs_readwrite=1','ignition_level=1','dyld_flags=0x8','launchd_rd=md0','diting_init_trace=1','applog=1','applog_name=launchd,backboardd,SpringBoard,containermanagerd,lsd,runningboardd,logd_helper,powerd','diting_software_keybag=1','diting_display=1','diting_software_ui=1','diting_ui_software=1','diting_touch=1','diting_buttons=1','diting_init_path=/diting/init','diting_build=ipados18-22H374','epoch='+str(int(time.time()))]
+ # Keep real, non-boost SM8475 EPSS requests at each domain's allowed maximum.
+ # Firmware/LMh still owns actual voltage and thermal frequency limits.
+ opts+=['diting_cpu_policy=2']
  # The existing CPU scanout scaler divides independent rows among workers.
  # Leave CPU time for the software compositor and stock service startup.
  if gpu:
   opts=[x for x in opts if x not in ('diting_ui_software=1','diting_software_ui=1')]
   opts+=['diting_ui_software=0','diting_software_ui=0','diting_adreno_start=1','diting_metal=1',
-         'diting_gpu_scanout=1','diting_gpu_pool_mib=256','diting_metal_global=1']
+         'diting_gpu_scanout=1','diting_gpu_pool_mib=0','diting_metal_global=1',
+         'diting_gpu_pwrlevel=0']
  # PCM stays optional and publishes only after the real APM/amp/DMA route
  # is ready. Do not silently disable it in an otherwise audio-enabled build.
- # Keep the live board's Wi-Fi worker and wallpaper snapshot policy in
- # every package; rebuilding must not silently drop these opt-in paths.
- opts+=['diting_ram_banks=1','launchd_unsecure_cache=1','diting_wifi=1','diting_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
+ # Select peripheral workers from the compiled configuration. Keep the
+ # wallpaper policy independent of optional network/audio support.
+ if report['settings'].get('XNU_DITING_POWER')=='1':opts+=['diting_adsp=2','diting_audio=2']
+ if report['settings'].get('XNU_DITING_GPU_RUNTIME_INSTALL')=='1':
+  # Mode 2 preserves real kernel submit/retire/display evidence while the
+  # existing frontend leaves SHENG_DIAG and per-resource tracing disabled.
+  opts+=['diting_gpu_runtime_install=1','diting_gpu_trace=2']
+ if report['settings'].get('XNU_DITING_WIFI')=='1':opts+=['diting_wifi=1']
+ opts+=['diting_ram_banks=1','launchd_unsecure_cache=1','diting_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
  if report['settings'].get('XNU_DITING_BACKLIGHT')=='1':opts+=['diting_backlight=1']
  if report['settings'].get('XNU_DITING_POWER')=='1':opts+=['diting_usb=1','diting_usb_mux=1','diting_usb_iphone=1']
  # PE_parse_boot_argn can select the first duplicate. Apply command-line
@@ -74,6 +91,7 @@ def main():
    key=item.split('=',1)[0]
    opts=[old for old in opts if old.split('=',1)[0]!=key]
    opts.append(item)
+ opts=[item for item in opts if item.split('=',1)[0] not in a.omit_kernel_arg]
  cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(a.loader),'--memory-map',str(a.memory_map),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification']
  if a.template is not None:cmd+=['--template',str(a.template)]
  auth=ROOT/'out/ipados18/system-volume-auth-blob.bin'

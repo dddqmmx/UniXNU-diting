@@ -1,0 +1,93 @@
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -212,6 +212,21 @@
+  * side, [2] with MUTABLEEN, [3] of a linear image in memory. [1] is the counter that must stay zero for linear images.
+  */
+ static uint64_t tu_gmem_side_counts[4][4];
++
++/* Event blits convert between the GMEM colour format and the system image
++ * format. Keep their memory-side telemetry separate from raw draw transfers:
++ * a non-identity swap is required for a linear BGRA system buffer. Rows are
++ * load/store; columns are total, non-identity swap, MUTABLEEN, linear image.
++ */
++static uint64_t tu_gmem_event_counts[2][4];
++
++extern "C" __attribute__((visibility("default"))) void tu_gmem_event_stats(uint64_t out[8]);
++extern "C" __attribute__((visibility("default"))) void
++tu_gmem_event_stats(uint64_t out[8])
++{
++   for (unsigned i = 0; i < 8; i++)
++      out[i] = p_atomic_read(&tu_gmem_event_counts[i / 4][i % 4]);
++}
+ 
+ void
+ tu_note_gmem_side(struct tu_cmd_buffer *cmd, const struct tu_image_view *iview, unsigned site, bool linear, bool mutableen, unsigned swap)
+@@ -571,11 +586,9 @@
+                    TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = pitch));
+ }
+ 
+-/* GMEM holds a colour in the byte order its render target writes it in: a linear image's MRT swap (WXYZ for BGRA) is already applied
+- * there, as system memory rendering writes it. A load or a store therefore moves the bytes as they are, with the identity swap on the
+- * memory side too; the image's own swap on top exchanged red and blue against what system memory rendering writes (a frame mixing
+- * both modes: the wallpaper of the lock screen 51 % exchanged in i-batch, centre redrawn in system memory correct). A mutable tiled
+- * image (MUTABLEEN) keeps its swap.
++/* Draw transfers copy raw texels; the regular rendering paths handle the
++ * attachment's component order. This fixup does not apply to event blits,
++ * whose system buffer descriptor must retain the image's format swap.
+  */
+ static inline uint32_t
+ tu_gmem_transfer_swap_fixup(uint32_t info, uint32_t swap_mask, uint32_t identity, bool mutable_view)
+@@ -2407,7 +2420,8 @@
+                const struct tu_render_pass_attachment *att,
+                const event_blit_dst_view *blt_view,
+                bool separate_stencil,
+-               bool gmem_transfer = false)
++               bool gmem_transfer = false,
++               enum a6xx_blit_event_type gmem_event = BLIT_EVENT_CLEAR)
+ {
+    tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO, 4);
+    if (blt_view->image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+@@ -2425,16 +2439,28 @@
+          tu_cs_emit(cs, A6XX_RB_RESOLVE_SYSTEM_BUFFER_PITCH(blt_view->stencil_pitch).value);
+       }
+    } else {
+-      tu_cs_emit(cs, gmem_transfer ?
+-                        tu_gmem_transfer_swap_fixup(blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO,
+-                                                    A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_COLOR_SWAP__MASK,
+-                                                    A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_COLOR_SWAP(WZYX),
+-                                                    blt_view->view->is_mutable) :
+-                        blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO);
++      /* Unlike a raw draw transfer, an event load/store converts the colour
++       * representation. In particular, linear BGRA needs WXYZ on the system
++       * side even though its GMEM input attachment uses WZYX.
++       */
++      const uint32_t info = blt_view->view->RB_RESOLVE_SYSTEM_BUFFER_INFO;
++      tu_cs_emit(cs, info);
+       tu_cs_image_ref_2d<CHIP>(cs, blt_view->view, blt_view->layer, false);
+ 
+       tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_SYSTEM_FLAG_BUFFER_BASE, 3);
+       tu_cs_image_flag_ref(cs, blt_view->view, blt_view->layer);
++
++      if (gmem_transfer) {
++         assert(gmem_event != BLIT_EVENT_CLEAR);
++         const unsigned site = gmem_event == BLIT_EVENT_LOAD ? 0 : 1;
++         p_atomic_inc(&tu_gmem_event_counts[site][0]);
++         if (pkt_field_get(A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_COLOR_SWAP, info) != WZYX)
++            p_atomic_inc(&tu_gmem_event_counts[site][1]);
++         if (blt_view->view->is_mutable)
++            p_atomic_inc(&tu_gmem_event_counts[site][2]);
++         if (pkt_field_get(A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO_TILE_MODE, info) == TILE6_LINEAR)
++            p_atomic_inc(&tu_gmem_event_counts[site][3]);
++      }
+    }
+ 
+    if (att) {
+@@ -5652,7 +5678,7 @@
+          tu6_emit_blit_scissor(cmd, cs, i, align_scissor);
+       }
+       event_blit_dst_view blt_view = blt_view_from_tu_view(iview, i);
+-      event_blit_run<CHIP>(cmd, cs, attachment, &blt_view, separate_stencil, true);
++      event_blit_run<CHIP>(cmd, cs, attachment, &blt_view, separate_stencil, true, blit_event_type);
+    }
+ 
+    tu_flush_for_access(&cmd->state.cache, TU_ACCESS_BLIT_WRITE_GMEM,

@@ -1,6 +1,22 @@
 # UniXNU-diting 交接：services192 USB 已打通，GPU 120 fps 未达标
 
-更新日期：2026-11-14（Asia/Shanghai）。本文件是当前交接入口；
+2026-11-16 最新交接：[services208 GPU显示与性能未达标](交接-2026-11-16-services208-GPU显示与性能未达标.md)。手机最后确认临时运行services208，持久boot_b保持services198；刷新通知p95改善到8.348ms，纯色蓝色对照稳定且已恢复，但正常颜色、闪烁和120fps仍未解决。services209仅完成源码/缓存与主机检查，尚未构建上机。用户要求停止试验，当前仅整理文档。以下services198和services192段落均保留其历史时点，不是当前部署。
+
+最新接续日期：2026-11-15（Asia/Shanghai）。当前入口为
+[services197/198 USB GPU自动化与评估](services197-gpu-automation.md)。
+
+**当前持久boot_b与匹配运行内核为services198，已完成完整构建、部署和一次97项USB自动矩阵。**
+GPU安装stage6/error0，UI第六版保持stage6/error0。固定颜色60项、GPU负载18组通过；桌面、设置与
+多任务动画评估均FAIL，校准panel VSYNC时间戳节奏60.489Hz，120fps/8.333ms目标未通过。
+27,085条trace的missing/skipped/kernel drops/recovery均0；物理新合成帧尚未认证。
+
+接续入口为 `python3 scripts/run-diting-gpu-tests.py --profile all --policies auto sysmem gmem --output-dir <新目录>`。
+报告保存在 `diting-work/logs/diting/services198/automatic-01`。用户现要求通过USB自动执行和评估，
+不再依赖手动滑动或开关应用；相同实现先分析已有原始记录，整批可预见修复与主机检查完成后才测试下一候选。
+06:13Z只读复核匹配services198，GPU/UI安装6/0、daemon16/error0、末job3/state3/quiescing0，无活动worker。
+保持八核、Data/SystemOS、UI第六版与独立电池/ADSP修改，继续跳过镜像哈希、审计及设备镜像回读。
+
+以下为 **2026-11-14 services192历史交接**，其设备、构建、缓存与下一步描述仅代表当时，不用于当前部署。
 [services186 原交接](交接-2026-11-14-services186-启动与触控正常.md) 保留启动、触控及更早故障的历史证据。
 
 **当前持久 boot_b 与最近临时启动均为 services192。系统内 USB 日志、命令及有界 RAM 诊断链路已打通；

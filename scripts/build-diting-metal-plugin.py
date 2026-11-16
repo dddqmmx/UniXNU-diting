@@ -18,6 +18,7 @@ p.add_argument('--guest-build',choices=('20G81','22H374'),default='20G81')
 p.add_argument('--turnip-library',type=Path,required=True)
 p.add_argument('--output-dir',type=Path,required=True)
 p.add_argument('--clients',help='comma-separated process names, or * for system-wide native discovery')
+p.add_argument('--prime-list',type=Path,help='Actual guest metallib paths, embedded for the idle shader-cache worker')
 p.add_argument('--developer-dir',type=Path,default=diting_paths.developer_dir())
 a=p.parse_args()
 # The upstream catalog separates hardware support from the selected OS ABI.
@@ -36,7 +37,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=e
 minimum='18.0' if a.guest_build=='22H374' else '16.6.1'
 command=['xcrun','clang++','-target','arm64-apple-ios'+minimum,'-isysroot',sdk,
     *(['-DDITING_GUEST_22H374=1'] if a.guest_build=='22H374' else []),
-    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror',
+    '-std=c++17','-fobjc-arc','-fblocks',('-O3' if a.guest_build=='22H374' else '-Os'),'-Wall','-Wextra','-Werror',
     '-Wno-deprecated-declarations','-I'+str(ROOT/'drivers/DitingMetal'),
     '-I'+str(ROOT/'drivers/DitingAdreno/submit'),
     '-dynamiclib',str(ROOT/'drivers/DitingMetal/DitingMetalPlugin.mm'),
@@ -44,11 +45,15 @@ command=['xcrun','clang++','-target','arm64-apple-ios'+minimum,'-isysroot',sdk,
     '-framework','Foundation','-framework','CoreFoundation','-framework','Metal',
     '-Wl,-rpath,@loader_path','-Wl,-install_name,@rpath/DitingAdrenoMetal.bundle/DitingAdrenoMetal',
     '-o',str(bundle/'DitingAdrenoMetal')]
+if a.prime_list:
+    if not a.prime_list.is_file():raise SystemExit('metallib path list missing')
+    command+=['-Wl,-sectcreate,__DATA,__primelist,'+str(a.prime_list.resolve())]
 subprocess.run(command,env=env,check=True)
 shutil.copyfile(a.bridge_directory/'DitingMetalBridge.dylib',bundle/'DitingMetalBridge.dylib')
 shutil.copyfile(a.turnip_library,bundle/'libvulkan_freedreno.dylib')
+if a.prime_list:shutil.copyfile(a.prime_list,bundle/'DitingAdrenoMetal.primelist')
 for binary in ['DitingAdrenoMetal','DitingMetalBridge.dylib','libvulkan_freedreno.dylib']:
-    subprocess.run(['codesign','--force','--sign','-','--pagesize','4096',str(bundle/binary)],check=True)
+    subprocess.run([os.environ.get('DITING_CODESIGN','codesign'),'--force','--sign','-','--pagesize','4096',str(bundle/binary)],check=True)
 with (bundle/'Info.plist').open('wb') as f:
     plistlib.dump(dict(CFBundleIdentifier='dev.unixnu.diting.Metal',CFBundleName='DitingAdrenoMetal',
         CFBundleExecutable='DitingAdrenoMetal',CFBundlePackageType='BNDL',CFBundleVersion='1',

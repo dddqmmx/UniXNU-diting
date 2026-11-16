@@ -20,6 +20,9 @@ import importlib.util
 from diting_adt_contract import audit_adt
 from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
 from diting_touch_contract import adt_touch_properties, validate_touch_nodes
+from diting_native_inputs import options
+from diting_platform_identity import platform_identity
+from diting_panel_contract import adt_panel_properties
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,6 +148,13 @@ def main():
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
     args = parser.parse_args()
+    # Keep per-device identity out of public hardware profiles and the nearly
+    # full DarwinBoot command line. This is a software UUID, not Apple ECID.
+    identity = options().get('platform_uuid')
+    try:
+        software_uuid = platform_identity(identity) if identity is not None else None
+    except ValueError as error:
+        parser.error(str(error))
     if (args.userdata_first_lba is None) != (args.userdata_last_lba is None):
         parser.error('userdata first and last LBA must be provided together')
     if args.userdata_first_lba is not None and not (0 < args.userdata_first_lba <= args.userdata_last_lba < 2**64):
@@ -185,8 +195,11 @@ def main():
     # or a claim of Apple personalization. Keep only its SHA-384 digest in DT.
     # Rebooting the same image reuses it; rebuilding rolls it.
     boot_nonce_hash = hashlib.sha384(os.urandom(32)).digest()
-    backlight = json.loads((ROOT / 'configs/diting-display-sm8475.json').read_text())['brightness']
+    display = json.loads((ROOT / 'configs/diting-display-sm8475.json').read_text())
+    backlight, timing = display['brightness'], display['timing']
     chosen = [
+        *adt_panel_properties(),
+        *([('diting-platform-uuid', software_uuid)] if software_uuid is not None else []),
         ('random-seed', os.urandom(64)),
         ('osenvironment', b'main\0'),
         # MobileGestalt/FrontBoard use this software coordinate scale. Missing
@@ -198,6 +211,10 @@ def main():
             int(backlight['controller'], 0), backlight['register_bytes'],
             backlight['maximum'], backlight['minimum_nonzero'],
             int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
+        ('diting-dpu-timing', struct.pack('<3Q4I',
+            int(timing['mdp'], 0), int(timing['dispcc'], 0), int(timing['dsi0'], 0),
+            timing['mdp_register_bytes'], timing['dispcc_register_bytes'],
+            timing['dsi0_register_bytes'], timing['version'])),
         ('diting-audio-dma', bytes(16)),
         ('darwinboot-memory-ranges', bytes(32 + 64 * 16)),
         ('diting-dram-ranges', b''.join(struct.pack('<QQ', base, size) for base, size in dram)),

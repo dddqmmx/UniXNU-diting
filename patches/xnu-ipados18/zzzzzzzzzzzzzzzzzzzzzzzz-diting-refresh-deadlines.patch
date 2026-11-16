@@ -1,0 +1,136 @@
+--- /dev/null
++++ b/iokit/Kernel/MiniDisplayRefreshClock.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#pragma once
++#include <stdint.h>
++
++/* A software refresh clock. These timestamps do not describe panel presents. */
++namespace DitingRefreshClock {
++struct Tick {
++    uint64_t reported = 0, next = 0, skipped = 0;
++    bool ready = false;
++};
++static inline uint64_t addPeriod(uint64_t time, uint64_t period)
++{
++    return UINT64_MAX - time < period ? UINT64_MAX : time + period;
++}
++static inline Tick select(uint64_t due, uint64_t now, uint64_t period)
++{
++    Tick tick;
++    if (!due || !period) return tick;
++    if (now < due) { tick.next = due; return tick; }
++    tick.skipped = (now - due) / period;
++    tick.reported = due + tick.skipped * period;
++    tick.next = addPeriod(tick.reported, period);
++    tick.ready = true;
++    return tick;
++}
++static inline uint64_t nextAfter(uint64_t last, uint64_t now, uint64_t period)
++{
++    if (!last) return addPeriod(now, period);
++    if (last > now) return last;
++    return select(last, now, period).next;
++}
++}
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -42,6 +42,7 @@
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ 
+ #include "MiniIOSurface.h"
++#include "MiniDisplayRefreshClock.h"
+ 
+ #if XNU_DITING_ADRENO_PLATFORM
+ extern "C" void diting_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
+@@ -1260,7 +1261,9 @@
+ 		return false;
+ 	}
+ 	fLock = IOLockAlloc();
+-	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
++	/* Keep the existing HIGH priority; ONCE makes self-rearming serial. */
++	fVSyncCall = thread_call_allocate_with_options(&IOMobileFramebufferUserClient::vsyncFired,
++	    this, THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
+ 	return fLock != NULL && fVSyncCall != NULL;
+ }
+ 
+@@ -1351,13 +1354,12 @@
+ {
+ 	uint64_t period, now = mach_absolute_time();
+ 
+-	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
++	/* Preserve the clock phase and skip deadlines already missed. The default
++	 * thread-call urgency permits timer coalescing even with a zero leeway. */
+ 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
+-	fVSyncTime += period;
+-	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
+-		fVSyncTime = now + period;
+-	}
+-	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
++	fVSyncTime = DitingRefreshClock::nextAfter(fVSyncTime, now, period);
++	thread_call_enter_delayed_with_leeway(fVSyncCall, NULL, fVSyncTime, 0,
++	    THREAD_CALL_DELAY_SYS_CRITICAL);
+ }
+ 
+ /*
+@@ -1369,15 +1371,28 @@
+ {
+ 	OSAsyncReference64 ref = { 0 };
+ 	io_user_reference_t args[6];
+-	uint64_t now, count = 0;
++	uint64_t now = 0, count = 0, deadline = 0, fired = 0, period = 0, skipped = 0, armed = 0;
+ 	mach_port_t port = IPC_PORT_NULL;
+ 	bool send = false;
+ 
+ 	IOLockLock(fLock);
+-	now = fVSyncTime;
+ 	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
+ 		fVSyncRunning = false;
+ 	} else {
++		deadline = fVSyncTime;
++		fired = mach_absolute_time();
++		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
++		const auto tick = DitingRefreshClock::select(deadline, fired, period);
++		if (!tick.ready) {
++			/* A rescheduled invocation must not report a future refresh. */
++			thread_call_enter_delayed_with_leeway(fVSyncCall, NULL, deadline, 0,
++			    THREAD_CALL_DELAY_SYS_CRITICAL);
++			IOLockUnlock(fLock);
++			return;
++		}
++		now = tick.reported;
++		skipped = tick.skipped;
++		fVSyncTime = now;
+ 		port = ipc_port_copy_send_mqueue(fPorts[kFBNotifyVSync]);
+ 		if (!IPC_PORT_VALID(port)) {
+ 			fVSyncRunning = false;
+@@ -1387,8 +1402,7 @@
+ 		count = ++fVSyncCount;
+ 		/* Registration can replace/release fPorts after this lock drops.
+ 		 * Keep our own send right until notification delivery finishes. */
+-		uint64_t period = 0, absNow = mach_absolute_time(), contNow = mach_continuous_time();
+-		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
++		uint64_t absNow = mach_absolute_time(), contNow = mach_continuous_time();
+ 		uint64_t cont = now <= absNow ? contNow - (absNow - now) : contNow + (now - absNow);
+ 		setAsyncReference64(ref, (mach_port_t) port, fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
+ 		args[0] = (uint32_t) now;
+@@ -1399,6 +1413,7 @@
+ 		args[5] = period >> 32;
+ 		send = true;
+ 		armVSync();
++		armed = fVSyncTime;
+ 	}
+ 	IOLockUnlock(fLock);
+ 	if (send) {
+@@ -1408,7 +1423,10 @@
+ 			IOLog("MiniIOMobileFramebuffer: refresh notification %llu result=%x\n", count, result);
+ 		}
+ #if XNU_DITING_ADRENO_PLATFORM
+-		ditingDisplayTrace(25, count, result, now, refreshHz());
++		/* Legacy fields 0..3 stay intact. The added fields distinguish the
++		 * deadline, callback execution, skipped periods and next deadline. */
++		const uint64_t values[] = {count, static_cast<uint32_t>(result), now, refreshHz(), deadline, fired, period, skipped, armed};
++		native_gpu_trace_record(25, 0, values, 9);
+ #endif
+ 	}
+ }

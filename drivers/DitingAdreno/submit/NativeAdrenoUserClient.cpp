@@ -2,6 +2,7 @@
 #define NATIVE_GPU_TRACE_OPTIONAL
 #include "NativeGpuTrace.h"
 #include "NativeAdrenoUserClient.h"
+#include "NativeAdrenoFencePoll.h"
 extern "C" volatile uint32_t native_adreno_trace_stage;
 /* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
 extern "C" {volatile uint32_t native_adreno_wc_enabled=1;}
@@ -350,7 +351,7 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     return submitRecords(request,NativeAdrenoAbiMaxBuffers,reply,clock);
 }
 IOReturn NativeAdrenoUserClient::submitRecords(const void *input,uint32_t capacity,
-    NativeAdrenoAbiSubmitReply *reply,const NativeAdrenoRingClock *clock)
+    NativeAdrenoAbiSubmitReply *reply,const NativeAdrenoRingClock *clock,bool poll_dependency)
 {
     if(!input || !reply)return kIOReturnBadArgument;reply->fence=0;
     struct Header {uint32_t buffer_count,reserved;uint64_t queue,wait_fence,wait_timeout_ns;} header{};
@@ -359,14 +360,12 @@ IOReturn NativeAdrenoUserClient::submitRecords(const void *input,uint32_t capaci
     const auto *request=&header;
     if(!open_)return kIOReturnNotReady;
     if(capacity>NativeAdrenoAbiMaxBatchBuffers || !request->buffer_count || request->buffer_count>capacity ||
-        request->reserved)return kIOReturnBadArgument;
+        request->reserved || request->wait_fence>UINT32_MAX)return kIOReturnBadArgument;
     if(request->queue>=NativeAdrenoAbiMaxQueues || !queues_[request->queue].active)
         return kIOReturnBadArgument;
     if(request->wait_fence) {
         if(!clock)return kIOReturnBadArgument;
-        const uint32_t wait_us=request->wait_timeout_ns==0?0:
-            (request->wait_timeout_ns>UINT64_C(0xffffffff)*1000u?0xffffffffu:
-            (uint32_t)(request->wait_timeout_ns/1000));
+        const uint32_t wait_us=poll_dependency?0:native_adreno_wait_us(request->wait_timeout_ns);
         const IOReturn waited=submit_->observeFence((uint32_t)request->wait_fence,clock,wait_us);
         if(waited)return waited;
     }
@@ -387,6 +386,21 @@ IOReturn NativeAdrenoUserClient::submitRecords(const void *input,uint32_t capaci
     if(status)return status;
     reply->fence=fence;
     return kIOReturnSuccess;
+}
+IOReturn NativeAdrenoUserClient::pollSubmitDependency(uint32_t method,const void *input,
+    size_t bytes,const NativeAdrenoRingClock *clock)
+{
+    if(method!=NativeAdrenoMethodSubmit && method!=NativeAdrenoMethodSubmitBatch)return kIOReturnBadArgument;
+    if(!input || bytes!=inputSize(method) || !clock)return kIOReturnBadArgument;
+    struct Header {uint32_t count,reserved;uint64_t queue,fence,timeout;} q{};
+    memcpy(&q,input,sizeof(q));
+    if(!open_)return kIOReturnNotReady;
+    const unsigned capacity=method==NativeAdrenoMethodSubmit?NativeAdrenoAbiMaxBuffers:NativeAdrenoAbiMaxBatchBuffers;
+    if(!q.count || q.count>capacity || q.reserved || q.queue>=NativeAdrenoAbiMaxQueues ||
+        !queues_[q.queue].active || !q.fence || q.fence>UINT32_MAX)return kIOReturnBadArgument;
+    // No BO references or submission state are acquired until the dependency
+    // is really complete; dispatch rechecks it under the gate before submit.
+    return submit_->observeFence(uint32_t(q.fence),clock,0);
 }
 int32_t NativeAdrenoUserClient::submitPriority() const {
     const int role=proc_get_effective_task_policy(current_task(),IMP_TASK_POLICY_ROLE);
@@ -573,7 +587,7 @@ size_t NativeAdrenoUserClient::outputSize(uint32_t method)
     }
 }
 IOReturn NativeAdrenoUserClient::dispatch(uint32_t method,const void *input,
-    size_t input_size,void *output,size_t output_size,const NativeAdrenoRingClock *clock)
+    size_t input_size,void *output,size_t output_size,const NativeAdrenoRingClock *clock,bool poll_submit_dependency)
 {
     struct Tally {
         uint32_t method;uint64_t began;IOReturn *result;const NativeAdrenoRingClock *clock;
@@ -655,7 +669,7 @@ IOReturn NativeAdrenoUserClient::dispatch(uint32_t method,const void *input,
     case NativeAdrenoMethodSubmitBatch: {
         NativeAdrenoAbiSubmitReply reply{};
         status=submitRecords(input,method==NativeAdrenoMethodSubmitBatch?
-            NativeAdrenoAbiMaxBatchBuffers:NativeAdrenoAbiMaxBuffers,&reply,clock);
+            NativeAdrenoAbiMaxBatchBuffers:NativeAdrenoAbiMaxBuffers,&reply,clock,poll_submit_dependency);
         if(!status)memcpy(output,&reply,sizeof(reply));
         break;
     }

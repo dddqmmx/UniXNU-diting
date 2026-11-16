@@ -4,6 +4,7 @@
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include "DitingPlatformResources.h"
+#include "DitingMemoryBandwidth.h"
 extern kmod_info_t g_kernel_kmod_info;
 #include "../DitingBootCapture/DitingBootCapture.h"
 #include "../DitingUsb/DitingUsbDevice.h"
@@ -29,6 +30,7 @@ void DitingBatteryStaticInit(void);
 volatile int32_t native_battery_stats[16];
 void diting_power_start_optional(void) {
  diting_rpmh_init();
+ diting_memory_bandwidth_start();
  // Register the transport classes independently of ADSP readiness. Actual
  // USB/audio services still publish only after their own hardware succeeds.
  if(diting_audio_service_classes_ready())DitingUsb::start();

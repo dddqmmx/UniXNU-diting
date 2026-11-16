@@ -167,10 +167,14 @@ def main():
                             entry['status'] = 'MISSING'
                             continue
                         inode = volume.inode(hit[0])
-                        if inode is None or not inode.is_reg:
-                            raise RuntimeError('Requested path is not a regular file')
-                        entry.update(bytes=inode.size, mode=oct(inode.mode), uid=inode.owner, gid=inode.group)
+                        if inode is None:
+                            raise RuntimeError('Requested inode is unavailable')
+                        entry.update(bytes=inode.size, mode=oct(inode.mode), uid=inode.owner, gid=inode.group,
+                                     inode=inode.obj_id, parent=inode.parent_id,
+                                     type='directory' if inode.is_dir else 'regular' if inode.is_reg else 'other')
                         if path in files:
+                            if not inode.is_reg:
+                                raise RuntimeError('Requested contents are not a regular file')
                             if not 0 <= inode.size <= files[path]:
                                 raise RuntimeError('Requested log or marker exceeds its size bound')
                             body = inode.contents()

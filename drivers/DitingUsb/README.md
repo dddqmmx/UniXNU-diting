@@ -1,6 +1,23 @@
 # DitingUsb
 
+> 当前213的匹配CDC与自动UI诊断已运行，最后只读检查确认worker终态且quiescing0。GPU优化已按用户要求暂停，不自动启动后续测试；[最新交接](../../migration/ipados18/交接-2026-11-17-services213-GPU优化暂停.md)记录设备及验收边界。下方编号段落为历史时点。
+
+services209 支持 `display fetch-swap MS`，MS为1000–60000。在正常图像上临时交换红蓝读取顺序，
+不启用固定色源，不改变 GPU 渲染或 framebuffer 内容。通过 `display solid status/cancel`
+读取实际 FETCH_SWAP 阶段或提前恢复；原配置恢复使用已在 services208 实测的同一控制器。
+
+services208 增加 `display solid status`、`display solid cancel` 和
+`display solid blue|green|red MS`。MS 只能为 1000–60000；开始命令仅排队，默认不开启对照。
+固定 DPU 常量色源绕过 GPU/DDR，独立回调到期恢复原 FORMAT/UNPACK/CONSTANT_COLOR 并检查 flush 退休。
+status 提供实际状态与 restored/error，不能将寄存器通过当作肉眼颜色或物理 fps 通过。
+USB PHY、DMA/TRB、重启与运行时安装链路保持原实现。
+
+services204 的 `gpu bandwidth` 调用有界 BWMON 采样并返回原配置恢复状态、原始计数和量化窗口峰值。
+请求不改变 USB 传输、GPU 完成、时钟或总线投票；未满足计数器所有权条件时返回 SKIP。
+
 SM8475 的 DWC3 / eUSB2 设备模式栈：CDC 日志与命令、Mux 桥接到原生 lockdownd，以及可选的 iPhone 兼容描述符。
+
+services203 候选补充 `display panel` 时序事务记录和 `display pixels` 当前保留控制台网格采样。采样后使用 `display pixels OFFSET COUNT` 读取同一份网格，OFFSET 为 0–4095，COUNT 为 1–64 且不能越界。诊断不扩展任意 RAM/MMIO 访问；USB PHY、DMA/TRB 和设备重启传输保持原实现。候选尚未上机。
 
 ## 适配硬件
 

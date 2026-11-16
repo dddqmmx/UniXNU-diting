@@ -14,7 +14,7 @@ static void gpuTraceInit()
     unsigned enabled=0,pixels=0;
     PE_parse_boot_argn("diting_gpu_trace",&enabled,sizeof(enabled));
     PE_parse_boot_argn("diting_gpu_pixels",&pixels,sizeof(pixels));
-    if(enabled!=NativeGpuTraceDetailed && enabled!=NativeGpuTraceKernelOnly)return;
+    if(enabled!=NativeGpuTraceDetailed && enabled!=NativeGpuTraceKernelOnly && enabled!=NativeGpuTraceTiming)return;
     gpuTrace.slots=static_cast<NativeGpuTraceSlot *>(IOMallocZero(sizeof(NativeGpuTraceSlot)*NativeGpuTraceCapacity));
     if(!gpuTrace.slots)return;
     gpuTrace.capacity=NativeGpuTraceCapacity;

@@ -73,6 +73,11 @@ typedef struct {
     unsigned phase,published,acknowledged,polls,resources_must_retain;
     uint32_t command,header,firmware_error;
     DitingAdrenoHfiStatus transport;
+    /* Software-owned evidence survives an early startup failure. A boundary
+     * poll still requires a real matching ACK and healthy owned hardware. */
+    uint64_t begin_us,end_us,max_poll_gap_us;
+    unsigned boundary_polls,interrupt_clears,health_reads;
+    uint32_t fw_status,hfi_status,platform_error;
 } DitingGpuPowerResult;
 /* Exact gen7-4-0 cold-start handshake after actual GMU/HFI readiness:
  * PERF -> BW -> CORE_FW_START -> selected blocking GX/BW vote. power_level

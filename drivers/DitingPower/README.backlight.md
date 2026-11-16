@@ -1,5 +1,10 @@
 # Diting 亮度控制
 
+services204 私有候选在每次一字节 DCS 读取前单独协商返回长度，避免继承亮度查询的两字节长度。
+`display panel` schema 2 保留每次 DA/DB/DC、地址模式、像素格式及刷新档位的原始回包。
+地址模式和像素格式查询失败只记录可选证据错误；身份和档位未确认时不发送新时序。
+本候选主机检查已通过，实机结果待验证。
+
 ## 板级输入与回读单位
 
 - Diting L12 AMOLED，1220 × 2712；设备树含 `l12_36_02_0b_dsc_cmd` 和 `l12_42_02_0a_dsc_cmd` 两种面板。
@@ -13,7 +18,7 @@
 
 ## 服务与事务
 
-[DitingBacklight.cpp](DitingBacklight.cpp) 在独立 IOWorkLoop 上使用命令 FIFO，每次最多两个 DWORD，不分配物理 DMA 缓冲。
+[DitingBacklight.cpp](DitingBacklight.cpp) 在独立 IOWorkLoop 上使用命令 FIFO。亮度事务最多两个 DWORD；L12 时序事务按数据包边界拆分，最多 16 个 DWORD（固定厂商实现的 64 字节 FIFO），不分配物理 DMA 缓冲。
 [DitingBacklightProtocol.h](DitingBacklightProtocol.h) 定义数据包、单位换算和完成所有权规则。
 
 首次真实回读通过后才发布亮度属性和 `backlight-control`，并使用实际 AppleARMPlatform 的 AppleARMBacklight metaclass 提供 conformance。类晚到时每 100 ms 查询，最多 30 秒；不可用时记录原因，保持正常系统启动。板级类名称仍是唯一的 DitingBacklight，不注册重复的 AppleARMBacklight 类，也不修改猜测的 vtable 槽位。
@@ -46,6 +51,12 @@
 第一版单位换算错误、第二版上限测试误判以及第四版UIScreen setter未触发系统请求的FAIL日志均保留；UIScreen自动测试失败不覆盖用户真实滑块的PASS。4095写入的原始回读可饱和为16383，其余等级仍要求精确4倍对应。设备原始证据保存在本机 `diting-work/logs/diting/services193/ui-brightness-20261115{-02,-03,-04,-06}/`，不上传私人日志。
 
 ## 固定参考
+
+services205 候选（2026-11-16，主机检查与完整内核构建通过，设备验证待完成）：`diting_panel_hz=120` 在实际 GPU 屏幕拷贝及 DPU 刷新交接完成后，唤醒同一工作循环。Xiaomi 型号由保存 live DT 的 chosen 选择和 `mi,panel-id` 确定，ADT 单独传递经过 DSI0/RGB/1220×2712 校验的 `diting-dsi-panel`。[DitingPanelMode.h](DitingPanelMode.h) 读取 DA/DB/DC 作硬件资格检查；本机 L12_36 的实际回复为 c5/10/00，型号名里的 36/02/0b 不作 DCS 回复。L12_42 时序计划保留，但缺少已验证 DCS ID 时不写入。
+
+每次单字节读取先独立退休最大回包长度设置。型号查询已退休但失败时，仍收集独立地址／像素模式证据。仅在型号资格、有效 GET(0b) 和像素模式77全部成立，且真实 BGR bit3 已置位时，保留其他地址模式位，使用 DCS SET(36) 清除 BGR，等待20ms后回读；失败执行一次原值恢复并回读。不能据条件命令接受声称物理颜色正确。DCS 命令编号来自固定 Linux `mipi_display.h`；bit3 采用标准 MADCTL BGR 约定并要求本面板实际回读资格，不设置猜测的方向值或像素格式。
+
+随后回读 2f 原始档位，使用匹配 DTS 字节流切换请求时序，保留 HS 模式和全部等待时间。目标 2f 回读通过后，按 19.2MHz/(2756×请求Hz) 更新 TE 计数。失败时执行有界原档位恢复；未退休命令继续保有同一 FIFO，亮度请求不能覆盖它。`display panel` 输出独立的型号、颜色和时序诊断；这些配置接受结果不能单独证明物理120fps。
 
 - [UniXNU 显示与亮度文档](https://unixnu.com/zh/porting/display)：OS 属性、工作循环、渐变及完成/失败处理。
 - LineageOS `android_kernel_xiaomi_sm8450-modules` revision `3b30ba7df6608c97c0ba2d55d679a6b5987c4c66` 的 Qualcomm `dsi_panel.c`、`dsi_ctrl_hw_cmn.c`、`dsi_ctrl_reg.h` 及 Xiaomi `mi_dsi_panel.c`：Diting 面板范围、字节交换和控制器协议。

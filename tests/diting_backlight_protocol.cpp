@@ -152,7 +152,7 @@ static void busy() {
     Hardware h; h.registers[Status / 4] = 1u << 3; // running video does not block commands
     Command command; command.initialize(h.io()); const uint32_t size[] = {ReturnSizePacket};
     assert(!command.begin(nullptr, 1, true, false, 0));
-    assert(!command.begin(size, 3, true, false, 0));
+    assert(!command.begin(size, Command::MaximumWords+1, true, false, 0));
     assert(h.writes.empty()); assert(command.begin(size, 1, true, false, 0));
 }
 static void retained() {

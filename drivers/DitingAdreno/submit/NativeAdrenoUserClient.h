@@ -70,7 +70,7 @@ class NativeAdrenoUserClient final {
     NativeAdrenoSubmitBuffer submit_buffers_[NativeAdrenoAbiMaxBatchBuffers]{};
     NativeAdrenoSystemPages *offered_pages_=nullptr;
     NativeAdrenoSystemPages *freed_pages_=nullptr;
-    IOReturn submitRecords(const void *,uint32_t,NativeAdrenoAbiSubmitReply *,const NativeAdrenoRingClock *);
+    IOReturn submitRecords(const void *,uint32_t,NativeAdrenoAbiSubmitReply *,const NativeAdrenoRingClock *,bool=false);
     Entry *find(uint64_t);
     Entry *free();
     void clear(Entry &);
@@ -125,11 +125,12 @@ public:
     IOReturn setMetadata(const NativeAdrenoAbiMetadata *);
     IOReturn getMetadata(const NativeAdrenoAbiMetadata *,NativeAdrenoAbiMetadata *);
     IOReturn waitFence(const NativeAdrenoAbiWaitFence *,const NativeAdrenoRingClock *);
+    IOReturn pollSubmitDependency(uint32_t,const void *,size_t,const NativeAdrenoRingClock *);
     /* One external-method entry: exact record sizes are required, unknown
      * methods are unsupported and no output byte is modified on failure. The
      * IOKit wrapper should only copy these buffers and call this function. */
     IOReturn dispatch(uint32_t method,const void *input,size_t input_size,
-        void *output,size_t output_size,const NativeAdrenoRingClock *);
+        void *output,size_t output_size,const NativeAdrenoRingClock *,bool poll_submit_dependency=false);
     static size_t inputSize(uint32_t method);
     static size_t outputSize(uint32_t method);
     size_t liveObjects() const;

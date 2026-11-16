@@ -1,10 +1,12 @@
 # Diting → iPadOS 18 迁移
 
-> 当前 Diting 状态（2026-11-14）：services186 已进入系统，用户确认点按、滑动及熄屏后亮屏触控恢复正常。
-> 当前 boot_b=services186，八核，未更新 userdata，services185 保留回退。双指手势尚未测试。见
-> [services186 修复与验收](services186-st61y-touch.md) 和
-> [任务交接](交接-2026-11-14-services186-启动与触控正常.md)。下方 Pong 路径、设备身份
-> 与运行记录属于继承的迁移历史，不作为本轮 Diting 的实机证据。
+> 当前 Diting 交接状态（2026-11-17）：用户认为性能“已经很不错”，要求暂停GPU优化并提交、推送。
+> 手机保留临时services213，八核、匹配运行库与GMU/CP启动PASS，持久boot_b仍198。
+> 212颜色矩阵142项PASS，用户确认正常界面“闪烁已消失”；213自动UI功能3/4 PASS，物理120fps仍UNQUALIFIED。
+> 无活动测试或后台构建/采集。GPU优化与Wi-Fi工作暂停，用户恢复前不运行后续候选。
+> 最新入口：[services213暂停交接](交接-2026-11-17-services213-GPU优化暂停.md)。
+> services186基本触控和亮屏恢复的用户PASS保留于 [services186修复与验收](services186-st61y-touch.md)。
+> 下方 Pong 路径、设备身份与运行记录属于继承的迁移历史，不作为当前 Diting 的实机证据。
 
 触控器已由本机 Recovery 确认为 ST61Y。[services186](services186-st61y-touch.md)
 修正协议、资源和共享投票，主机测试、内核链接和八核打包通过，基本触控及亮屏恢复已实机验收。

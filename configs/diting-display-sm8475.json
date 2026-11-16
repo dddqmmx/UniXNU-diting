@@ -9,6 +9,18 @@
     90,
     60
   ],
+  "timing": {
+    "version": 1,
+    "mdp": "0x0ae00000",
+    "mdp_register_bytes": 540672,
+    "dispcc": "0x0af00000",
+    "dispcc_register_bytes": 131072,
+    "dsi0": "0x0ae94000",
+    "dsi0_register_bytes": 1024,
+    "source_revision": "LineageOS sm8450-modules 3b30ba7df6608c97c0ba2d55d679a6b5987c4c66; NothingOSS sm8475 c402fcdb3a1523d10b15ef1123bced45456f7592; live Diting DT",
+    "access": "read-only; existing counters and timestamps; no panel mode changes",
+    "physical_present_validated": false
+  },
   "brightness": {
     "transport": "DSI DCS",
     "version": 1,

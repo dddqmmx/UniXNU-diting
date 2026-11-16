@@ -14,6 +14,7 @@ import subprocess
 import sys
 import uuid
 from diting_gpu_build_host import environment
+from diting_gpu_test_build import build as build_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'userland'))
@@ -27,8 +28,12 @@ def main():
     parser.add_argument('--codesign', type=Path, required=True)
     parser.add_argument('--sdk', type=Path)
     parser.add_argument('--linker', type=Path)
+    parser.add_argument('--vulkan-headers', type=Path, help='selected Mesa include directory for the native GPU test worker')
     args = parser.parse_args()
-    gpu_archive18.gpu_runtime18.load_runtime(args.runtime)
+    runtime_report = gpu_archive18.gpu_runtime18.load_runtime(args.runtime)
+    headers = args.vulkan_headers or runtime_report.get('vulkan_headers')
+    if not headers:
+        parser.error('provide --vulkan-headers from the matched A730 Mesa source')
     try:
         env = environment(args.sdk, args.linker, args.codesign)
     except ValueError as error:
@@ -41,16 +46,12 @@ def main():
     if (out / 'build-report.json').exists():
         parser.error('completed candidate retained; choose a new --output-dir')
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], env=env, text=True).strip()
-    command = ['xcrun', 'clang', '-target', 'arm64-apple-ios18.0', '-isysroot', sdk,
-               '-Os', '-Wall', '-Wextra', '-Werror', '-framework', 'CoreFoundation',
-               '-framework', 'IOKit', str(ROOT / 'userland/gpu-capture18.c'), '-o', str(capture)]
-    subprocess.run(command, env=env, check=True)
-    subprocess.run([str(args.codesign.resolve()), '--force', '--sign', '-',
-                    '--pagesize', '4096', str(capture)], env=env, check=True)
+    built, automation = build_tests(out / 'automation', sdk, headers, env, str(args.codesign.resolve()))
+    shutil.copy2(built, capture)
     job = out / 'dev.unixnu.diting.gpu-capture18.plist'
     job.write_bytes(plistlib.dumps(dict(
-        Label='dev.unixnu.diting.gpu-capture18', ProgramArguments=['/diting/gpu-capture18'],
-        RunAtLoad=True, UserName='root',
+        Label='dev.unixnu.diting.gpu-capture18', ProgramArguments=['/diting/gpu-capture18', '--daemon'],
+        RunAtLoad=True, KeepAlive=True, ThrottleInterval=30, UserName='root',
         StandardOutPath='/private/var/logs/diting/gpu-capture18.log',
         StandardErrorPath='/private/var/logs/diting/gpu-capture18.log')))
     receipt = out / 'build-report.json'
@@ -80,7 +81,7 @@ def main():
         runtime_format='diting-gpu-boot-stage-v1', guest='22H374', native_abi=1,
         chip_id='0x07030002', install_id=identity, archive=str(archive),
         runtime=str(args.runtime.resolve()), packed_bytes=package.stat().st_size,
-        files=list(gpu_archive18.FILES), capture_command=command,
+        files=list(gpu_archive18.FILES), automation=automation,
         build_complete=True, installation_confirmed=False,
         hardware_acceleration_confirmed=False, device_performance='UNTESTED',
         scope='new GPU bundle, publication policy and trace helper on OS; no Data/SystemOS replacement',

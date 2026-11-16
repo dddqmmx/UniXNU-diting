@@ -17,6 +17,12 @@
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include "DitingBacklightProtocol.h"
+#include "DitingPanelMode.h"
+#include "DitingDisplayText.h"
+#include "../DitingProbe.h"
+
+extern "C" bool diting_display_panel_rate(unsigned) __attribute__((weak_import));
+extern "C" { DitingPanel::Diagnostic diting_panel_mode_diagnostic; }
 
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" void DitingBacklightStaticInit(void);
@@ -26,6 +32,7 @@ namespace {
 using namespace DitingBrightness;
 DitingBacklight *gPublishedBacklight;
 const OSMetaClass *gAppleBacklightClass;
+uint32_t gPanelCopyReady;
 uint64_t nowNs() {
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -43,6 +50,9 @@ class DitingBacklight : public IOService {
     IOTimerEventSource *requestTimer = nullptr;
     const OSMetaClass *appleClass = nullptr;
     Command command;
+    DitingPanel::Mode panelMode;
+    unsigned panelHz=0;
+    bool panelReported=false;
     bool published = false, stopped = false;
     bool needVerification = false, queryPending = false, retryPending = false;
     bool lowPowerWrite = false, retriedWrite = false;
@@ -69,6 +79,29 @@ class DitingBacklight : public IOService {
         static_cast<DitingBacklight *>(context)->wr(offset, value);
     }
     static void delay(void *, unsigned microseconds) { IODelay(microseconds); }
+    static bool applyPanelTear(void *,unsigned hz) {
+        return &diting_display_panel_rate && diting_display_panel_rate(hz);
+    }
+    void reportPanel() {
+        const auto &d=panelMode.diagnostic();auto &snapshot=diting_panel_mode_diagnostic;
+        __atomic_add_fetch(&snapshot.sequence,1,__ATOMIC_ACQ_REL);
+        memcpy(reinterpret_cast<char *>(&snapshot)+12,reinterpret_cast<const char *>(&d)+12,sizeof(d)-12);
+        __atomic_add_fetch(&snapshot.sequence,1,__ATOMIC_RELEASE);
+        if(panelReported && panelMode.active() && !panelMode.retained())panelReported=false;
+        if((!panelMode.active() || panelMode.retained()) && !panelReported) {
+            panelReported=true;
+            setProperty("DitingPanelModeStage",d.stage,32);
+            setProperty("DitingPanelModeError",d.error,32);
+            setProperty("DitingPanelModeReadback",d.after,32);
+            setProperty("DitingPanelRequestedHz",d.targetHz,32);
+            IOLog("DitingPanel: stage=%u error=%u panel=%u id=%02x/%02x/%02x target=%u before=%u after=%u batches=%u restored=%u query=%02x rx=%08x/%08x/%08x sizes=%u address=%02x pixel=%02x colour_error=%u; physical fps unqualified\n",
+                d.stage,d.error,d.panel,d.id[0],d.id[1],d.id[2],d.targetHz,d.before,d.after,d.batches,d.restored,
+                d.queryRegister,d.readControl,d.data0,d.data1,d.returnSizeCommands,d.addressMode,d.pixelFormat,d.colourError);
+            DitingProbeRecord(8,"panel-mode",d.stage==6 && !d.error?DitingProbePass:DitingProbeFail,
+                d.stage==6 && !d.error?"identified L12 timing and tear count accepted; physical fps unqualified":
+                panelMode.retained()?"DSI command timeout; FIFO retained":"panel mode failed; bounded restoration recorded",d.endUs);
+        }
+    }
     bool beginTransaction(const uint32_t *words, unsigned count, bool lowPower, bool read = false) {
         return !__atomic_load_n(&stopped, __ATOMIC_ACQUIRE) &&
             command.begin(words, count, lowPower, read, nowNs());
@@ -172,6 +205,13 @@ class DitingBacklight : public IOService {
             }
             IOLog("DitingBacklight: native AppleARMBacklight class ready\n");
         }
+        if(panelMode.active()) {
+            const unsigned next=panelMode.step(nowNs());reportPanel();
+            if(next)timer->setTimeoutMS(next);
+            // A timeout retains the same command FIFO. A subsequent OS
+            // request may reap a late completion but cannot submit over it.
+            if(panelMode.active())return;
+        }
         if (command.inFlight()) {
             const Completion completion = command.poll(nowNs());
             if (completion == Completion::Retained) {
@@ -254,6 +294,12 @@ class DitingBacklight : public IOService {
             idleDeadline = 0;
             timer->setTimeoutMS(1); return;
         }
+        if(panelHz && !panelMode.started() && __atomic_load_n(&gPanelCopyReady,__ATOMIC_ACQUIRE)) {
+            if(panelMode.start(panelHz,nowNs())) {
+                DitingProbeRecord(8,"panel-mode",DitingProbeRunning,"identify DDIC after completed scanout copy");
+                reportPanel();timer->setTimeoutMS(1);return;
+            }
+        }
         // Take the newest slider request only after the old packet and its
         // verification retire. A rejected old write cannot erase this goal.
         const uint64_t latest = __atomic_exchange_n(&request, 0ULL, __ATOMIC_ACQUIRE);
@@ -285,10 +331,14 @@ class DitingBacklight : public IOService {
         static_cast<DitingBacklight *>(owner)->service();
     }
 public:
+    void requestPanel() {if(requestTimer)requestTimer->setTimeoutUS(1);}
     bool prepare() {
         IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
         OSData *data = chosen ? OSDynamicCast(OSData, chosen->getProperty("diting-dsi-backlight")) : nullptr;
         if (data && data->getLength() == sizeof(board)) memcpy(&board, data->getBytesNoCopy(), sizeof(board));
+        DitingPanel::Selection selection{};
+        OSData *panel = chosen ? OSDynamicCast(OSData, chosen->getProperty("diting-dsi-panel")) : nullptr;
+        if(panel && panel->getLength()==sizeof(selection))memcpy(&selection,panel->getBytesNoCopy(),sizeof(selection));
         OSSafeReleaseNULL(chosen);
         if (!DitingBrightness::validBoard(board)) {
             IOLog("DitingBacklight: invalid L12 ADT base=%llx span=%x min=%u max=%u swap=%u channel=%u version=%u\n",
@@ -300,7 +350,12 @@ public:
         OSSafeReleaseNULL(memory);
         regs = mapping ? reinterpret_cast<volatile uint32_t *>(mapping->getVirtualAddress()) : nullptr;
         if (!regs) return false;
-        command.initialize({this, readRegister, writeRegister, delay});
+        const Io io={this,readRegister,writeRegister,delay};
+        command.initialize(io);
+        unsigned hz=0;PE_parse_boot_argn("diting_panel_hz",&hz,sizeof(hz));
+        if((hz==60 || hz==90 || hz==120) && &diting_display_panel_rate) {
+            panelHz=hz;panelMode.initialize(command,io,{this,applyPanelTear},selection);
+        }
         if (!rd(Version) || rd(Version) == ~0u || !(rd(Control) & 1u) || (rd(PatternControl) & 1u)) {
             IOLog("DitingBacklight: DSI0 unavailable version=%x control=%x pattern=%x\n",rd(Version),rd(Control),rd(PatternControl));
             return false;
@@ -353,6 +408,33 @@ public:
     }
 };
 
+extern "C" void diting_panel_copy_ready(void) {
+    __atomic_store_n(&gPanelCopyReady,1,__ATOMIC_RELEASE);
+    auto *backlight=__atomic_load_n(&gPublishedBacklight,__ATOMIC_ACQUIRE);
+    if(backlight)backlight->requestPanel();
+}
+extern "C" unsigned diting_panel_snapshot_text(char *out,unsigned bytes) {
+    if(!out || !bytes)return 0;
+    DitingPanel::Diagnostic d{};bool stable=false;
+    for(unsigned attempt=0;attempt<3;++attempt) {
+        const auto before=__atomic_load_n(&diting_panel_mode_diagnostic.sequence,__ATOMIC_ACQUIRE);
+        if(before&1)continue;
+        memcpy(&d,&diting_panel_mode_diagnostic,sizeof(d));
+        const auto after=__atomic_load_n(&diting_panel_mode_diagnostic.sequence,__ATOMIC_ACQUIRE);
+        if(before==after) {stable=true;break;}
+    }
+    const char *status=!stable?"CHANGED":d.stage==6 && !d.error?"PASS":!d.stage?"WAIT":d.stage==8?"FAIL":d.stage==9?"RETAINED":"RUNNING";
+    DitingDisplay::Text t{out,bytes};
+    t.add("PANEL schema=3 status=%s stage=%u error=%u panel=%u id=%02x/%02x/%02x target_hz=%u rollback_hz=%u before=%u after=%u batches=%u restoring=%u restored=%u start_us=%llu end_us=%llu return_sizes=%u address_mode=%02x pixel_format=%02x colour_error=%u physical_fps=UNQUALIFIED\n",
+        status,d.stage,d.error,d.panel,d.id[0],d.id[1],d.id[2],d.targetHz,d.rollbackHz,d.before,d.after,d.batches,d.restoring,d.restored,
+        (unsigned long long)d.startUs,(unsigned long long)d.endUs,d.returnSizeCommands,d.addressMode,d.pixelFormat,d.colourError);
+    t.add("PANEL_SELECTION model=%08x/%08x reason=%u basis=retained-live-DT-and-DCS-guard\n",d.modelHigh,d.modelLow,d.selectionReason);
+    t.add("PANEL_COLOUR status=%u address_before=%02x address_after=%02x writes=%u restored=%u error=%u physical_colour=UNQUALIFIED\n",
+        d.colourStatus,d.addressMode,d.addressAfter,d.colourWrites,d.colourRestored,d.colourError);
+    for(const auto &r:d.responses)if(r[0])t.add("PANEL_REPLY reg=%02x control=%08x data0=%08x data1=%08x\n",r[0],r[1],r[2],r[3]);
+    return t.used;
+}
+
 // Expand the ordinary metaclass definition so the conformance getter is
 // selected in source, rather than replacing a guessed Darwin17 vtable slot.
 DitingBacklight::MetaClass DitingBacklight::gMetaClass;
@@ -366,7 +448,9 @@ const OSMetaClass *DitingBacklight::getMetaClass() const {
 OSMetaClassConstructorInit(DitingBacklight, IOService, )
 OSDefineDefaultStructors(DitingBacklight, IOService)
 
+extern "C" void diting_display_timing_start(IOService *display);
 extern "C" void diting_backlight_start(IOService *display) {
+    diting_display_timing_start(display);
     static DitingBacklight *backlight;
     static bool registered;
     unsigned enabled = 1;

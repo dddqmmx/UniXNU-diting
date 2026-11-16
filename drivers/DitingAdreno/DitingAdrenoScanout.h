@@ -11,4 +11,6 @@ IOReturn diting_scanout_connect(task_t);
 void diting_scanout_disconnect(task_t);
 IOReturn diting_scanout_call(task_t,unsigned,const void *,size_t,void *,size_t);
 IOMemoryDescriptor *diting_scanout_memory(task_t);
+IOReturn diting_scanout_observe(DitingScanoutModeInfo *,IOMemoryDescriptor **);
+unsigned diting_scanout_pixels_text(const char *,char *,unsigned);
 }

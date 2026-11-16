@@ -177,13 +177,53 @@ failed:
     return status;
 }
 
-static DitingGpuStatus healthy(DitingGpuGmuDevice *d)
+static DitingGpuStatus healthy(DitingGpuGmuDevice *d,DitingGpuPowerResult *r)
 {
-    uint32_t fw,hfi;
-    if(d->io.platform_ready(d->io.cookie) ||
-       core_read(d,GEN7_GMU_CM3_FW_INIT_RESULT,&fw) ||
-       core_read(d,GEN7_GMU_HFI_CTRL_STATUS,&hfi))return DitingGpuIo;
-    return (fw&0x1ff)==0x100 && !(fw&0xe00) && (hfi&1)?DitingGpuSuccess:DitingGpuPrerequisite;
+    r->platform_error=d->io.platform_ready(d->io.cookie);
+    if(r->platform_error)return DitingGpuIo;
+    if(core_read(d,GEN7_GMU_CM3_FW_INIT_RESULT,&r->fw_status))return DitingGpuIo;
+    ++r->health_reads;
+    if(core_read(d,GEN7_GMU_HFI_CTRL_STATUS,&r->hfi_status))return DitingGpuIo;
+    ++r->health_reads;
+    return (r->fw_status&0x1ff)==0x100 && !(r->fw_status&0xe00) && (r->hfi_status&1)?
+        DitingGpuSuccess:DitingGpuPrerequisite;
+}
+
+static DitingGpuStatus wait_ack(DitingGpuGmuDevice *d,DitingGpuPowerResult *r,
+    uint64_t begin,uint64_t command_begin,uint64_t total_budget)
+{
+    uint64_t last=command_begin,now;
+    for(unsigned n=0;n<=10000;n++) {
+        if(d->io.now_us(d->io.cookie,&now) || now<last)return DitingGpuIo;
+        if(now-last>r->max_poll_gap_us)r->max_poll_gap_us=now-last;
+        r->end_us=now;last=now;
+        const unsigned expired=now-command_begin>=1000000 || now-begin>=total_budget || n==10000;
+        if(expired)++r->boundary_polls;
+        DitingGpuStatus status=healthy(d,r);
+        if(status)return status;
+        /* Nothing gen7_hfi_send_cmd_wait_inline clears only MSGQ bit0
+         * before draining its replies. Do not clear the OOB_GPU bit or
+         * unrelated interrupts, and do not reset a live HFI queue. */
+        uint32_t interrupt;
+        if(core_read(d,GEN7_GMU_GMU2HOST_INTR_INFO,&interrupt))return DitingGpuIo;
+        if(interrupt&1) {
+            DitingGpuGmuResult mmio={0};
+            if(core_write(d,GEN7_GMU_GMU2HOST_INTR_CLR,1,&mmio) ||
+               d->io.barrier(d->io.cookie))return DitingGpuIo;
+            ++r->interrupt_clears;
+        }
+        uint32_t output[16];size_t count;
+        ++r->polls;
+        r->transport=DitingAdrenoHfiPoll(&d->hfi,output,16,&count,&r->firmware_error);
+        if(r->transport==DitingAdrenoHfiSuccess) {++r->acknowledged;return DitingGpuSuccess;}
+        if(r->transport!=DitingAdrenoHfiEmpty)return DitingGpuIo;
+        /* As the vendor's final register check: a preempted waiter observes
+         * one final real response before declaring timeout. No new command,
+         * retransmission or extended polling follows the deadline. */
+        if(expired)return DitingGpuTimeout;
+        if(d->io.wait_us(d->io.cookie,100))return DitingGpuIo;
+    }
+    return DitingGpuTimeout;
 }
 DitingGpuStatus DitingAdrenoGmuStartPower(DitingGpuGmuDevice *d,const DitingPowerInputs *in,
     unsigned power_level,DitingGpuPowerResult *r)
@@ -197,11 +237,11 @@ DitingGpuStatus DitingAdrenoGmuStartPower(DitingGpuGmuDevice *d,const DitingPowe
     if(d->power_attempted || d->power_started || d->hfi.pending_header)return DitingGpuBusy;
     DitingPowerTables tables;
     if(DitingAdrenoBuildPowerTables(in,power_level,&tables)!=DitingPowerSuccess)return DitingGpuArgument;
-    DitingGpuStatus status=healthy(d);
+    DitingGpuStatus status=healthy(d,r);
     if(status)return status;
     uint64_t begin,last,now;
     if(d->io.now_us(d->io.cookie,&begin))return DitingGpuIo;
-    last=begin;d->power_attempted=1;
+    last=begin;r->begin_us=r->end_us=begin;d->power_attempted=1;
     const unsigned ids[]={4,3,14,30};
     uint32_t core_start=0,performance_vote[]={1,tables.gpu_index,tables.bus_index};
     const uint32_t *payloads[]={tables.performance,tables.bandwidth,&core_start,performance_vote};
@@ -211,26 +251,15 @@ DitingGpuStatus DitingAdrenoGmuStartPower(DitingGpuGmuDevice *d,const DitingPowe
         if(d->io.now_us(d->io.cookie,&now) || now<last) {status=DitingGpuIo;goto failed;}
         last=now;uint64_t command_begin=now;
         if(now-begin>=4000000) {status=DitingGpuTimeout;goto failed;}
-        status=healthy(d);if(status)goto failed;
+        status=healthy(d,r);if(status)goto failed;
         r->transport=DitingAdrenoHfiSend(&d->hfi,ids[step],payloads[step],words[step],&r->header);
         if(r->header)++r->published;
         if(r->transport!=DitingAdrenoHfiSuccess) {status=DitingGpuIo;goto failed;}
-        unsigned acknowledged=0;
-        for(unsigned n=0;n<10000;n++) {
-            if(d->io.now_us(d->io.cookie,&now) || now<last) {status=DitingGpuIo;goto failed;}
-            last=now;
-            if(now-command_begin>=1000000 || now-begin>=4000000) {status=DitingGpuTimeout;goto failed;}
-            status=healthy(d);if(status)goto failed;
-            uint32_t output[16];size_t count;
-            ++r->polls;
-            r->transport=DitingAdrenoHfiPoll(&d->hfi,output,16,&count,&r->firmware_error);
-            if(r->transport==DitingAdrenoHfiSuccess) {acknowledged=1;++r->acknowledged;break;}
-            if(r->transport!=DitingAdrenoHfiEmpty) {status=DitingGpuIo;goto failed;}
-            if(d->io.wait_us(d->io.cookie,100)) {status=DitingGpuIo;goto failed;}
-        }
-        if(!acknowledged) {status=DitingGpuTimeout;goto failed;}
+        status=wait_ack(d,r,begin,command_begin,4000000);
+        if(status)goto failed;
+        last=r->end_us;
     }
-    status=healthy(d);if(status)goto failed;
+    status=healthy(d,r);if(status)goto failed;
     d->power_started=1;r->phase=5;return DitingGpuSuccess;
 failed:
     d->poisoned=1;d->hfi.poisoned=1;d->power_started=0;
@@ -243,7 +272,7 @@ DitingGpuStatus DitingAdrenoGmuHoldGpu(DitingGpuGmuDevice *d,DitingGpuPowerResul
         return DitingGpuPrerequisite;
     *r=(DitingGpuPowerResult){0};r->resources_must_retain=1;
     DitingGpuGmuResult mmio={0};
-    DitingGpuStatus status=healthy(d);
+    DitingGpuStatus status=healthy(d,r);
     if(status)return status;
     r->phase=1;
     /* oob_gpu is0: SET30, ACK31, CLEAR31. Clear stale ACK before SET. */
@@ -258,20 +287,11 @@ DitingGpuStatus DitingAdrenoGmuHoldGpu(DitingGpuGmuDevice *d,DitingGpuPowerResul
     r->transport=DitingAdrenoHfiSend(&d->hfi,10,0,0,&r->header);
     if(r->transport!=DitingAdrenoHfiSuccess){status=DitingGpuIo;goto failed_gpu;}
     r->published=1;
-    uint64_t begin,now;
+    uint64_t begin;
     if(d->io.now_us(d->io.cookie,&begin)){status=DitingGpuIo;goto failed_gpu;}
-    for(unsigned n=0;n<10000;n++) {
-        uint32_t output[16];size_t count;
-        if(d->io.now_us(d->io.cookie,&now) || now<begin){status=DitingGpuIo;goto failed_gpu;}
-        if(now-begin>=1000000){status=DitingGpuTimeout;goto failed_gpu;}
-        ++r->polls;r->transport=DitingAdrenoHfiPoll(&d->hfi,output,16,&count,&r->firmware_error);
-        if(r->transport==DitingAdrenoHfiSuccess) {
-            r->acknowledged=1;r->phase=3;d->gpu_held=1;return healthy(d);
-        }
-        if(r->transport!=DitingAdrenoHfiEmpty){status=DitingGpuIo;goto failed_gpu;}
-        if(d->io.wait_us(d->io.cookie,100)){status=DitingGpuIo;goto failed_gpu;}
-    }
-    status=DitingGpuTimeout;
+    r->begin_us=r->end_us=begin;
+    status=wait_ack(d,r,begin,begin,1000000);
+    if(!status) {r->phase=3;d->gpu_held=1;return healthy(d,r);}
 failed_gpu:
     /* No CP has been started by this function; release only our OOB request. */
     (void)core_write(d,GEN7_GMU_HOST2GMU_INTR_SET,1u<<31,&mmio);

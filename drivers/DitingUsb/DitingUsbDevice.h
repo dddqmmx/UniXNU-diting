@@ -30,9 +30,17 @@ extern "C" unsigned diting_usb_mux_transmit(void *,unsigned);
 #include "DitingDwc3Stop.h"
 #include "DitingUsbDiagnostics.h"
 #include "DitingUsbCommand.h"
+#include "DitingUsbReply.h"
 #include "../DitingAdreno/submit/NativeGpuTraceStream.h"
 extern "C" uint32_t native_gpu_trace_range(uint64_t,uint32_t,void *,uint32_t) __attribute__((weak_import));
 extern "C" unsigned diting_gpu_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_memory_bandwidth_probe_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_display_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_display_colour_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_display_solid_text(const char *,char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_panel_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_scanout_pixels_text(const char *,char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_gpu_test_text(const char *,char *,unsigned) __attribute__((weak_import));
 extern "C" {extern volatile int32_t native_adsp_stats[16],native_battery_stats[16];extern char native_adsp_text[96];}
 namespace DitingUsb {
 #include "../NativeUfs/SmmuTakeover.h"
@@ -74,6 +82,8 @@ static unsigned muxTxBytes;
 static uint64_t bridgeStarted;
 static char commandLine[64];static unsigned commandLength;static bool commandDiscard;
 static char reply[4096];static unsigned replyBytes,replyCursor,replyEnd;
+static constexpr unsigned ReplyPayloadBytes=sizeof(reply)-96;
+static_assert(sizeof(commandLine)+sizeof("DitingUSB END \n")<=96,"CDC END reservation");
 static bool txReply;
 static uint32_t logCursor,txEnd;
 static IOService *service;
@@ -122,27 +132,48 @@ static void input(const unsigned char *data,unsigned size) {
     unsigned destination=(!strcmp(commandLine,"reboot rec")||!strcmp(commandLine,"reboot recovery"))?1:
                          !strcmp(commandLine,"reboot fastboot")?2:0;
     unsigned used=0;
-    used=snprintf(reply,sizeof(reply),"DitingUSB BEGIN %s\n",commandLine);
+    diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"DitingUSB BEGIN %s\n",commandLine);
     if(destination) {
      const bool accepted=DitingBootCapture::request(destination);
-     used+=snprintf(reply+used,sizeof(reply)-used,"%s; syncing filesystems\n",accepted?"accepted":"busy/rejected");
+     diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"%s; syncing filesystems\n",accepted?"accepted":"busy/rejected");
      IOLog("DitingUSB command: %s %s; syncing filesystems\n",commandLine,accepted?"accepted":"busy/rejected");
     } else if(!strcmp(commandLine,"status")) {
-     used+=diting_usb_snapshot(reply+used,unsigned(sizeof(reply)-used));
+     used+=diting_usb_snapshot(reply+used,unsigned(ReplyPayloadBytes-used));
     } else if(!strcmp(commandLine,"gpu")) {
-     if(&diting_gpu_snapshot_text)used+=diting_gpu_snapshot_text(reply+used,unsigned(sizeof(reply)-used));
-     else used+=snprintf(reply+used,sizeof(reply)-used,"unavailable: Diting GPU clock reader not linked\n");
+     if(&diting_gpu_snapshot_text)used+=diting_gpu_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting GPU clock reader not linked\n");
+    } else if(!strcmp(commandLine,"gpu bandwidth")) {
+     if(&diting_memory_bandwidth_probe_text)used+=diting_memory_bandwidth_probe_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"BANDWIDTH schema=1 status=SKIP reason=probe-not-linked register_writes=0\n");
+    } else if(!strcmp(commandLine,"display")) {
+     if(&diting_display_snapshot_text)used+=diting_display_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting display timing reader not linked\n");
+    } else if(!strcmp(commandLine,"display color")) {
+     if(&diting_display_colour_text)used+=diting_display_colour_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting display colour reader not linked\n");
+    } else if(!strncmp(commandLine,"display solid ",14) || !strncmp(commandLine,"display fetch-swap ",19)) {
+     if(&diting_display_solid_text)used+=diting_display_solid_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"SOLID schema=1 available=0 accepted=0 reason=controller-not-linked\n");
+    } else if(!strcmp(commandLine,"display panel")) {
+     if(&diting_panel_snapshot_text)used+=diting_panel_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting panel mode reader not linked\n");
+    } else if(!strncmp(commandLine,"display pixels",14)) {
+     if(&diting_scanout_pixels_text)used+=diting_scanout_pixels_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting current console reader not linked\n");
+    } else if(!strncmp(commandLine,"gputest ",8)) {
+     if(&diting_gpu_test_text)used+=diting_gpu_test_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"GPUTEST schema=1 available=0 reason=broker-not-linked\n");
     } else if(!strncmp(commandLine,"trace ",6)) {
      uint64_t after=0;unsigned records=0;
      alignas(8) unsigned char raw[sizeof(NativeGpuTraceStreamHeader)+NativeGpuTraceStreamRecords*sizeof(NativeGpuTraceRecord)];
      const bool valid=diting_usb_parse_trace(commandLine,&after,&records);
      const unsigned got=valid && &native_gpu_trace_range?native_gpu_trace_range(after,records,raw,sizeof(raw)):0;
      if(got && got<=sizeof(raw)) {
-      used+=snprintf(reply+used,sizeof(reply)-used,"GPU trace bytes=%u\nDATA ",got);
-      const unsigned encoded=diting_usb_base64(raw,got,reply+used,unsigned(sizeof(reply)-used));
-      if(encoded){used+=encoded;used+=snprintf(reply+used,sizeof(reply)-used,"\n");}
-      else used+=snprintf(reply+used,sizeof(reply)-used,"unavailable: bounded trace encoding failed\n");
-     } else used+=snprintf(reply+used,sizeof(reply)-used,"unavailable: trace disabled, malformed request, or future cursor\n");
+      diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"GPU trace bytes=%u\nDATA ",got);
+      const unsigned encoded=diting_usb_base64(raw,got,reply+used,unsigned(ReplyPayloadBytes-used));
+      if(encoded){used+=encoded;diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"\n");}
+      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: bounded trace encoding failed\n");
+     } else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: trace disabled, malformed request, or future cursor\n");
     } else if(!strncmp(commandLine,"read ",5)) {
      // Decimal size, hexadecimal KVA. Reject extra tokens, overflow and
      // unsupported ranges before the no-fault RAM-only kernel reader.
@@ -150,15 +181,16 @@ static void input(const unsigned char *data,unsigned size) {
      const bool valid=diting_usb_parse_read(commandLine,&address,&amount);
      unsigned char raw[512];
      const unsigned got=valid&&amount?diting_usb_read_kernel(address,raw,amount):0;
-     used+=snprintf(reply+used,sizeof(reply)-used,"RAM address=%llx requested=%u copied=%u\n",address,amount,got);
+     diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"RAM address=%llx requested=%u copied=%u\n",address,amount,got);
      for(unsigned off=0;off<got;off+=16) {
-      used+=snprintf(reply+used,sizeof(reply)-used,"%016llx:",address+off);
-      for(unsigned i=off;i<got&&i<off+16;++i)used+=snprintf(reply+used,sizeof(reply)-used," %02x",raw[i]);
-      used+=snprintf(reply+used,sizeof(reply)-used,"\n");
+      diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"%016llx:",address+off);
+      for(unsigned i=off;i<got&&i<off+16;++i)diting_usb_reply_add(reply,ReplyPayloadBytes,&used," %02x",raw[i]);
+      diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"\n");
      }
-     if(!got)used+=snprintf(reply+used,sizeof(reply)-used,"unavailable: use 1..512 bytes of mapped kernel RAM\n");
-    } else used+=snprintf(reply+used,sizeof(reply)-used,"commands: status | gpu | trace AFTER COUNT(1..20) | read HEX-KVA BYTES | reboot rec | reboot fastboot | help\n");
-    if(used<sizeof(reply))used+=snprintf(reply+used,sizeof(reply)-used,"DitingUSB END %s\n",commandLine);
+     if(!got)diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: use 1..512 bytes of mapped kernel RAM\n");
+    } else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"commands: status | gpu [bandwidth] | display [color/panel/pixels] | display fetch-swap MS | display solid status/cancel/blue/green/red [MS 1000..60000] | gputest status/run/result/cancel | trace AFTER COUNT(1..20) | read HEX-KVA BYTES | reboot rec | reboot fastboot | help\n");
+    if(used && reply[used-1]!='\n')diting_usb_reply_add(reply,sizeof(reply),&used,"\n");
+    diting_usb_reply_add(reply,sizeof(reply),&used,"DitingUSB END %s\n",commandLine);
     replyBytes=used<sizeof(reply)?used:unsigned(sizeof(reply)-1);replyCursor=0;
    }
    commandLength=0;commandDiscard=false;

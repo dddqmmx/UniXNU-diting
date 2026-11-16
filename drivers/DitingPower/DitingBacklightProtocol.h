@@ -112,6 +112,10 @@ class Command {
         return (irq & DmaDone) && !(rd(Status) & DmaBusy) && (!query || (irq & BtaDone));
     }
 public:
+    // Xiaomi's pinned dsi_ctrl.h limits TPG command storage to 64 bytes.
+    // Longer L12 timing sequences are split at packet boundaries; this
+    // transport never substitutes a physical DMA buffer.
+    static constexpr unsigned MaximumWords = 16;
     void initialize(const Io &callbacks) { io = callbacks; }
     bool inFlight() const { return active; }
     bool available() const {
@@ -120,7 +124,7 @@ public:
             !(rd(InterruptControl) & ErrorPending) && !(rd(AckError) & AckErrorMask);
     }
     bool begin(const uint32_t *words, unsigned count, bool lowPower, bool read, uint64_t now) {
-        if (!words || !count || count > 2 || !available()) return false;
+        if (!words || !count || count > MaximumWords || !available()) return false;
         savedDma = rd(DmaControl); savedLength = rd(DmaLength);
         savedTrigger = rd(TriggerControl); savedPattern = rd(PatternControl);
         savedControl = rd(Control);

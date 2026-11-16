@@ -1,0 +1,27 @@
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -127,6 +127,14 @@
+ #if defined(DITING) && defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
+ extern void diting_secondary_panic_snapshot(const char *, va_list *, unsigned long);
+ #endif
++#if defined(DITING)
++extern void diting_probe_panic_snapshot(void (*)(const char *, unsigned)) __attribute__((weak_import));
++static void diting_probe_panic_emit(const char *text, unsigned bytes)
++{
++	/* Completed software records only: no allocation, registry lock or MMIO. */
++	printf("%.*s", (int)bytes, text);
++}
++#endif
+ extern volatile struct xnu_hw_shmem_dbg_command_info *hwsd_info;
+ #endif
+ 
+@@ -1231,6 +1239,9 @@
+ 		sync_internal();
+ 	}
+ 
++#if defined(DITING)
++	if (&diting_probe_panic_snapshot) diting_probe_panic_snapshot(diting_probe_panic_emit);
++#endif
+ #if defined(DITING) && defined(XNU_DITING_RAMOOPS_CONSOLE) && XNU_DITING_RAMOOPS_CONSOLE
+ 	diting_secondary_panic_snapshot(panic_format_str, panic_args, panic_caller);
+ #endif

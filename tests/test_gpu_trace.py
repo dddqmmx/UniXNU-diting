@@ -18,6 +18,51 @@ def snapshot(records, issued=None):
 
 
 class GpuTraceTests(unittest.TestCase):
+    def test_case_markers_cannot_become_pipeline_costs(self):
+        data = snapshot([record(1, 10000, 64, 16, 1, 4, 1, 0),
+                         record(2, 19000, 64, 16, 1, 4, 2, 0),
+                         record(3, 20000, 83, 43, 4, 11000, 9000, 1),
+                         record(4, 21000, 81, 43, 2, 7, 3000, 1000, 4000, 500, 4),
+                         record(5, 22000, 82, 43, 2, 7, 100, 200, 300, 400, 500, 600, 700, 800, 900)])
+        frontend = trace.analyze(data)['frontend']
+        self.assertNotIn('16', frontend['pipeline_costs_over_1ms'])
+        self.assertEqual(frontend['pipeline_costs_over_1ms']['43']['4']['elapsed']['p95_ms'], 9)
+        self.assertEqual(frontend['timing']['by_pid']['43']['encode_age']['p95_ms'], 3)
+        self.assertEqual(frontend['runtime_stages']['43']['submit']['p95_ms'], .6)
+
+    def test_frontend_timing_keeps_cpu_stages_cp_ticks_and_unobserved_times_distinct(self):
+        missing = 2**64 - 1
+        data = snapshot([record(1, 10000, 62, 43, 1, 9, 20000, missing, 15000, 4000, 4, 8, 32, 3300000),
+                         record(2, 11000, 63, 43, 1, 9, 100, 2000, missing, 3000, 1000, 500, 100, 200, 300, 7),
+                         record(3, 12000, 64, 299, 4, 9000, 9000, 1)])
+        result = trace.analyze(data)
+        frontend = result['frontend']
+        self.assertEqual(frontend['timing']['by_pid']['43']['encode_age']['p95_ms'], 20)
+        self.assertEqual(frontend['timing']['by_pid']['43']['scheduled']['count'], 0)
+        self.assertEqual(frontend['timing']['by_pid']['43']['completion_work']['p95_ms'], 4)
+        self.assertEqual(frontend['runtime_stages']['43']['prepare']['p95_ms'], 2)
+        self.assertEqual(frontend['runtime_stages']['43']['handoff']['count'], 0)
+        self.assertEqual(frontend['pipeline_costs_over_1ms']['299']['4']['elapsed']['p95_ms'], 9)
+        self.assertEqual(result['gpu']['cp_execution']['count'], 0)
+        self.assertNotEqual(result['performance_status'], 'PASS')
+
+    def test_hardware_counters_retain_raw_units_and_do_not_certify_composed_fps(self):
+        data = snapshot([record(1, 1000, 26, 0, 1, 0, 10, 0, 100000, 100100, 0x180000, 1, 1, 3, 0, 65535 << 16),
+                         record(2, 17667, 26, 0, 2, 0, 12, 0, 200000, 200100, 0x180000, 1, 1, 3, 0, 1 << 16)])
+        result = trace.analyze(data)
+        hardware = result['display']['hardware_observations']
+        self.assertEqual(hardware['observations'], 2)
+        self.assertEqual(hardware['timestamp_units'], 'RAW')
+        self.assertAlmostEqual(hardware['counter_pairs'][0]['external_te_counter_rate_hz'], 120, delta=.01)
+        self.assertIsNone(hardware['physical_presented_frame_count'])
+        self.assertNotEqual(result['performance_status'], 'PASS')
+
+    def test_disabled_changed_or_reset_hardware_counters_do_not_become_fast_samples(self):
+        for status, enable, last in ((2, 1, 12), (3, 1, 12), (0, 0, 12), (0, 1, 0)):
+            data = snapshot([record(1, 1000, 26, 0, 1, 0, 100, 0, 0, 0, 0, 0, enable),
+                             record(2, 9333, 26, 0, 2, status, last, 0, 0, 0, 0, 0, enable)])
+            self.assertEqual(trace.analyze(data)['display']['hardware_observations']['counter_pairs'], [])
+
     def test_120fps_budget_rejects_work_that_fits_a_60fps_frame(self):
         data = snapshot([record(1, 1100, 10, 43, 1, 0, 0, 0, 0, 0, 1, 0, 1000, 1),
                          record(2, 10500, 11, 43, 1, 0, 0, 1000, 19200, 192000, 1)])
@@ -41,6 +86,27 @@ class GpuTraceTests(unittest.TestCase):
         self.assertEqual(refresh['cpu_observed_intervals']['longer_gaps_count'], 1)
         self.assertIsNone(result['display']['physical_presented_frame_count'])
         self.assertNotEqual(result['performance_status'], 'PASS')
+
+    def test_late_refresh_reports_latest_period_and_keeps_raw_deadline_evidence(self):
+        data = snapshot([record(1, 20000, 25, 0, 1, 0, 339200, 120,
+                                19200, 379200, 160000, 2, 499200),
+                         record(2, 28000, 25, 0, 2, 0, 499200, 120,
+                                499200, 503000, 160000, 0, 659200)])
+        result = trace.analyze(data)
+        clock = result['display']['software_refresh']['clock_evidence']
+        self.assertEqual((clock['samples'], clock['invalid_samples']), (2, 0))
+        self.assertEqual(clock['skipped_periods'], 2)
+        self.assertEqual(clock['callbacks_skipping_periods'], 1)
+        self.assertAlmostEqual(clock['scheduled_deadline_to_callback']['max_ms'], 18.75)
+        self.assertAlmostEqual(clock['reported_period_to_callback']['max_ms'], 1000 / 480, places=6)
+        self.assertIsNone(result['display']['physical_presented_frame_count'])
+
+    def test_stale_refresh_timestamp_cannot_become_valid_callback_timing(self):
+        data = snapshot([record(1, 20000, 25, 0, 1, 0, 19200, 120,
+                                19200, 379200, 160000, 2, 499200)])
+        clock = trace.analyze(data)['display']['software_refresh']['clock_evidence']
+        self.assertEqual((clock['samples'], clock['invalid_samples']), (0, 1))
+        self.assertEqual(clock['scheduled_deadline_to_callback']['count'], 0)
 
     def test_bad_header_and_short_reads_do_not_become_empty_success(self):
         for data in (b'', bytes(32), snapshot([record(1, 100, 10)])[:-1]):

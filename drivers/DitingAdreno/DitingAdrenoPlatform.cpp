@@ -19,6 +19,9 @@
 #include "DitingAdrenoCp.h"
 #include "DitingAdrenoCpProfile.h"
 #include "DitingAdrenoClockSnapshot.h"
+#include "DitingAdrenoStartup.h"
+#include "../DitingProbe.h"
+#include "../DitingPower/DitingMemoryBandwidth.h"
 #include "../DitingPower/DitingPlatformResources.h"
 
 extern "C" const uint8_t DitingAdrenoGmuFirmware[];
@@ -43,8 +46,13 @@ static ArmSmmu4KIo smmu_io;
 static uint64_t bank_offset;
 static unsigned parents_ready,attempted;
 static unsigned diagnostics_ready,diagnostics_power_level;
+static DitingAdrenoStartup::Log startup_log{};
+static DitingGpuPowerResult startup_power{};
+static unsigned startup_power_status,startup_finished;
+static uint64_t microseconds();
 static void record(const char *phase,unsigned result,uint64_t a=0,uint64_t b=0)
 {
+    DitingAdrenoStartup::put(startup_log,phase,result,a,b,microseconds());
     char text[240];int n=snprintf(text,sizeof(text),
         "DITING ADRENO: %s result=%u a=0x%llx b=0x%llx\n",phase,result,a,b);
     if(n>0){IOLog("%s",text);diting_ramoops_diagnostic_write(text,n<(int)sizeof(text)?n:(int)sizeof(text)-1);}
@@ -329,7 +337,8 @@ static void run(void *,wait_result_t)
     DitingGpuGmuResult gr={};auto gs=DitingAdrenoGmuStart(&gmu,&gc,&gr);
     record("GMU firmware/HFI",gs,(uint64_t(gr.last_register)<<32)|gr.last_value,gr.phase);
     if(gs)return;
-    DitingGpuPowerResult pr={};auto ps=DitingAdrenoGmuStartPower(&gmu,&inputs,power_level,&pr);
+    auto &pr=startup_power;auto ps=DitingAdrenoGmuStartPower(&gmu,&inputs,power_level,&pr);
+    startup_power_status=ps;
     record("GMU power handshake",ps,(uint64_t(pr.command)<<32)|pr.firmware_error,pr.acknowledged);
     if(ps)return;
     record("GMU frequency/bandwidth request acknowledged",0,
@@ -350,6 +359,15 @@ static void run(void *,wait_result_t)
 static void worker(void *parameter,wait_result_t result)
 {
     run(parameter,result);
+    DitingAdrenoStartup::Entry last{};
+    for(unsigned i=0;i<DitingAdrenoStartup::Capacity;++i) {
+        DitingAdrenoStartup::Entry entry{};
+        if(DitingAdrenoStartup::get(startup_log,i,entry))last=entry;
+    }
+    const bool ok=__atomic_load_n(&diagnostics_ready,__ATOMIC_ACQUIRE)!=0;
+    DitingProbeRecord(9,"gpu-startup",ok?DitingProbePass:DitingProbeFail,
+        last.ready?last.phase:"startup ended without a completed CP",last.status);
+    __atomic_store_n(&startup_finished,1,__ATOMIC_RELEASE);
     thread_terminate(current_thread());
     thread_block(THREAD_CONTINUE_NULL);
 }
@@ -378,6 +396,22 @@ extern "C" unsigned diting_gpu_snapshot_text(char *out,unsigned capacity)
     append("GPU clock v1 status=%s uptime_us=%llu reads=%u requested_hz=%u requested_DDR=%u\n",
         status,microseconds(),sample.reads,level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].hz:0,
         level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].bus:0);
+    unsigned retained=0;DitingAdrenoStartup::Entry last{};
+    for(unsigned i=0;i<DitingAdrenoStartup::Capacity;++i) {
+        DitingAdrenoStartup::Entry entry{};
+        if(DitingAdrenoStartup::get(startup_log,i,entry)){last=entry;++retained;}
+    }
+    const bool finished=__atomic_load_n(&startup_finished,__ATOMIC_ACQUIRE)!=0;
+    append("STARTUP schema=1 finished=%u retained=%u last_status=%u last_us=%llu phase=%s\n",
+        unsigned(finished),retained,last.status,last.us,last.ready?last.phase:"not-requested");
+    if(finished) {
+        const auto &p=startup_power;
+        append("GMU_POWER status=%u phase=%u command=%u header=%08x published=%u acknowledged=%u transport=%u error=%08x polls=%u boundary_polls=%u interrupt_clears=%u begin_us=%llu end_us=%llu max_poll_gap_us=%llu health_reads=%u fw=%08x hfi=%08x platform_error=%u\n",
+            startup_power_status,p.phase,p.command,p.header,p.published,p.acknowledged,unsigned(p.transport),
+            p.firmware_error,p.polls,p.boundary_polls,p.interrupt_clears,p.begin_us,p.end_us,
+            p.max_poll_gap_us,p.health_reads,p.fw_status,p.hfi_status,p.platform_error);
+    }
+    if(used<capacity-1)used+=diting_memory_snapshot_text(out+used,capacity-used);
     if(sample.status!=DitingClockSamplePass) {
         append("unavailable: require completed CP startup, powered GX, and stable clock configuration\n");
         return used;
@@ -414,7 +448,10 @@ extern "C" void diting_adreno_start_optional(void)
     unsigned requested=0;
     if(!PE_parse_boot_argn("diting_adreno_start",&requested,sizeof(requested))||requested!=1)return;
     if(__atomic_exchange_n(&attempted,1,__ATOMIC_ACQ_REL))return;
+    DitingProbeRecord(9,"gpu-startup",DitingProbeRunning,"one cold startup; real CP completion required");
     thread_t thread=THREAD_NULL;auto status=kernel_thread_start(worker,nullptr,&thread);
-    if(status!=KERN_SUCCESS){record("FAIL startup thread",static_cast<unsigned>(status));return;}
+    if(status!=KERN_SUCCESS){record("FAIL startup thread",static_cast<unsigned>(status));
+        DitingProbeRecord(9,"gpu-startup",DitingProbeFail,"startup thread unavailable",status);
+        __atomic_store_n(&startup_finished,1,__ATOMIC_RELEASE);return;}
     thread_deallocate(thread);
 }
