@@ -54,6 +54,9 @@ extern "C" struct proc *proc_find(int pid);
 extern "C" int proc_rele(struct proc *p);
 extern "C" task_t proc_task(struct proc *p);
 extern "C" void diting_dump_task_threads(const char *name, int pid, task_t task, int with_bt) __attribute__((weak_import));
+extern "C" void diting_wifi_hw_diag(uint32_t *msi, uint32_t *blocksUsed, uint32_t *slabUsed, uint32_t *slabTotal,
+                                    int *paKind, uint32_t *paValid, uint64_t *hostData,
+                                    const char **bdfName, const char **regdbName) __attribute__((weak_import));
 extern "C" {
 extern volatile int diting_software_aes_state __attribute__((weak_import));
 extern volatile uint32_t native_aes_kat_status __attribute__((weak_import));
@@ -362,10 +365,18 @@ void on_link_lost(int reason) {
 // What the address configuration exchanges, as it crosses the interface: DHCP messages (type, transaction, offered address) and ARP, the first
 // ones of each direction, and per-kind counts for the traffic line.
 struct Kinds { uint32_t arp, ip4, dhcp, ip6, other; } gKindsIn, gKindsOut;
+struct ArpRec { uint8_t out, op, spa[4], tpa[4], src[6], dst[6]; };
+ArpRec gArpRing[8]; uint32_t gArpRingSeq;
 void note_frame(const uint8_t *e, size_t n, bool out) {
   Kinds &k = out ? gKindsOut : gKindsIn; const unsigned type = n >= 14 ? (e[12] << 8 | e[13]) : 0; const char *dir = out ? "out" : "in";
   if (type == 0x0806) {
     k.arp++; static unsigned shown[2];
+    if (n >= 42) {
+      ArpRec &rec = gArpRing[__atomic_fetch_add(&gArpRingSeq, 1u, __ATOMIC_RELAXED) & 7u];
+      rec.out = out ? 1u : 0u; rec.op = e[21];
+      memcpy(rec.spa, e + 28, 4); memcpy(rec.tpa, e + 38, 4);
+      memcpy(rec.src, e + 6, 6); memcpy(rec.dst, e + 0, 6);
+    }
     if (n >= 42 && shown[out]++ < 12) log(6, "wifi-net: arp %s op %u %u.%u.%u.%u asks %u.%u.%u.%u", dir, e[21], e[28], e[29], e[30], e[31], e[38], e[39], e[40], e[41]);
     return; }
   if (type == 0x86dd) { k.ip6++; return; }
@@ -416,6 +427,7 @@ void on_rx(const uint8_t *eth, size_t length) {
   if (done != length) { gRxNoBuffer++; mbuf_freem(m); return; }
   mbuf_pkthdr_setlen(m, length); mbuf_pkthdr_setrcvif(m, gIf);
   mbuf_pkthdr_setheader(m, mbuf_data(m)); mbuf_adj(m, 14);   // the stack wants the Ethernet header apart from the payload
+  bpf_tap_in(gIf, DLT_EN10MB, m, const_cast<uint8_t *>(eth), 14);
   struct ifnet_stat_increment_param inc; memset(&inc, 0, sizeof inc); inc.packets_in = 1; inc.bytes_in = static_cast<uint32_t>(length);
   const errno_t e = ifnet_input(gIf, m, &inc);
   if (e) { gRxErrors++; gRxLastError = e; } else gRxFrames++;
@@ -429,7 +441,11 @@ errno_t if_output(ifnet_t, mbuf_t m) {
     uint8_t frame[2000]; mbuf_copydata(m, 0, length, frame);
     note_frame(frame, length, true);
     if (nw_wifi_tx(frame, length)) log(6, "wifi-net: a frame was dropped (queue full)");
-    else {ifnet_stat_increment_out(gIf, 1, static_cast<uint32_t>(length), 0); diting_wifi_wake();}
+    else {
+      bpf_tap_out(gIf, DLT_EN10MB, m, nullptr, 0);
+      ifnet_stat_increment_out(gIf, 1, static_cast<uint32_t>(length), 0);
+      diting_wifi_wake();
+    }
   }
   mbuf_freem(m);
   return 0;
@@ -1344,6 +1360,29 @@ extern "C" unsigned diting_wifi_usb_command(const char *commandLine, char *out, 
     }
     if (!shownLeaves) wifi_append(out, cap, used, "none");
     wifi_append(out, cap, used, "\n");
+    if (&diting_wifi_hw_diag) {
+      uint32_t msi = 0, blks = 0, sUsed = 0, sTot = 0, paV = 0;
+      uint64_t hData = 0;
+      int paK = 0;
+      const char *bdf = "none", *regdb = "none";
+      diting_wifi_hw_diag(&msi, &blks, &sUsed, &sTot, &paK, &paV, &hData, &bdf, &regdb);
+      wifi_append(out, cap, used, "WIFI_HW msi=%u blocks=%u slab=%u/%u bdf=%s regdb=%s pa=%d(valid=%u,data=0x%llx)\n",
+                  msi, blks, sUsed, sTot, bdf, regdb, paK, paV, static_cast<unsigned long long>(hData));
+    }
+    const uint32_t arpSeq = __atomic_load_n(&gArpRingSeq, __ATOMIC_RELAXED);
+    if (arpSeq) {
+      const uint32_t show = arpSeq < 8u ? arpSeq : 8u;
+      wifi_append(out, cap, used, "WIFI_ARP_RECENT seq=%u", arpSeq);
+      for (uint32_t i = arpSeq - show; i < arpSeq && used + 80 < cap; ++i) {
+        const ArpRec &r = gArpRing[i & 7u];
+        wifi_append(out, cap, used, " [%s op=%u %u.%u.%u.%u->%u.%u.%u.%u %02x:%02x->%02x:%02x]",
+                    r.out ? "TX" : "RX", r.op,
+                    r.spa[0], r.spa[1], r.spa[2], r.spa[3],
+                    r.tpa[0], r.tpa[1], r.tpa[2], r.tpa[3],
+                    r.src[4], r.src[5], r.dst[4], r.dst[5]);
+      }
+      wifi_append(out, cap, used, "\n");
+    }
     if (&diting_software_aes_state) {
       wifi_append(out, cap, used, "WIFI_AES state=%d kat=%u reg=%u done=%u nonce=%u unsup=%u\n",
                   diting_software_aes_state,

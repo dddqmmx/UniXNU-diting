@@ -18,6 +18,7 @@ int mhi_init_hook(void);
 int nw_qrtr_mhi_register(void);
 void nw_qrtr_mhi_unregister(void);
 void lx_irq_raise_all(void);
+unsigned nw_rx_backlog(void);
 
 struct nw_wifi_stats nw_wifi_stats;
 static int running;
@@ -100,6 +101,12 @@ int nw_wifi_step(void)
 {
     if (!running) return 0;
     const unsigned frames = nw_wifi_stats.frames;
+    struct ieee80211_hw *hw0 = nw_wifi_hw();
+    u32 tx_head0 = 0;
+    if (hw0 && hw0->priv) {
+        struct ath11k *ar0 = hw0->priv;
+        if (ar0->ab) tx_head0 = ar0->ab->dp.tx_ring[0].tx_status_head;
+    }
     if (firmware_error) return firmware_error;
     lx_irq_raise_all(); lx_pump();
     if (firmware_error) return firmware_error;
@@ -115,7 +122,13 @@ int nw_wifi_step(void)
     }
     if (firmware_error) return firmware_error;
     nw_sta_run();
-    return frames != nw_wifi_stats.frames || nw_sta_tx_pending();
+    u32 tx_head1 = tx_head0;
+    if (hw0 && hw0->priv) {
+        struct ath11k *ar0 = hw0->priv;
+        if (ar0->ab) tx_head1 = ar0->ab->dp.tx_ring[0].tx_status_head;
+    }
+    return frames != nw_wifi_stats.frames || tx_head1 != tx_head0 ||
+           nw_sta_tx_pending() || nw_rx_backlog();
 }
 void nw_wifi_stop(void)
 {

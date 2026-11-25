@@ -226,6 +226,194 @@ class WifiProtocol27Tests(unittest.TestCase):
             self.assertEqual(real_out.count("g_ops->vif_cfg_changed("), 1)
             self.assertGreaterEqual(real_out.count("drv_link_info_changed("), 2)
             self.assertGreaterEqual(real_out.count("drv_vif_cfg_changed("), 2)
+            # WMM Information Element in Association Request
+            self.assertIn("0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00", real_out)
+            # WMM EDCA parameter programming via conf_tx()
+            self.assertIn("diting_conf_wmm(C.ap.ie, C.ap.ie_len);", real_out)
+            self.assertIn("g_ops->conf_tx(g_hw, g_vif, 0, ac, &q[ac]);", real_out)
+            # Explicit STA power-save disable via BSS_CHANGED_PS
+            self.assertIn("g_vif->cfg.ps = false;", real_out)
+            self.assertIn("BSS_CHANGED_PS", real_out)
+            # RX Block Ack (ADDBA_REQ / ADDBA_RESP / DELBA) & 64-subframe window
+            self.assertIn("sta->max_rx_aggregation_subframes = 64;", real_out)
+            self.assertIn("IEEE80211_AMPDU_RX_START", real_out)
+            self.assertIn("IEEE80211_AMPDU_RX_STOP", real_out)
+            self.assertIn("WLAN_ACTION_ADDBA_RESP", real_out)
+            self.assertIn("diting_handle_action(skb);", real_out)
+            # Self-echo multicast/broadcast RX filter & ERP/DTIM params & 5 GHz preference
+            self.assertIn("memcmp(skb->data + 6, g_vif->addr, 6)", real_out)
+            self.assertIn("g_hw->conf.listen_interval = 10;", real_out)
+            self.assertIn("BSS_CHANGED_ERP_CTS_PROT", real_out)
+            self.assertIn("b->freq >= 4900 && b->signal >= -75", real_out)
+            # Assoc Req VHT cap parity & dynamic 2x2 RX chains
+            self.assertIn("cap.vht_cap_info = cpu_to_le32(vcap);", real_out)
+            self.assertIn("ctx->rx_chains_static = chains; ctx->rx_chains_dynamic = chains;", real_out)
+
+        real_mac = ROOT / "refer/ipados18/Ath12kWifi/src/nw_mac80211.c"
+        if real_mac.is_file():
+            mac_out = mod.adapt_nw_mac80211(real_mac.read_text())
+            self.assertIn("w->rts_threshold = (u32)-1;", mac_out)
+            self.assertIn("w->frag_threshold = (u32)-1;", mac_out)
+            self.assertIn("w->retry_short = 7;", mac_out)
+            self.assertIn("w->retry_long = 4;", mac_out)
+
+        real_hw = ROOT / "refer/ipados18/linux-7.0.14/drivers/net/wireless/ath/ath11k/hw.c"
+        if real_hw.is_file():
+            hw_out = mod.adapt_hw_c(real_hw.read_text())
+            self.assertIn("Single-worker strict-FIFO RX: route all 16 hash buckets to SW1.", hw_out)
+            self.assertIn("HAL_HASH_ROUTING_RING_SW1 << 28;", hw_out)
+
+    def test_diting_bdf_regdb_msi_and_slab_invariants(self):
+        ath_script = (ROOT / "scripts/build-diting-ath11k.py").read_text()
+        self.assertIn("bd_l12gf.elf", ath_script)
+        self.assertIn("bd_l12.elf", ath_script)
+        self.assertIn("bdwlang.elf", ath_script)
+        self.assertIn("diting_fallback", ath_script)
+
+        plat = (ROOT / "drivers/DitingWifi/DitingWifiPlatform.cpp").read_text()
+        self.assertIn("PcieMsi0Intid=32+141", plat)
+        self.assertIn("armcpu_spi_attach(PcieMsi0Intid", plat)
+        self.assertIn("regdb_xiaomi.bin", plat)
+        self.assertIn("SlabSlotBytes=2560u, SlabSlots=12288u", plat)
+        self.assertIn("waitWorkerUs(", plat)
+
+        net = (ROOT / "drivers/DitingWifi/DitingWifiNet.cpp").read_text()
+        self.assertIn("bpf_tap_in(gIf, DLT_EN10MB, m, const_cast<uint8_t *>(eth), 14);", net)
+        self.assertIn("bpf_tap_out(gIf, DLT_EN10MB, m, nullptr, 0);", net)
+
+    def test_dma_slab_allocator_behavior(self):
+        slab_harness = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static constexpr uint64_t Iova = 0xa0000000ULL;
+static constexpr size_t ArenaBytes = 64u * 1024u * 1024u;
+static constexpr uint32_t SlabSlotBytes = 2560u, SlabSlots = 12288u;
+static constexpr uint32_t SlabBytes = SlabSlotBytes * SlabSlots;
+static constexpr uint32_t GeneralBytes = uint32_t(ArenaBytes) - SlabBytes;
+static_assert((GeneralBytes & 4095u) == 0 && (SlabSlotBytes & 63u) == 0 && SlabBytes < ArenaBytes, "geom");
+
+struct Block { uint32_t at, bytes; bool used; };
+static Block blocks[16384];
+static unsigned blockCount;
+static uint16_t slabFree[SlabSlots];
+static unsigned slabTop;
+static uint8_t *arenaVa;
+
+static void dmaInit(void) {
+    blocks[0] = {0, GeneralBytes, false};
+    blockCount = 1;
+    for (unsigned i = 0; i < SlabSlots; ++i) slabFree[i] = uint16_t(SlabSlots - 1u - i);
+    slabTop = SlabSlots;
+}
+static void *dmaAlloc(size_t n, uint64_t *bus) {
+    if (!bus || !n || n > ArenaBytes) return nullptr;
+    n = (n + 63u) & ~size_t(63u);
+    if (n >= 4096u) n = (n + 4095u) & ~size_t(4095u);
+    if (n <= SlabSlotBytes && slabTop) {
+        const uint32_t slot = slabFree[--slabTop];
+        const uint32_t off = GeneralBytes + slot * SlabSlotBytes;
+        *bus = Iova + 4096u + off;
+        void *p = arenaVa + off;
+        memset(p, 0, n);
+        return p;
+    }
+    uint32_t align = 64u;
+    if (n >= 4096u) { align = 4096u; while (align < n) align <<= 1; }
+    for (unsigned i = 0; i < blockCount; ++i) {
+        auto b = blocks[i];
+        if (b.used) continue;
+        uint64_t addr = Iova + 4096u + b.at;
+        uint32_t pad = uint32_t((-addr) & (align - 1u));
+        if (n > b.bytes || pad > b.bytes - n) continue;
+        unsigned extra = (pad ? 1u : 0u) + (b.bytes > pad + n ? 1u : 0u);
+        if (blockCount + extra > 16384u) return nullptr;
+        memmove(blocks + i + extra, blocks + i, (blockCount - i) * sizeof(Block));
+        blockCount += extra;
+        unsigned at = i;
+        if (pad) blocks[at++] = {b.at, pad, false};
+        blocks[at] = {b.at + pad, uint32_t(n), true};
+        if (b.bytes > pad + n) blocks[at + 1] = {uint32_t(b.at + pad + n), uint32_t(b.bytes - pad - n), false};
+        *bus = Iova + 4096u + b.at + pad;
+        void *p = arenaVa + b.at + pad;
+        memset(p, 0, n);
+        return p;
+    }
+    return nullptr;
+}
+static void dmaFree(void *p) {
+    if (!p) return;
+    uintptr_t off = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(arenaVa);
+    if (off >= GeneralBytes && off < ArenaBytes) {
+        const uint32_t rel = uint32_t(off - GeneralBytes);
+        if ((rel % SlabSlotBytes) == 0 && slabTop < SlabSlots) slabFree[slabTop++] = uint16_t(rel / SlabSlotBytes);
+        return;
+    }
+    for (unsigned i = 0; i < blockCount; ++i) {
+        if (blocks[i].at == off && blocks[i].used) {
+            blocks[i].used = false;
+            if (i + 1 < blockCount && !blocks[i + 1].used) {
+                blocks[i].bytes += blocks[i + 1].bytes;
+                memmove(blocks + i + 1, blocks + i + 2, (blockCount - i - 2) * sizeof(Block));
+                --blockCount;
+            }
+            if (i && !blocks[i - 1].used) {
+                blocks[i - 1].bytes += blocks[i].bytes;
+                memmove(blocks + i, blocks + i + 1, (blockCount - i - 1) * sizeof(Block));
+                --blockCount;
+            }
+            return;
+        }
+    }
+}
+int main(void) {
+    arenaVa = static_cast<uint8_t *>(calloc(1, ArenaBytes));
+    assert(arenaVa != nullptr);
+    dmaInit();
+    // Allocate 8500 ath11k RX buffers (2304 B): blocks[] must remain untouched (count == 1)!
+    void *ptrs[SlabSlots + 16];
+    uint64_t bus = 0;
+    for (unsigned i = 0; i < 8500; ++i) {
+        ptrs[i] = dmaAlloc(2304, &bus);
+        assert(ptrs[i] != nullptr);
+        assert((bus & 511u) == 0);
+    }
+    assert(blockCount == 1);
+    assert(slabTop == SlabSlots - 8500);
+    // Exhaust the slab and verify seamless fallback to general pool.
+    for (unsigned i = 8500; i < SlabSlots + 8; ++i) {
+        ptrs[i] = dmaAlloc(2304, &bus);
+        assert(ptrs[i] != nullptr);
+        assert((bus & 63u) == 0);
+    }
+    assert(slabTop == 0);
+    assert(blockCount > 1);
+    // Large ring allocation goes straight to general pool with power-of-two alignment.
+    void *ring = dmaAlloc(65536, &bus);
+    assert(ring != nullptr && (bus & 65535u) == 0);
+    // Free everything and verify full slab recovery and complete general coalescing.
+    for (unsigned i = 0; i < SlabSlots + 8; ++i) dmaFree(ptrs[i]);
+    dmaFree(ring);
+    assert(slabTop == SlabSlots);
+    assert(blockCount == 1 && !blocks[0].used && blocks[0].at == 0 && blocks[0].bytes == GeneralBytes);
+    free(arenaVa);
+    puts("WIFI_DMA_SLAB_HOST_TESTS_PASS");
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "test_dma_slab.cpp"
+            exe = Path(tmp) / "test_dma_slab"
+            src.write_text(slab_harness)
+            subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", str(src), "-o", str(exe)],
+                check=True,
+            )
+            res = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            self.assertIn("WIFI_DMA_SLAB_HOST_TESTS_PASS", res.stdout)
 
 
 if __name__ == "__main__":

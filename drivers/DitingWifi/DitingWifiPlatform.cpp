@@ -44,8 +44,17 @@ namespace {
 #include "../NativeUfs/SmmuTakeover.h"
 constexpr uint64_t Iova=0xa0000000;
 constexpr unsigned MsiAddressLo=0x820, MsiAddressHi=0x824, MsiEnable=0x828, MsiMask=0x82c, MsiStatus=0x830;
-constexpr unsigned PcieGlobalIntid=32+140, ParfMsi0=1u<<23;
+// SM8450/SM8475 PCIe0 (sm8450.dtsi): SPI 141..148 are DesignWare MSI groups
+// msi0..msi7 (level-high); SPI 140 is PARF global_int.
+constexpr unsigned PcieGlobalIntid=32+140, PcieMsi0Intid=32+141, ParfMsi0=1u<<23;
 constexpr size_t ArenaBytes=64*1024*1024, TableBytes=512*1024;
+// Upper 30 MiB of the 64 MiB DMA arena is a 512-byte-aligned O(1) packet slab
+// (12,288 x 2,560 B slots) covering all 2,304 B ath11k RX buffers and <=2,560 B
+// TX Ethernet sk_buffs without scanning or shifting blocks[].
+constexpr uint32_t SlabSlotBytes=2560u, SlabSlots=12288u;
+constexpr uint32_t SlabBytes=SlabSlotBytes*SlabSlots; // 30 MiB (0x1e00000)
+constexpr uint32_t GeneralBytes=uint32_t(ArenaBytes)-SlabBytes; // 34 MiB (0x2200000)
+static_assert((GeneralBytes & 4095u) == 0 && (SlabSlotBytes & 63u) == 0 && SlabBytes < ArenaBytes, "DMA slab geometry");
 struct Window {
  IOMemoryMap *map=nullptr; volatile uint8_t *v=nullptr; size_t n=0;
  bool open(uint64_t pa,size_t bytes) {
@@ -534,8 +543,21 @@ bool isolation() {
  dmaOwned=true;log(6,"exclusive SID1c01 native4K DMA and retained MSI landing page established");return true;
 }
 struct Block {uint32_t at,bytes;bool used;};Block blocks[16384];unsigned blockCount;
+uint16_t slabFree[SlabSlots];unsigned slabTop;
+char loadedBdfName[32];char loadedRegdbName[32];
+uint32_t bdfPaValid;uint64_t bdfHostData;int bdfPaKind;
+void dmaInit() {
+ blocks[0]={0,GeneralBytes,false};blockCount=1;
+ for(unsigned i=0;i<SlabSlots;i++)slabFree[i]=uint16_t(SlabSlots-1u-i);
+ slabTop=SlabSlots;
+}
 void *dmaAlloc(size_t n,uint64_t *bus) {
  if(!bus||!n||n>ArenaBytes)return nullptr;n=(n+63)&~size_t(63);if(n>=4096)n=(n+4095)&~size_t(4095);
+ if(n<=SlabSlotBytes&&slabTop) {
+  const uint32_t slot=slabFree[--slabTop];
+  const uint32_t off=GeneralBytes+slot*SlabSlotBytes;
+  *bus=Iova+4096+off;void *p=arenaVa+off;bzero(p,n);return p;
+ }
  uint32_t align=64;if(n>=4096){align=4096;while(align<n)align<<=1;}
  for(unsigned i=0;i<blockCount;i++){auto b=blocks[i];if(b.used)continue;uint64_t addr=Iova+4096+b.at;uint32_t pad=uint32_t((-addr)&(align-1));if(n>b.bytes||pad>b.bytes-n)continue;
   unsigned extra=(pad?1:0)+(b.bytes>pad+n?1:0);if(blockCount+extra>16384)return nullptr;
@@ -544,7 +566,16 @@ void *dmaAlloc(size_t n,uint64_t *bus) {
   *bus=Iova+4096+b.at+pad;void *p=arenaVa+b.at+pad;bzero(p,n);return p;
  }return nullptr;
 }
-void dmaFree(size_t,void *p,uint64_t) {uintptr_t off=reinterpret_cast<uintptr_t>(p)-reinterpret_cast<uintptr_t>(arenaVa);for(unsigned i=0;i<blockCount;i++)if(blocks[i].at==off&&blocks[i].used){blocks[i].used=false;if(i+1<blockCount&&!blocks[i+1].used){blocks[i].bytes+=blocks[i+1].bytes;memmove(blocks+i+1,blocks+i+2,(blockCount-i-2)*sizeof(Block));--blockCount;}if(i&&!blocks[i-1].used){blocks[i-1].bytes+=blocks[i].bytes;memmove(blocks+i,blocks+i+1,(blockCount-i-1)*sizeof(Block));--blockCount;}return;}}
+void dmaFree(size_t,void *p,uint64_t) {
+ if(!p)return;
+ uintptr_t off=reinterpret_cast<uintptr_t>(p)-reinterpret_cast<uintptr_t>(arenaVa);
+ if(off>=GeneralBytes&&off<ArenaBytes) {
+  const uint32_t rel=uint32_t(off-GeneralBytes);
+  if((rel%SlabSlotBytes)==0&&slabTop<SlabSlots)slabFree[slabTop++]=uint16_t(rel/SlabSlotBytes);
+  return;
+ }
+ for(unsigned i=0;i<blockCount;i++)if(blocks[i].at==off&&blocks[i].used){blocks[i].used=false;if(i+1<blockCount&&!blocks[i+1].used){blocks[i].bytes+=blocks[i+1].bytes;memmove(blocks+i+1,blocks+i+2,(blockCount-i-2)*sizeof(Block));--blockCount;}if(i&&!blocks[i-1].used){blocks[i-1].bytes+=blocks[i].bytes;memmove(blocks+i,blocks+i+1,(blockCount-i-1)*sizeof(Block));--blockCount;}return;}
+}
 uint64_t dmaMap(void *p,size_t n,int) {uintptr_t off=reinterpret_cast<uintptr_t>(p)-reinterpret_cast<uintptr_t>(arenaVa);return off<ArenaBytes&&n<=ArenaBytes-off?Iova+4096+off:0;}
 void dmaSync(uint64_t bus,size_t n,int) {if(bus<Iova+4096||bus-(Iova+4096)>=ArenaBytes||n>ArenaBytes-(bus-(Iova+4096)))return;__asm__ volatile("dsb sy":::"memory");}
 
@@ -614,25 +645,34 @@ int fwGet(const char *path,const uint8_t **data,size_t *size) {
   if(c>(16384u-8u)/40u){IOFreeData(h,16384);return -1;}
   fwHdr=h;fwCount=c;
  }
+ // Xiaomi CNSS2 (cnss2/qmi.c CNSS_BDF_REGDB) loads regdb_xiaomi.bin.
+ // Prefer it when present in PWF2, falling back cleanly to regdb.bin.
+ const char *candidates[2]={name,nullptr};
+ if(!strcmp(name,"regdb.bin")){candidates[0]="regdb_xiaomi.bin";candidates[1]="regdb.bin";}
  struct FwCache { char name[32]; uint8_t *buf; size_t len; };
  static FwCache cache[12];
  static unsigned cacheUsed;
- for(unsigned i=0;i<cacheUsed;i++) {
-  if(!strcmp(cache[i].name,name)){*data=cache[i].buf;*size=cache[i].len;return 0;}
- }
- for(unsigned i=0;i<fwCount;i++) {
-  const uint8_t *e=fwHdr+8+i*40;
-  if(strnlen(reinterpret_cast<const char *>(e),32)>=32||strcmp(reinterpret_cast<const char *>(e),name))continue;
-  unsigned off=0,len=0;memcpy(&off,e+32,4);memcpy(&len,e+36,4);
-  if((off&4095u)||!len||len>16u*1024u*1024u)return -1;
-  const uint32_t aligned=(len+4095u)&~4095u;
-  auto *buf=static_cast<uint8_t *>(IOMallocData(aligned));
-  if(!buf)return -1;
-  if(diting_ufs_read_fw_blocks(off>>12,buf,aligned)){IOFreeData(buf,aligned);return -1;}
-  if(cacheUsed<12){strlcpy(cache[cacheUsed].name,name,32);cache[cacheUsed].buf=buf;cache[cacheUsed].len=len;++cacheUsed;}
-  *data=buf;*size=len;
-  IOLog("DitingWifi: UFS PWF2 firmware %s off=0x%x bytes=%u\n",name,off,len);
-  return 0;
+ for(unsigned ci=0;ci<2&&candidates[ci];++ci) {
+  const char *want=candidates[ci];
+  for(unsigned i=0;i<cacheUsed;i++) {
+   if(!strcmp(cache[i].name,want)){*data=cache[i].buf;*size=cache[i].len;return 0;}
+  }
+  for(unsigned i=0;i<fwCount;i++) {
+   const uint8_t *e=fwHdr+8+i*40;
+   if(strnlen(reinterpret_cast<const char *>(e),32)>=32||strcmp(reinterpret_cast<const char *>(e),want))continue;
+   unsigned off=0,len=0;memcpy(&off,e+32,4);memcpy(&len,e+36,4);
+   if((off&4095u)||!len||len>16u*1024u*1024u)return -1;
+   const uint32_t aligned=(len+4095u)&~4095u;
+   auto *buf=static_cast<uint8_t *>(IOMallocData(aligned));
+   if(!buf)return -1;
+   if(diting_ufs_read_fw_blocks(off>>12,buf,aligned)){IOFreeData(buf,aligned);return -1;}
+   if(cacheUsed<12){strlcpy(cache[cacheUsed].name,want,32);cache[cacheUsed].buf=buf;cache[cacheUsed].len=len;++cacheUsed;}
+   if(!strncmp(want,"bd",2))strlcpy(loadedBdfName,want,sizeof(loadedBdfName));
+   if(!strncmp(want,"regdb",5))strlcpy(loadedRegdbName,want,sizeof(loadedRegdbName));
+   *data=buf;*size=len;
+   IOLog("DitingWifi: UFS PWF2 firmware %s off=0x%x bytes=%u\n",want,off,len);
+   return 0;
+  }
  }
  return -1;
 #else
@@ -647,12 +687,12 @@ int msiTarget(uint32_t *lo,uint32_t *hi,uint32_t *data) {if(!dmaOwned)return -1;
 void *mapPhys(uint64_t pa,size_t n) {if(pa>=0x60200000&&pa<0x60400000&&n<=0x60400000-pa)return const_cast<uint8_t *>(bar.v)+pa-0x60200000;return nullptr;}
 volatile uint32_t msiArrivals;
 void signalWorker() {__atomic_store_n(&wake,1,__ATOMIC_RELEASE);thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
-void waitWorker(unsigned ms) {
+void waitWorkerUs(unsigned us) {
  // UniXNU's MSI/TX wait: arm before rechecking, so an event in the gap
  // cannot be lost. Leave events arriving after thread_block for the next
  // iteration instead of unconditionally clearing them on return.
  if(__atomic_exchange_n(&wake,0u,__ATOMIC_ACQ_REL))return;
- assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,ms,kMillisecondScale);
+ assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,us,kMicrosecondScale);
  if(__atomic_exchange_n(&wake,0u,__ATOMIC_ACQ_REL)){
   clear_wait(current_thread(),THREAD_AWAKENED);return;
  }
@@ -661,9 +701,8 @@ void waitWorker(unsigned ms) {
 void irq(void *) {
  unsigned pending=dbi.r(MsiStatus);
  if(pending){dbi.w(MsiStatus,pending);__atomic_fetch_add(&msiArrivals,1,__ATOMIC_RELAXED);}
- // Only this port's MSI group is enabled in PARF. Drop the aggregator's
- // level before EOI; no unrelated PCIe status is acknowledged here.
- parf.w(0x228,ParfMsi0);
+ // Clear any mirrored PARF MSI0 status bit if asserted.
+ if(parf.r(0x224)&ParfMsi0)parf.w(0x228,ParfMsi0);
  static unsigned empty;
  empty=pending?0:empty+1;
  if(empty>=64){dbi.w(MsiEnable,0);parf.w(0x22c,parf.r(0x22c)&~ParfMsi0);}
@@ -686,23 +725,26 @@ void worker(void *,wait_result_t) {
  dbi.w(MsiAddressLo,unsigned(Iova+0x40));dbi.w(MsiAddressHi,unsigned((Iova+0x40)>>32));
  parf.w(0x22c,0);parf.w(0x228,ParfMsi0);
  {uint32_t ctl=0;uint64_t route=0;
-  if(armcpu_spi_attach(PcieGlobalIntid,false,irq,nullptr,&ctl,&route)){fail("PCIe0 SPI140 MSI receiver attach failed");goto done;}}
- dbi.w(MsiMask,0);dbi.w(MsiEnable,~0u);parf.w(0x22c,ParfMsi0);
- log(6,"DesignWare MSI receiver armed on Diting PCIe0 SPI140");
- blocks[0]={0,uint32_t(ArenaBytes),false};blockCount=1;
+  if(armcpu_spi_attach(PcieMsi0Intid,false,irq,nullptr,&ctl,&route)){fail("PCIe0 SPI141 msi0 receiver attach failed");goto done;}}
+ dbi.w(MsiMask,0);dbi.w(MsiEnable,~0u);
+ log(6,"DesignWare MSI receiver armed on Diting PCIe0 SPI141 (msi0)");
+ dmaInit();
  {static const lx_platform platform={now,sleep,poll,log,halt,alloc,freeHeap,dmaAlloc,dmaFree,dmaMap,dmaSync,fwGet};
   static nw_board board;board={const_cast<uint8_t *>(bar.v),0x200000,0x1103,uint16_t(msiCap),800,cfgRead,cfgWrite,msiTarget,mapPhys};
   if(cfgWrite(4,2,6))goto done;
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("DitingWifi: ath11k start failed=%d\n",r);goto done;}
  }
- {bool net=false,irqSeen=false;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
+ {bool net=false,irqSeen=false;unsigned burst=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC SPI141");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
    if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      publishMacProps(st.mac, true);
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
      DitingWifiNetStaticInit();if(OSMetaClass::postModLoad(handle)!=kIOReturnSuccess)goto done;
      diting_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
    }}
-   waitWorker(busy?1:10);
+   if(busy&&++burst<64)continue;
+   burst=0;
+   const unsigned idleUs=__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)?10000u:1000u;
+   waitWorkerUs(busy?250u:idleUs);
  }}
  done: stopped=1;
  diting_wifi_net_failed();
@@ -716,6 +758,9 @@ void worker(void *,wait_result_t) {
 extern "C" void DitingWifiRandom(void *p,size_t n) {while(n){unsigned part=n>4096?4096:unsigned(n);read_random(p,part);p=static_cast<uint8_t *>(p)+part;n-=part;}}
 extern "C" int diting_wifi_bdf_power_config(unsigned valid,uint64_t hostData) {
  const DitingWifiPa pa=diting_wifi_pa(valid,hostData);
+ bdfPaValid=valid;bdfHostData=hostData;bdfPaKind=int(pa);
+ IOLog("DitingWifi: BDF PA response bdf=%s valid=%u hostData=0x%llx pa=%d\n",
+       loadedBdfName[0]?loadedBdfName:"?",valid,static_cast<unsigned long long>(hostData),int(pa));
  checkpoint("BDF power amplifier type","smpe3",pa==DitingWifiPaUnknown?"SKIP":"PASS",valid,unsigned(hostData));
  if(pa==DitingWifiPaUnknown) {
   // Match CNSS's absent-TLV behavior without guessing a board variant.
@@ -734,6 +779,19 @@ extern "C" int diting_wifi_bdf_power_config(unsigned valid,uint64_t hostData) {
  if(!ok)return -1;
  configured=true;
  return 0;
+}
+extern "C" void diting_wifi_hw_diag(uint32_t *msi,uint32_t *blocksUsed,uint32_t *slabUsed,uint32_t *slabTotal,
+                                    int *paKind,uint32_t *paValid,uint64_t *hostData,
+                                    const char **bdfName,const char **regdbName) {
+ if(msi)*msi=__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED);
+ if(blocksUsed)*blocksUsed=blockCount;
+ if(slabUsed)*slabUsed=SlabSlots-slabTop;
+ if(slabTotal)*slabTotal=SlabSlots;
+ if(paKind)*paKind=bdfPaKind;
+ if(paValid)*paValid=bdfPaValid;
+ if(hostData)*hostData=bdfHostData;
+ if(bdfName)*bdfName=loadedBdfName[0]?loadedBdfName:"none";
+ if(regdbName)*regdbName=loadedRegdbName[0]?loadedRegdbName:"none";
 }
 extern "C" void diting_wifi_wake(void) {signalWorker();}
 extern "C" void native_wifi_logf(int level,const char *fmt,...) {char line[256];va_list a;va_start(a,fmt);vsnprintf(line,sizeof line,fmt,a);va_end(a);log(level,line);}
