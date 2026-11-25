@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Derived from UniXNU-sheng; Diting has only a physical stereo output.
 // The built-in audio device for the iOS audio server: one device with a stereo output stream (Diting speakers); no capture stream is exposed.
-// Samples move through rings shared with the kernel service ShengAudio (package/ShengAudioAbi.h); the service
+// Samples move through rings shared with the kernel service DitingAudio (DitingAudioAbi.h); the service
 // feeds the audio DSP. Objects: the plug-in (1), the device (2), the output stream (3), the input stream (4), the output volume (5).
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -16,7 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <syslog.h>
-#include "ShengAudioAbi.h"
+#include "DitingAudioAbi.h"
 #define DITING_ROUTE_LOG(...) syslog(LOG_NOTICE,__VA_ARGS__)
 #include "DitingAudioRoute.h"
 #undef DITING_ROUTE_LOG

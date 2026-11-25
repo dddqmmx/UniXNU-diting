@@ -21,7 +21,7 @@
 #include "DitingPmicGlink.h"
 #include "DitingUcsi.h"
 extern "C" {
-#include "ShengAdsp.h"
+#include "DitingAdsp.h"
 }
 
 extern "C" ShengAdspChannel *sheng_adsp_channel(const char *, uint32_t, uint32_t, int, const ShengAdspClient *, void *)

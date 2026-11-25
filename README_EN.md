@@ -2,10 +2,9 @@
 
 [简体中文](README.md) | **English**
 
-Format 2 device support for Redmi K50 Ultra, codename **diting**, Qualcomm **SM8475**. Main targets **iPadOS 18.7.10 (22H374)** from iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69. The board remains Diting. The earlier iOS16 implementation remains in Git history.
+Format 2 independent device port for Redmi K50 Ultra, codename **diting**, Qualcomm **SM8475** (originally derived from [UniXNU](https://github.com/UniXNU/UniXNU) and the community SM8475 Pong work [Chengdong-Yu/UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong)). The default target is **iOS 27.2.1 (24B156)** (`arm64e`, iPhone18,2 / V54AP, built on the public XNU 12377.121.6 / Darwin 25.5.0 source kernel with strict 24B156 MH_FILESET prelinking). See the [27.2.1 port record](migration/ios27/README.zh.md) for restore selection, build commands, and hardware qualification details.
 
-An independent **iOS 27.2.1 (24B156)** arm64e target now has exact restore selection and isolated source/toolchain preparation.
-See the [27.2.1 port record](migration/ios27/README.zh.md) for build commands and outstanding binary ABI and hardware qualification.
+The legacy **iPadOS 18.7.10 (22H374)** (`arm64`, iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69) port remains preserved under `[os_overrides."ipados-18.7.10-22H374"]` in `board.toml` (`--os ipados-18.7.10-22H374`). The earlier iOS16 implementation remains in Git history.
 
 - [UniXNU tools](https://github.com/UniXNU/UniXNU), [Diting UEFI](https://github.com/Chengdong-Yu/uefi-pong)
 - Official [migration](https://unixnu.com/en/porting/migration) and [device repository](https://unixnu.com/en/porting/device-repository) guides
@@ -178,13 +177,21 @@ Without `ipsw_url` the userdata job reports `staged=false` and stops. That is no
 - No artifact has been on real hardware. CI validates container structure and packaged contents, not booting.
 - The prelink slide is not yet expressed for this board, so the `prelink` path uses the local fixed base; that path has not been verified on a runner.
 
+## Origin and credits
+
+`UniXNU-diting` is maintained as an independent device port repository (preserving full Git commit history, copyright notices, and per-component license files). It builds upon and gratefully acknowledges:
+
+- [UniXNU](https://github.com/UniXNU/UniXNU): core UEFI/XNU build framework, ARM64 support, OS profiles, and reusable driver components (`BSD-2-Clause-Patent`).
+- [Chengdong-Yu/UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong) (`Chengdong-Yu/pong-*`, [Chengdong-Yu/uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)): original community SM8475 / Pong device port and driver foundation from which the vendored `DitingPlatform24` drivers and SM8475 SoC seed were derived.
+- [57UU/UniXNU-sirius](https://github.com/57UU/UniXNU-sirius): Linux cross-compilation toolchain workflow reference.
+
 ## Source boundaries and license
 
 Only source, configuration, patches and scripts are published. IPSWs, Apple private binaries, firmware, credentials and generated userdata remain local and ignored. Machine paths belong in local configuration.
 
-`DitingPlatform24` identifies the community A730/QCA6490 implementation (derived from the Diting work), independently of the upstream A740/WCN7850 driver. The versioned SM8475 seed is kept under `migration/format2/soc-seed`.
+`DitingPlatform24` identifies the community A730/QCA6490 implementation (originally derived from the community Pong SM8475 work, [Chengdong-Yu/UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong)), independently of the upstream A740/WCN7850 driver. The versioned SM8475 seed is kept under `migration/format2/soc-seed`.
 
-Board code uses BSD-2-Clause-Patent. Imported components retain their licenses and SPDX identifiers; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Board code uses [BSD-2-Clause-Patent](LICENSE). Imported components retain their original licenses, copyright headers, and SPDX identifiers; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Disclaimer and trademarks
 

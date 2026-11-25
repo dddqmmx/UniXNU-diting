@@ -32,7 +32,9 @@ def main():
     tree.mkdir(parents=True,exist_ok=True)
     local=DEVICE/'local.toml'
     overrides=tomllib.loads(local.read_text()).get('source',[]) if local.exists() else []
-    refs=[r for r in tomllib.loads((DEVICE/'feeds.toml').read_text())['source'] if r['kind']=='refer']
+    ipados18_profile=DEVICE/'os-profiles/ipados-18.7.10-22H374/profile.toml'
+    source_docs=[tomllib.loads(p.read_text()) for p in (ipados18_profile, DEVICE/'feeds.toml') if p.is_file()]
+    refs=[r for doc in source_docs for r in doc.get('source',[]) if r.get('kind')=='refer']
     for ref in refs:
         override=next((s for s in overrides if s.get('kind')=='refer' and s.get('name')==ref['name']),{})
         src=Path(override['local']).expanduser() if override.get('local') else DEVICE/'refer/ipados18'/ref['ref']
@@ -89,7 +91,11 @@ def main():
         # The board names its defconfig in [kernel] defconfig; do not assume the
         # shipping one (the CI runs the reduced configuration).
         board=tomllib.loads((DEVICE/'board.toml').read_text())
-        config_path=DEVICE/'configs'/(board.get('kernel',{}).get('defconfig') or 'diting_ipados18_defconfig')
+        ipados18=board.get('os_overrides',{}).get('ipados-18.7.10-22H374',{})
+        defconfig=(ipados18.get('kernel',{}).get('defconfig')
+                   or board.get('package',{}).get('defconfig',{}).get('ipados-18.7.10-22H374')
+                   or 'diting_ipados18_defconfig')
+        config_path=DEVICE/'configs'/defconfig
     resolved=config_path.read_text()
     print(f"recipe config: {config_path}", flush=True)
     for probe in ('CONFIG_XNU_DITING_WIFI=', 'CONFIG_XNU_DITING_BACKLIGHT=', 'CONFIG_XNU_DITING_ADRENO_PLATFORM='):

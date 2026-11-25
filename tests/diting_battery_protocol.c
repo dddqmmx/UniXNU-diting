@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "ShengBattmgr.h"
+#include "DitingBattmgr.h"
 #include "DitingBatteryInbox.h"
 #include "DitingBatteryState.h"
 #include "DitingPmicGlink.h"

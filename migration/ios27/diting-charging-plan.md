@@ -165,7 +165,7 @@ flowchart LR
 - **涉及文件**：
   - [DitingAdsp.cpp](../../drivers/DitingPower/DitingAdsp.cpp#L428-L472)
   - [DitingBattery.cpp](../../drivers/DitingPower/DitingBattery.cpp#L336-L344)
-  - [ShengBattmgr.h](../../drivers/DitingPower/ShengBattmgr.h#L15)
+  - [DitingBattmgr.h](../../drivers/DitingPower/DitingBattmgr.h#L15)
   - 新增：`drivers/DitingPower/DitingPmicGlink.cpp/.h`、`drivers/DitingPower/DitingUcsi.c/.h`
 - **实现内容**：
   1. 将 `PMIC_RTR_ADSP_APPS` GLINK 通道从 `DitingBattery` 中抽离为共享多路复用层 `DitingPmicGlink`，按 12 字节消息头中的 `owner` 字段路由：
@@ -179,8 +179,8 @@ flowchart LR
 
 #### 2.2 安全受控的 Battmgr 充电属性写入（温控与限流）
 - **涉及文件**：
-  - [ShengBattmgr.h](../../drivers/DitingPower/ShengBattmgr.h#L20-L23)
-  - [ShengBattmgr.c](../../drivers/DitingPower/ShengBattmgr.c)
+  - [DitingBattmgr.h](../../drivers/DitingPower/DitingBattmgr.h#L20-L23)
+  - [DitingBattmgr.c](../../drivers/DitingPower/DitingBattmgr.c)
   - [DitingBattery.cpp](../../drivers/DitingPower/DitingBattery.cpp)
 - **参考协议**：固定参考 `LineageOS/android_kernel_xiaomi_sm8450` (`eff4b40407a1b6f1b1ab84554cbb540bcb495175`) `drivers/power/supply/qti_battery_charger.{h,c}` 与真机 [diting.dts](../../dts/diting.dts#L982-L993)（`qcom,thermal-mitigation = <3000000 1500000 1000000 500000>`）。
 - **实现内容**：
@@ -202,7 +202,7 @@ flowchart LR
 - **涉及文件**：[DitingBattery.cpp](../../drivers/DitingPower/DitingBattery.cpp#L140-L233)、[DitingBatteryState.h](../../drivers/DitingPower/DitingBatteryState.h)
 - **实现内容**：
   1. 校验插拔电脑 USB 与墙插头时 `AdapterDetails`（`FamilyCode`、`Watts`、`AdapterVoltage`、`Current`）、`IsCharging`、`ExternalConnected`、`ExternalChargeCapable`、`InstantAmperage` 的及时更新，确保状态栏闪电图标与“设置 → 电池”状态准确。
-  2. 改善低电保护策略：当前 [ShengBattmgr.c](../../drivers/DitingPower/ShengBattmgr.c#L260) 仅在 `!s->external && s->percent <= 2` 时上报 `critical`；但插着弱功率 USB 边充边掉电（`s->external == 1` 且 `current_ma < 0`、`voltage_mv < 3450 mV` 或 `percent <= 1`）时也应标记低电告警/触发干净关机，避免跌到硬件欠压直接硬掉电进 fastboot。
+  2. 改善低电保护策略：当前 [DitingBattmgr.c](../../drivers/DitingPower/DitingBattmgr.c#L260) 仅在 `!s->external && s->percent <= 2` 时上报 `critical`；但插着弱功率 USB 边充边掉电（`s->external == 1` 且 `current_ma < 0`、`voltage_mv < 3450 mV` 或 `percent <= 1`）时也应标记低电告警/触发干净关机，避免跌到硬件欠压直接硬掉电进 fastboot。
 
 ---
 

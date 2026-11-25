@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       ipsw_url:
-        description: "IPSW URL (default: board.toml [ipsw] url)"
+        description: "IPSW URL (default: board.toml ipados-18.7.10-22H374 override [ipsw] url)"
         required: false
         type: string
       gpu_runtime:
@@ -110,7 +110,7 @@ jobs:
           set -euo pipefail
           url="${{ inputs.ipsw_url }}"
           if [ -z "$url" ]; then
-            url="$(python3 -c "import tomllib; print(tomllib.load(open('device/board.toml','rb'))['ipsw']['url'])")"
+            url="$(python3 -c "import tomllib; b=tomllib.load(open('device/board.toml','rb')); print(b.get('os_overrides',{}).get('ipados-18.7.10-22H374',{}).get('ipsw',{}).get('url') or b['ipsw']['url'])")"
           fi
           case "$url" in
             https://*) ;;

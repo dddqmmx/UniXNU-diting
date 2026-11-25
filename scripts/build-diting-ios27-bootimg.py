@@ -312,7 +312,8 @@ def main():
         shutil.copyfile(args.gpu_addon, payload / 'kernel.macho.gpuaddon')
         gpu_addon_bytes = args.gpu_addon.stat().st_size
 
-    base_args = list(board['os_overrides']['ios-27.2.1-24B156']['payload']['kernel_args'])
+    override = board.get('os_overrides', {}).get('ios-27.2.1-24B156', {})
+    base_args = list(override.get('payload', {}).get('kernel_args') or board['payload']['kernel_args'])
     extra = [item for value in args.kernel_arg for item in value.split()]
     extra_keys = {item.split('=', 1)[0] for item in extra}
     final_args = [a for a in base_args if a.split('=', 1)[0] not in extra_keys] + extra

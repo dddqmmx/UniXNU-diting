@@ -2,7 +2,7 @@
 """Fetch only the IPSW members selected by board.toml, using HTTP ranges.
 
 The name is historical: this is the shared restore/ZIP range reader. It reads
-whatever board.toml declares, which is the 22H374 iPadOS 18 restore.
+whatever board.toml declares (currently the 24B156 iOS 27.2.1 restore).
 
 No IPSW archive is downloaded as a whole and no member checksum is computed.
 The extracted restore files are local build inputs and belong under the ignored
@@ -151,6 +151,7 @@ def main():
     identity = next(item for item in manifest['BuildIdentities']
         if item['Info']['DeviceClass'] == board['device_class']
         and item['Info']['RestoreBehavior'] == 'Erase'
+        and (not board.get('variant') or item['Info'].get('Variant') == board['variant'])
         and int(item['ApChipID'], 16) == board['chip_id']
         and int(item['ApBoardID'], 16) == board['board_id'])
 

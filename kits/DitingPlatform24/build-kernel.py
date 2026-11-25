@@ -47,18 +47,21 @@ def seed_refer(device, sources):
     """
     refer = device / 'refer/ipados18'
     refer.mkdir(parents=True, exist_ok=True)
-    for source in tomllib.loads((device / 'feeds.toml').read_text()).get('source', []):
-        if source.get('kind') != 'refer':
-            continue
-        target = sources / 'refer' / source['name']
-        link = refer / source['ref']
-        if not target.is_dir():
-            raise SystemExit(f'{target} missing: the kernel step fetches the Apple sources before this recipe runs')
-        if link.is_symlink() or link.exists():
-            if link.resolve() == target.resolve():
+    ipados18_profile = device / 'os-profiles/ipados-18.7.10-22H374/profile.toml'
+    source_files = [path for path in (ipados18_profile, device / 'feeds.toml') if path.is_file()]
+    for source_file in source_files:
+        for source in tomllib.loads(source_file.read_text()).get('source', []):
+            if source.get('kind') != 'refer':
                 continue
-            raise SystemExit(f'{link} already points elsewhere; remove it and rerun')
-        link.symlink_to(target.resolve())
+            target = sources / 'refer' / source['name']
+            link = refer / source['ref']
+            if not target.is_dir():
+                raise SystemExit(f'{target} missing: the kernel step fetches the Apple sources before this recipe runs')
+            if link.is_symlink() or link.exists():
+                if link.resolve() == target.resolve():
+                    continue
+                raise SystemExit(f'{link} already points elsewhere; remove it and rerun')
+            link.symlink_to(target.resolve())
 
 
 def hardware_dtb(device, tree, given=None):

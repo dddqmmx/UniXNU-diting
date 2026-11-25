@@ -6,7 +6,7 @@
 #include <IOKit/IOLocks.h>
 #include "DitingPmicGlink.h"
 extern "C" {
-#include "ShengAdsp.h"
+#include "DitingAdsp.h"
 }
 
 extern "C" ShengAdspChannel *sheng_adsp_channel(const char *, uint32_t, uint32_t, int, const ShengAdspClient *, void *)

@@ -8,7 +8,7 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
-#include "ShengAudioAbi.h"
+#include "DitingAudioAbi.h"
 
 extern "C" IOBufferMemoryDescriptor *sheng_audio_memory(uint32_t type);   // retained; null when absent
 extern "C" int sheng_audio_request(uint32_t selector);                     // 0 accepted

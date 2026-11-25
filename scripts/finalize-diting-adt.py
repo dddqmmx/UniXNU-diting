@@ -147,7 +147,11 @@ def main():
 
     layout = json.loads(args.volume_layout.read_text()) if args.volume_layout else {}
     root_uuid = (layout.get('os') or {}).get('uuid')
-    chip_id = args.chip_id or str(board.get('payload', {}).get('adt', {}).get('chip_id', '0x8010'))
+    os_override = board.get('os_overrides', {}).get(work.parent.name, {})
+    chip_id = args.chip_id or str(
+        os_override.get('payload', {}).get('adt', {}).get('chip_id')
+        or board.get('payload', {}).get('adt', {}).get('chip_id', '0x8010')
+    )
 
     config = read_member(payload, '/EFI/UniXNU/unixnu.toml')
     if config is None:

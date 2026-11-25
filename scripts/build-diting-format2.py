@@ -23,7 +23,7 @@ def main():
     migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
     state=migration.install(up, ROOT.parent/'UniXNU-sm8475-common')
     command=[sys.executable,str(up/'unixnu')]
-    common=['-D',str(ROOT),'--out',str(out)]
+    common=['-D',str(ROOT),'--os','ipados-18.7.10-22H374','--out',str(out)]
     subprocess.run(command+['defconfig', a.defconfig, *common],cwd=up,check=True)
     report=json.loads(subprocess.check_output(command+['status','--json',*common],cwd=up,text=True))
     work=Path(report['output']);work.mkdir(parents=True,exist_ok=True)

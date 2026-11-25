@@ -70,8 +70,10 @@ def install(unixnu, soc):
         raise RuntimeError('Unrecognized local.toml tables retained; adapt them before writing overrides')
     entries = { (x['kind'], x['name']): x for x in doc.get('source', []) }
     paths = [('soc', 'sm8475', soc), ('kit', 'DitingPlatform24', ROOT)]
-    paths += [('refer', x['name'], ROOT / 'refer/ipados18' / x['ref'])
-              for x in tomllib.loads((ROOT / 'feeds.toml').read_text())['source'] if x['kind'] == 'refer']
+    ipados18_profile = ROOT / 'os-profiles/ipados-18.7.10-22H374/profile.toml'
+    refer_sources = [x for path in (ipados18_profile, ROOT / 'feeds.toml') if path.is_file()
+                     for x in tomllib.loads(path.read_text()).get('source', []) if x.get('kind') == 'refer']
+    paths += [('refer', x['name'], ROOT / 'refer/ipados18' / x['ref']) for x in refer_sources]
     for kind, name, path in paths:
         entries[(kind, name)] = dict(kind=kind, name=name, local=str(path))
     text = '# Local source overrides; do not commit absolute paths.\n'

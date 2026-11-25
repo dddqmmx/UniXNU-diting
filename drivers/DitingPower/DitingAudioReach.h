@@ -4,8 +4,8 @@
  * carries the connection into the device graph. Instance numbers follow the board topology (device subgraph 0x4005 for the secondary
  * MI2S speakers, 0x4007 for codec DMA TX3, stream subgraphs 0x4001 playback and 0x4003 capture). Each packet stays within one GLINK
  * intent (GPR_MAX_PACKET). Pure encoding: no I/O, no waits. */
-#ifndef SHENG_AUDIOREACH_H
-#define SHENG_AUDIOREACH_H
+#ifndef DITING_AUDIOREACH_H
+#define DITING_AUDIOREACH_H
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {

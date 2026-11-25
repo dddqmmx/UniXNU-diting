@@ -19,7 +19,7 @@ kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomSmp2p.h"
 #include "DitingAdspBoard.h"
 #include "DitingPlatformResources.h"
-#include "ShengAdsp.h"
+#include "DitingAdsp.h"
 int sheng_fw_open(const char *path, void **handle, uint64_t *size);
 extern unsigned long gPhysBase, gPhysSize;
 int sheng_fw_read(void *handle, uint64_t offset, void *to, size_t length);

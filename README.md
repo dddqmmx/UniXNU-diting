@@ -1,10 +1,13 @@
 # UniXNU-diting
 
-Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。目标系统为
-**iPadOS 18.7.10（22H374）/ Darwin 24.6.0**，系统输入为 iPad7,11 / J171AP。
+**简体中文** | [English](README_EN.md)
 
-新增 **iOS 27.2.1（24B156）** 独立 arm64e 适配目标。精确还原包选择、公开源码基线、
-隔离工具链与构建入口见 [iOS 27.2.1 适配记录](migration/ios27/README.zh.md)；整机运行尚未验收。
+Redmi K50 至尊版（`diting` / Qualcomm SM8475）的独立 UniXNU 格式 2 设备移植仓库（最初衍生自 [UniXNU](https://github.com/UniXNU/UniXNU) 与社区 SM8475 Pong 工作 [Chengdong-Yu/UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong)）。默认目标系统为
+**iOS 27.2.1（24B156）/ arm64e**（系统输入为 iPhone18,2 / V54AP，公开源码基线 XNU 12377.121.6 / Darwin 25.5.0）。
+精确还原包选择、公开源码基线、隔离工具链与构建入口见 [iOS 27.2.1 适配记录](migration/ios27/README.zh.md)。
+
+历史 **iPadOS 18.7.10（22H374）/ Darwin 24.6.0**（iPad7,11 / J171AP）目标继续保留在 `board.toml` 的
+`[os_overrides."ipados-18.7.10-22H374"]` 中，可通过 `--os ipados-18.7.10-22H374` 选择。
 
 - 核心构建工具：[UniXNU](https://github.com/UniXNU/UniXNU)
 - 固件：仓库内 `platform-firmware/ditingPkg` 的 FDF 内嵌 `sm8475-xiaomi-diting.dtb`；外部 `uefi-diting` 开发树只作参考，其旧 FDF 可能仍内嵌 Nothing Phone (2) 的 DTB
@@ -110,11 +113,19 @@ Darwin 24 内核、板级驱动、DarwinBoot24，并完成预链接和 boot imag
 AEA 解密、APFS 用户态卷写入仍使用现有 macOS `diting-userdata.yml` workflow。
 命令及输入要求见 [services169 本地构建记录](migration/ipados18/services169-linux-build.md)。
 
-## 源码边界
+## 来源与致谢
+
+本仓库作为独立设备移植项目维护，完整保留 Git 提交历史、原始版权声明与各组件许可证。项目建立在以下上游与社区工作之上，特此致谢：
+
+- [UniXNU](https://github.com/UniXNU/UniXNU)：核心 UEFI/XNU 构建框架、ARM64 支持、OS 配置与通用驱动组件（`BSD-2-Clause-Patent`）。
+- [Chengdong-Yu/UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong)（`Chengdong-Yu/pong-*`、[Chengdong-Yu/uefi-pong](https://github.com/Chengdong-Yu/uefi-pong)）：社区 SM8475 / Pong 移植基础，本仓库收编的 `DitingPlatform24` 驱动与 SM8475 SoC 种子最初衍生自此。
+- [57UU/UniXNU-sirius](https://github.com/57UU/UniXNU-sirius)：Linux 交叉编译工具链流程参考。
+
+## 源码边界与许可证
 
 仓库只包含板级源码、补丁、配置和脚本。IPSW、Apple 私有二进制、固件、认证数据、userdata 和构建
-产物不进入仓库，由脚本在本机获取或生成。设备级代码采用 BSD-2-Clause-Patent；导入组件保留原始
-许可证及 SPDX 标记，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+产物不进入仓库，由脚本在本机获取或生成。设备级代码采用 [BSD-2-Clause-Patent](LICENSE)；导入组件保留原始
+许可证、版权声明及 SPDX 标记，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 免责声明与商标
 

@@ -6,8 +6,8 @@
  * whitelisted, single-in-flight SET writes when explicitly enabled by policy.
  * The Sheng API names and diagnostic field indices are retained for the board
  * aggregate. */
-#ifndef SHENG_BATTMGR_H
-#define SHENG_BATTMGR_H
+#ifndef DITING_BATTMGR_H
+#define DITING_BATTMGR_H
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {

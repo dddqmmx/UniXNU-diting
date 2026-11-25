@@ -3,8 +3,8 @@
  * size in words, total size, destination and source domain, source and destination port, token, opcode) followed by the payload. This
  * is the codec and the first exchange an audio client makes: asking the DSP's audio framework manager (APM) whether the framework is
  * ready. No I/O and no waits: the owner sends the bytes, feeds back what arrives and runs the retry and answer timers. */
-#ifndef SHENG_GPR_H
-#define SHENG_GPR_H
+#ifndef DITING_GPR_H
+#define DITING_GPR_H
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {

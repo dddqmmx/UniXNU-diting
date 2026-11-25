@@ -1054,7 +1054,7 @@ static bool nativeCopyHalfToBgra(volatile void *dstBase,uint64_t dstBytes,uint64
     power_battery_sources = [
         power_dir / (name + '.c') for name in (
             'QcomSmem', 'QcomSmp2p', 'QcomGlink', 'QcomMdt', 'QcomQmp',
-            'ShengBattmgr', 'DitingUcsi', 'DitingFirmware',
+            'DitingBattmgr', 'DitingUcsi', 'DitingFirmware',
         )
     ] + [
         power_dir / 'DitingAdsp.cpp',

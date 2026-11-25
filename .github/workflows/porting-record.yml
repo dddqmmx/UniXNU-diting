@@ -14,14 +14,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: c96b29975645b711dc06bc435c3ad27321ce817c
+          ref: 519d80242a5028ee123447b01bc3b809baed565f
           path: tools
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install the device inputs the record is checked against
-        # The same script the package workflow runs: the 22H374 OS profile, and
-        # the DitingPlatform24 entry the record's component check resolves.
+        # Install this repository's OS profiles (default ios-27.2.1-24B156 and legacy
+        # ipados-18.7.10-22H374) and component entries before checking porting.toml.
         run: python3 device/scripts/install-unixnu-inputs.py --unixnu tools
       - name: Check porting record
         run: python3 tools/scripts/porting-record.py check --device device

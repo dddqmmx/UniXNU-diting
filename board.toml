@@ -4,60 +4,60 @@ schema_version = 2
 name = "diting"
 soc = "SM8475"
 soc_source = "sm8475"
-# The 22H374 profile ships in this repository at os-profiles/ and is installed into the
-# UniXNU checkout before resolving (scripts/install-device-profile.py), because
-# UniXNU/profiles/os/ has no 18.x profile yet.
-os_profile = "ipados-18.7.10-22H374"
-description = "Redmi K50 Ultra (diting/SM8475): UniXNU bring-up from the Diting baseline"
+# The 24B156 profile ships in this repository at os-profiles/ and is installed into the
+# UniXNU checkout before resolving (scripts/install-unixnu-inputs.py / scripts/build-diting-ios27.py).
+os_profile = "ios-27.2.1-24B156"
+description = "Redmi K50 Ultra (diting/SM8475): UniXNU bring-up targeting iOS 27.2.1 (24B156)"
 kit = "diting"
 
-# iPadOS 18.7.10 restore selected from the matching J171 BuildIdentity.
+# iOS 27.2.1 restore selected from the matching V54AP Customer Erase Install BuildIdentity.
 [ipsw]
-url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
-product = "iPad7,11"
-version = "18.7.10"
-build = "22H374"
-device_class = "j171ap"
-chip_id = 0x8010
-board_id = 0x1c
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "Cryptex1,SystemTrustCache", "Cryptex1,AppOS", "Cryptex1,AppTrustCache", "OS"]
+url = "https://updates.cdn-apple.com/2026FallFCS/5cf23110-0e1e-4f62-aef3-746ff41c71f4/iPhone18,2_27.2.1_24B156_Restore.ipsw"
+product = "iPhone18,2"
+version = "27.2.1"
+build = "24B156"
+device_class = "v54ap"
+variant = "Customer Erase Install (IPSW)"
+chip_id = 0x8150
+board_id = 0x0e
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
 
 [components]
-# This is the community Diting A730/QCA6490/Darwin24 implementation, not the A740/WCN7850 source.
-# The kit lives in this repository at kits/DitingPlatform24 and declares no archive recipe: the
-# kernel step of this board builds the aggregate itself, see [kernel] below.
-include = ["DitingPlatform24", "XnuPrelink"]
+include = ["ArmDTPlatform", "ArmCpu", "XnuPrelink", "DarwinBoot"]
 
 [device_tree]
 source = "device:dts/diting.dts"
 include_dirs = ["soc:dts"]
 
 [kernel]
-defconfig = "diting_ipados18_defconfig"
-config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
-patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
-# Explicitly empty: an array here replaces the arch profile's list, and its
-# archive builders produce the BCM2837 providers, not this board's aggregate.
-archives = []
-# The Darwin 24 aggregate is compiled with MACHINE_CONFIGS=DITING (config/MASTER.arm64.diting, added
-# by patches/xnu-ipados18), not with the BCM2837 machine config the shared kernel step used to
-# select for every board. The kernel step passes this value through as XNU_MACHINE_CONFIG and
-# takes its object directory and aggregate name from it.
-machine_config = "DITING"
-# 由组件配方生成完整内核，避免通用引导步骤先选择其他机器配置。
-builder_component = "DitingPlatform24"
+defconfig = "diting_ios27_defconfig"
+config_fragments = ["arch:configs/common.config", "os:configs/ios.config"]
+patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ios27/series"]
+archives = [
+  "build-corecrypto-14.py", "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform", "component:ArmCpu", "build-libpthread-kernel.py",
+  "build-diting-ios27-drivers.py --tree .",
+]
 
-# Local prelink and userdata entries are documented under migration/ipados18.
+# iOS 27.2.1 arm64e MH_FILESET strict prelink; see migration/ios27/README.zh.md.
 [kernel.prelink]
-# The native aggregate the recipe leaves at this path, and the prelinker this
-# board carried before the format 2 rewrite.
 tool = "kits/XnuPrelink/emit_prelink.py"
-kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/mach.development.diting"
-# 22H374 的原始预链接基址为 0xfffffff005130000；存储绑定使用
-# 0xfffffff00b000000。最终内核还需通过存储绑定落段检查。
-slide = "0x5ed0000"
-roots = ["com.apple.kec.corecrypto", "com.apple.kec.pthread", "com.apple.filesystems.apfs",
-         "com.apple.kec.Compression", "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+slide = "0"
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe000927b430"
+extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--fileset-no-reference-order"]
+roots = [
+  "com.apple.kec.corecrypto", "com.apple.filesystems.apfs",
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.security.AppleImage4",
+  "com.apple.kext.CoreTrust", "com.apple.security.sandbox",
+  "com.apple.iokit.IOStorageFamily", "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOSurface",
+  "com.apple.iokit.IOMobileGraphicsFamily", "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOReportFamily",
+]
+
 [firmware]
 config = "diting"
 dsc = "Platforms/Xiaomi/ditingPkg/diting.dsc"
@@ -105,17 +105,132 @@ tools = true
 # discontiguous live RAM bank sum and the owned 4 GiB bootstrap window.
 dram_size = 0x200000000
 # The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
-title = "Diting iPadOS 18.7.10"
+title = "Diting iOS 27.2.1"
 volume = "UNIXNU"
-# 96 MiB, the --fat-mib a local run packs: DitingBootMemoryDxe refuses an initrd
-# above DITING_FAT_MAX_INITRD (128 MiB), and the 4096-byte PONGFAT1 header is
-# inside the payload image the package step repacks, so the volume stays well
-# below that bound.
+# 112 MiB fits the ~94 MiB iOS 27.2.1 fileset kernel, loader, ADT, trustcache and GPU addon
+# while staying below DitingBootMemoryDxe's DITING_FAT_MAX_INITRD (128 MiB) scan limit.
+size_mib = 112
+# DarwinBoot copies the line into a 1024-byte buffer and refuses more than 1000 bytes;
+# keep the final assembled line within 1000 bytes.
+kernel_args = [
+  "-v", "keepsyms=1", "cpus=8", "debug=0x14e", "serial=0", "smp=1",
+  "armcpu-self-ipi=1", "armcpu-edge=1", "use_contiguous_hint=0",
+  "diting_fast_cs=1", "native-source-storage=1", "diting_ufs_readwrite=1",
+  "no-lc=1", "owner-dataprotect=1", "disable-watchdogd=1", "lite=1",
+  "sched_preemption_disable_debug_mode=0", "interrupt-masked-debug-mode=0",
+  "validation_disables=0x11040", "lcks=0x10",
+  "offline-mobile-graphics-load=1", "offline-mobile-graphics-client=1",
+  "offline-legacy-register=1", "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=3", "offline-legacy-pm=1",
+  "offline-legacy-validate=1", "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1", "offline-legacy-phase=4",
+  "vsync=120", "vsync-fixed=1", "sheng-fb-half=2", "diting_panel_hz=120", "diting_backlight=1",
+  "offline-key-events=1", "aks=1", "aks-sls=3",
+  "diting_adreno_start=1", "gpu-metal=1", "diting_metal=1", "sheng-fb-gpu=1", "gpu-addon=1",
+  "offline-hid-input=1", "offline-hid-home=1", "touch-hid=1", "diting_touch=1", "diting_buttons=1",
+  "diting_adsp=2", "diting_wifi=1",
+  "diting_usb=1", "diting_panic_fastboot=1",
+  "-no_slto_panic", "kt_fixed_zones=120",
+]
+
+[payload.adt]
+# schema_version 2 builds the ADT from the hardware DTS through devicetree.generate(); these keys
+# are the ones that function reads from [payload.adt]. The DarwinBoot allocation window is 4 GiB.
+owned_memory_size = "0x100000000"
+# The restore's own disk images are used unmodified, so /chosen/RAMDisk holds only the seed; the
+# three volumes come from the userdata image and XNU mounts them through the UFS root driver.
+packed_data_ramdisk = false
+# The seed is not stored in any repository: scripts/package.sh takes it from UNIXNU_UNIQUE_CHIP_ID.
+unique_chip_id = "required"
+# The V54AP BuildIdentity's chip ID, the same value [ipsw] carries.
+chip_id = "0x8150"
+
+[userdata]
+# The userdata partition this board installs into, in 4 KiB sectors: the geometry
+# scripts/install-diting-ufs-data.py and scripts/prepare-ipados18-ufs-layout.py check
+# against. Measured on this unit over adb on 2026-11-06:
+#   /dev/block/by-name/userdata -> /dev/block/sda37
+#   /sys/class/block/sda37/start = 24924160 (512-byte sectors) = 3115520 4K
+#   /sys/class/block/sda37/size  = 468930520 (512-byte sectors) = 58616315 4K
+#   240,092,426,240 bytes = 223.6 GiB; sda queue logical_block_size = 4096
+first_lba = 0x2F8A00
+last_lba = 0x3ADF3FA
+lba_bytes = 4096
+# The windows of the userdata image are the OS and SystemOS disk images of the IPSW, in
+# that order; the OS profile lists them ([userdata] windows of
+# os-profiles/ios-27.2.1-24B156/profile.toml), because they are the profile's
+# components. This table adds only what belongs to the device.
+
+[package]
+# The UniXNU checkout, relative to this repository: scripts/package.sh reads it.
+unixnu = "../UniXNU"
+
+[package.defconfig]
+"ios-27.2.1-24B156" = "diting_ios27_defconfig"
+"ipados-18.7.10-22H374" = "diting_ipados18_defconfig"
+
+[bootimg]
+# Compiled by scripts/build-diting-hardware-dtb.py at the firmware preflight step, relative to the
+# build tree (docs/porting/packaging.md).
+dtb = "build/diting/diting.dtb"
+
+[bootimg.image]
+# Resources/Configs/diting.toml in the firmware records the Android build system's v4, but unixnu
+# packs and verifies v0-v2 headers only: verify() reads header_version and pagesize at the v0/v1/v2
+# offsets and a v4 header carries them elsewhere. This header therefore describes boot/boot.img,
+# the spec product whose ramdisk is the bare payload.img. The flashable v4 image the firmware
+# accepts is written with the PONGFAT1 container the local flow produces.
+header_version = 0
+pagesize = 4096
+
+# Legacy iPadOS 18.7.10 (22H374) arm64/Darwin 24 target, retained via --os ipados-18.7.10-22H374.
+# Local prelink and userdata entries are documented under migration/ipados18.
+[os_overrides."ipados-18.7.10-22H374"]
+remove = ["ipsw.variant", "kernel.prelink.early_security_init", "kernel.prelink.extra_args"]
+
+[os_overrides."ipados-18.7.10-22H374".components]
+# This is the community Diting A730/QCA6490/Darwin24 implementation, not the A740/WCN7850 source.
+# The kit lives in this repository at kits/DitingPlatform24 and declares no archive recipe: the
+# kernel step of this override builds the aggregate itself, see [kernel] below.
+include = ["DitingPlatform24", "XnuPrelink"]
+
+# iPadOS 18.7.10 restore selected from the matching J171 BuildIdentity.
+[os_overrides."ipados-18.7.10-22H374".ipsw]
+url = "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/140-97955/A3F72236-89AD-47C5-8394-5E824079C175/iPad_10.2_18.7.10_22H374_Restore.ipsw"
+product = "iPad7,11"
+version = "18.7.10"
+build = "22H374"
+device_class = "j171ap"
+chip_id = 0x8010
+board_id = 0x1c
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "Cryptex1,SystemTrustCache", "Cryptex1,AppOS", "Cryptex1,AppTrustCache", "OS"]
+
+[os_overrides."ipados-18.7.10-22H374".kernel]
+defconfig = "diting_ipados18_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
+patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
+# Explicitly empty: an array here replaces the arch profile's list, and its
+# archive builders produce the BCM2837 providers, not this override's aggregate.
+archives = []
+# The Darwin 24 aggregate is compiled with MACHINE_CONFIGS=DITING (config/MASTER.arm64.diting, added
+# by patches/xnu-ipados18), not with the BCM2837 machine config.
+machine_config = "DITING"
+# 由组件配方生成完整内核，避免通用引导步骤先选择其他机器配置。
+builder_component = "DitingPlatform24"
+
+[os_overrides."ipados-18.7.10-22H374".kernel.prelink]
+tool = "kits/XnuPrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_DITING/mach.development.diting"
+# 22H374 的原始预链接基址为 0xfffffff005130000；存储绑定使用
+# 0xfffffff00b000000。最终内核还需通过存储绑定落段检查。
+slide = "0x5ed0000"
+roots = ["com.apple.kec.corecrypto", "com.apple.kec.pthread", "com.apple.filesystems.apfs",
+         "com.apple.kec.Compression", "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]
+
+[os_overrides."ipados-18.7.10-22H374".payload]
+title = "Diting iPadOS 18.7.10"
+# 96 MiB, the --fat-mib a local Darwin 24 run packs.
 size_mib = 96
-# The current runtime arguments this board brings up with: the ones scripts/build-ipados18-prelinked-boot.py
-# used to write, minus its boot-epoch (the ADT carries a software clock instead) and with the
-# applog list trimmed to the services the trace reads. DarwinBoot copies the line into a
-# 1024-byte buffer and refuses more than 1000 bytes; keep the final assembled line within1023 bytes.
 kernel_args = [
   "-v",
   "keepsyms=1",
@@ -160,128 +275,5 @@ kernel_args = [
   "diting_rootful=1",
 ]
 
-[payload.adt]
-# schema_version 2 builds the ADT from the hardware DTS through devicetree.generate(); these keys
-# are the ones that function reads from [payload.adt]. The DarwinBoot allocation window is 4 GiB,
-# the window the first bring-up boot used.
-owned_memory_size = "0x100000000"
-# The restore's own disk images are used unmodified, so /chosen/RAMDisk holds only the seed; the
-# three volumes come from the userdata image and XNU mounts them through the UFS root driver.
-packed_data_ramdisk = false
-# The seed is not stored in any repository: scripts/package.sh takes it from UNIXNU_UNIQUE_CHIP_ID.
-unique_chip_id = "required"
-# The J171 BuildIdentity's chip ID, the same value [ipsw] carries.
+[os_overrides."ipados-18.7.10-22H374".payload.adt]
 chip_id = "0x8010"
-
-[userdata]
-# The userdata partition this board installs into, in 4 KiB sectors: the geometry
-# scripts/install-diting-ufs-data.py and scripts/prepare-ipados18-ufs-layout.py check
-# against. Measured on this unit over adb on 2026-11-06:
-#   /dev/block/by-name/userdata -> /dev/block/sda37
-#   /sys/class/block/sda37/start = 24924160 (512-byte sectors) = 3115520 4K
-#   /sys/class/block/sda37/size  = 468930520 (512-byte sectors) = 58616315 4K
-#   240,092,426,240 bytes = 223.6 GiB; sda queue logical_block_size = 4096
-# The values this table carried before were inherited from the Diting baseline.
-first_lba = 0x2F8A00
-last_lba = 0x3ADF3FA
-lba_bytes = 4096
-# The windows of the userdata image are the OS and SystemOS disk images of the IPSW, in
-# that order; the OS profile lists them ([userdata] windows of
-# os-profiles/ipados-18.7.10-22H374/profile.toml), because they are the profile's
-# components. This table adds only what belongs to the device.
-
-[package]
-# The UniXNU checkout, relative to this repository: scripts/package.sh reads it.
-unixnu = "../UniXNU"
-
-[package.defconfig]
-"ipados-18.7.10-22H374" = "diting_ipados18_defconfig"
-"ios-27.2.1-24B156" = "diting_ios27_defconfig"
-
-[bootimg]
-# Compiled by scripts/build-diting-hardware-dtb.py at the firmware preflight step, relative to the
-# build tree (docs/porting/packaging.md).
-dtb = "build/diting/diting.dtb"
-
-[bootimg.image]
-# Resources/Configs/diting.toml in the firmware records the Android build system's v4, but unixnu
-# packs and verifies v0-v2 headers only: verify() reads header_version and pagesize at the v0/v1/v2
-# offsets and a v4 header carries them elsewhere. This header therefore describes boot/boot.img,
-# the spec product whose ramdisk is the bare payload.img. The flashable v4 image the firmware
-# accepts is boot/diting-xnu-initial.img, written by scripts/finalize-diting-adt.py with the same
-# container the local flow produces; see the payload section above.
-header_version = 0
-pagesize = 4096
-
-# iOS 27 is a separate arm64e/xnu-12377 development target. The default and
-# its DitingPlatform24 runtime continue to select the existing iPadOS 18 port.
-[os_overrides."ios-27.2.1-24B156"]
-remove = ["kernel.builder_component", "kernel.machine_config"]
-
-[os_overrides."ios-27.2.1-24B156".components]
-include = ["ArmDTPlatform", "ArmCpu", "XnuPrelink", "DarwinBoot"]
-
-[os_overrides."ios-27.2.1-24B156".ipsw]
-url = "https://updates.cdn-apple.com/2026FallFCS/5cf23110-0e1e-4f62-aef3-746ff41c71f4/iPhone18,2_27.2.1_24B156_Restore.ipsw"
-product = "iPhone18,2"
-version = "27.2.1"
-build = "24B156"
-device_class = "v54ap"
-variant = "Customer Erase Install (IPSW)"
-chip_id = 0x8150
-board_id = 0x0e
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
-
-[os_overrides."ios-27.2.1-24B156".kernel]
-defconfig = "diting_ios27_defconfig"
-config_fragments = ["arch:configs/common.config", "os:configs/ios.config"]
-patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ios27/series"]
-archives = [
-  "build-corecrypto-14.py", "build-corecrypto-14.py --namespace",
-  "component:ArmDTPlatform", "component:ArmCpu", "build-libpthread-kernel.py",
-  "build-diting-ios27-drivers.py --tree .",
-]
-
-[os_overrides."ios-27.2.1-24B156".kernel.prelink]
-tool = "kits/XnuPrelink/emit_prelink.py"
-kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-slide = "0"
-early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe000927b430"
-extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--fileset-no-reference-order"]
-roots = [
-  "com.apple.kec.corecrypto", "com.apple.filesystems.apfs",
-  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
-  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.security.AppleImage4",
-  "com.apple.kext.CoreTrust", "com.apple.security.sandbox",
-  "com.apple.iokit.IOStorageFamily", "com.apple.iokit.IOHIDFamily",
-  "com.apple.iokit.IOCryptoAcceleratorFamily",
-  "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOSurface",
-  "com.apple.iokit.IOMobileGraphicsFamily", "com.apple.iokit.IOAudio2Family",
-  "com.apple.iokit.IOReportFamily",
-]
-
-[os_overrides."ios-27.2.1-24B156".payload]
-title = "Diting iOS 27.2.1"
-kernel_args = [
-  "-v", "keepsyms=1", "cpus=8", "debug=0x14e", "serial=0", "smp=1",
-  "armcpu-self-ipi=1", "armcpu-edge=1", "use_contiguous_hint=0",
-  "diting_fast_cs=1", "native-source-storage=1", "diting_ufs_readwrite=1",
-  "no-lc=1", "owner-dataprotect=1", "disable-watchdogd=1", "lite=1",
-  "sched_preemption_disable_debug_mode=0", "interrupt-masked-debug-mode=0",
-  "validation_disables=0x11040", "lcks=0x10",
-  "offline-mobile-graphics-load=1", "offline-mobile-graphics-client=1",
-  "offline-legacy-register=1", "offline-legacy-gop=1",
-  "offline-legacy-unit-scale=3", "offline-legacy-pm=1",
-  "offline-legacy-validate=1", "offline-legacy-transfer=1",
-  "offline-legacy-cpu-present=1", "offline-legacy-phase=4",
-  "vsync=120", "vsync-fixed=1", "sheng-fb-half=2", "diting_panel_hz=120", "diting_backlight=1",
-  "offline-key-events=1", "aks=1", "aks-sls=3",
-  "diting_adreno_start=1", "gpu-metal=1", "diting_metal=1", "sheng-fb-gpu=1", "gpu-addon=1",
-  "offline-hid-input=1", "offline-hid-home=1", "touch-hid=1", "diting_touch=1", "diting_buttons=1",
-  "diting_adsp=2", "diting_wifi=1",
-  "diting_usb=1", "diting_panic_fastboot=1",
-  "-no_slto_panic", "kt_fixed_zones=120",
-]
-
-[os_overrides."ios-27.2.1-24B156".payload.adt]
-chip_id = "0x8150"

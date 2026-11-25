@@ -7,8 +7,8 @@
  * captures) at host time anchor_host of that direction; one frame lasts ticks_per_frame_q32 / 2^32 host ticks. The service consumes
  * playback frames lead_frames ahead of the play position and fills capture frames lead_frames behind it, so the plug-in writes at least
  * lead_frames ahead and reads at least lead_frames behind. */
-#ifndef SHENG_AUDIO_ABI_H
-#define SHENG_AUDIO_ABI_H
+#ifndef DITING_AUDIO_ABI_H
+#define DITING_AUDIO_ABI_H
 #include <stdint.h>
 
 #define SHENG_AUDIO_CLASS "DitingAudio"

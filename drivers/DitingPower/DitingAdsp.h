@@ -2,8 +2,8 @@
 /* Clients of the audio DSP (AdspProbe.cpp): a client registers a GLINK channel by name at any time (before or after the DSP is up) and
  * gets its state and messages through callbacks that run on the DSP thread; they must not block (copy what they need and wake their own
  * thread). Sends are queued and go out from the DSP thread, so a caller never waits for the DSP. */
-#ifndef SHENG_ADSP_H
-#define SHENG_ADSP_H
+#ifndef DITING_ADSP_H
+#define DITING_ADSP_H
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 #ifndef DITING_BATTERY_STATE_H
 #define DITING_BATTERY_STATE_H
-#include "ShengBattmgr.h"
+#include "DitingBattmgr.h"
 
 /* Shared by the IOKit publisher and host tests. A core snapshot and its
  * optional metadata update are one sample, not two source confirmations. */

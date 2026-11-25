@@ -2,7 +2,7 @@
 /* Protocol facts: LineageOS/android_kernel_xiaomi_sm8450, eff4b40407a1b6f1b1ab84554cbb540bcb495175,
  * drivers/power/supply/qti_battery_charger.{h,c}. No vendor driver code or
  * charging policy is imported. See README.md for the field units. */
-#include "ShengBattmgr.h"
+#include "DitingBattmgr.h"
 
 static const struct {uint8_t opcode, property, slow;} kFields[BmFields] = {
     [BmStatus] = {SHENG_BATTMGR_OP_BATTERY_GET, 0, 0},

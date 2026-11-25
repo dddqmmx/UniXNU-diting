@@ -1,7 +1,6 @@
 # Diting iOS 27.2.1（24B156）适配
 
-这是独立的 arm64e 适配目标。`board.toml` 默认仍选择已有的 iPadOS 18.7.10，
-27.2.1 通过 `--os ios-27.2.1-24B156` 与专用构建入口选择。已完成真机（`1d4eb066`）**iOS 27.2.1 完整用户态启动、Adreno 730 60 FPS GPU 硬件加速与 1220×2712 实机锁屏显示、ST61Y SPI 触控接入、`FromEdgeTip` 边缘手势钩子安装、运行态 USB 返回 fastboot 及 `boot_b` 持久化刷入**。
+本项目已将 `board.toml` 的默认目标正式切换为 **iOS 27.2.1（24B156）**（`os_profile = "ios-27.2.1-24B156"`、`diting_ios27_defconfig`、`arm64e`）；原 iPadOS 18.7.10（22H374）配置保留在 `[os_overrides."ipados-18.7.10-22H374"]`（通过 `--os ipados-18.7.10-22H374` 选择）。已完成真机（`1d4eb066`）**iOS 27.2.1 完整用户态启动、Adreno 730 60 FPS GPU 硬件加速与 1220×2712 实机锁屏显示、ST61Y SPI 触控接入、`FromEdgeTip` 边缘手势钩子安装、运行态 USB 返回 fastboot 及 `boot_b` 持久化刷入**。
 
 ## 已确认的输入
 

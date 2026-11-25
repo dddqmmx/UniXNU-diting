@@ -20,7 +20,7 @@ class BatteryProtocolTests(unittest.TestCase):
             '-fno-omit-frame-pointer', '-g',
             '-I' + str(DEVICE / 'drivers/DitingPower'),
             str(DEVICE / 'tests/diting_battery_protocol.c'),
-            str(DEVICE / 'drivers/DitingPower/ShengBattmgr.c'),
+            str(DEVICE / 'drivers/DitingPower/DitingBattmgr.c'),
             str(DEVICE / 'drivers/DitingPower/DitingUcsi.c'),
             '-o', str(cls.binary),
         ], check=True, capture_output=True, text=True)

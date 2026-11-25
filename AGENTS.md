@@ -44,7 +44,7 @@
 
 # Repository layout
 
-- This is the Diting SM8475 format 2 device repository, targeting iPadOS 18.7.10 / 22H374 / Darwin24. Follow https://unixnu.com/zh/porting/migration and https://unixnu.com/zh/porting/device-repository.
+- This is the Diting SM8475 format 2 device repository, defaulting to iOS 27.2.1 / 24B156 (`ios-27.2.1-24B156`, `arm64e`, `diting_ios27_defconfig`; legacy iPadOS 18.7.10 / 22H374 / Darwin24 is retained under `board.toml [os_overrides."ipados-18.7.10-22H374"]`). Follow https://unixnu.com/zh/porting/migration and https://unixnu.com/zh/porting/device-repository.
 - Keep the ARM64, SM8475, OS profile and board layers separate. The versioned SM8475 seed is under migration/format2/soc-seed; local overrides belong in ignored local.toml.
 - Preserve community component identity DitingPlatform24. Do not label the A730/QCA6490 implementation as the upstream A740/WCN7850 driver.
 - Publish source/configuration/porting records only. Apple restore binaries, generated ABI dumps, firmware, userdata, credentials and build artifacts stay local.

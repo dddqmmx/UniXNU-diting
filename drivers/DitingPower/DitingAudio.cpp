@@ -14,10 +14,10 @@
 #include "DitingLowDma.h"
 #include "DitingGccVotes.h"
 extern "C" {
-#include "ShengAdsp.h"
-#include "ShengGpr.h"
-#include "ShengAudioReach.h"
-#include "ShengAudioAbi.h"
+#include "DitingAdsp.h"
+#include "DitingGpr.h"
+#include "DitingAudioReach.h"
+#include "DitingAudioAbi.h"
 #include "GeniI2c.h"
 #include "DitingPlatformResources.h"
 void DitingAudioServiceStaticInit(void);

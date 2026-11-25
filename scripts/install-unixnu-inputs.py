@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Install this repository's OS profile and component entries into a UniXNU checkout.
+"""Install this repository's OS profiles and component entries into a UniXNU checkout.
 
-UniXNU resolves board.os_profile as a directory under its own profiles/os/ and every
-[kernel] archives component against its own components.toml. This board's 22H374 profile
+UniXNU resolves board.os_profile (and any --os override) as a directory under its own
+profiles/os/ and every [kernel] archives component against its own components.toml.
+This board's OS profiles (default ios-27.2.1-24B156 and legacy ipados-18.7.10-22H374)
 and its DitingPlatform24 kit exist only here, so a run installs them into the checkout
-before resolving (the same arrangement the NX769J port uses for its iOS 16 profile).
-The step is idempotent: an identical file is left alone, a differing one stops the run.
+before resolving. The step is idempotent: an identical file is left alone, a differing
+one stops the run.
 """
 import argparse
 import importlib.util
@@ -121,7 +122,8 @@ def main():
     unixnu = args.unixnu.resolve()
     board = tomllib.loads((ROOT / 'board.toml').read_text())
     profile = board['board']['os_profile']
-    target = install_profile(unixnu, profile)
+    profiles = list(dict.fromkeys([profile, *board.get('os_overrides', {}).keys()]))
+    installed_profiles = {name: str(install_profile(unixnu, name)) for name in profiles}
     added, present = install_components(unixnu)
     fix_prelink_info_extent(unixnu)
     fix_apple_cpu_match(unixnu)
@@ -129,7 +131,8 @@ def main():
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
     module.install(unixnu)
-    print(json.dumps({'profile': profile, 'installed_at': str(target),
+    print(json.dumps({'profile': profile, 'installed_at': installed_profiles[profile],
+                      'profiles_installed': installed_profiles,
                       'components_added': added, 'components_present': present}, indent=2))
 
 

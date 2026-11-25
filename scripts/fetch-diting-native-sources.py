@@ -11,9 +11,10 @@ def main():
     sources = tomllib.loads((ROOT / 'configs/diting-native-sources.toml').read_text())['source']
     local = ROOT / 'local.toml'
     overrides = tomllib.loads(local.read_text()).get('source', []) if local.exists() else []
-    for source in tomllib.loads((ROOT / 'feeds.toml').read_text())['source']:
-        if source['kind'] != 'refer':
-            continue
+    ipados18_profile = ROOT / 'os-profiles/ipados-18.7.10-22H374/profile.toml'
+    refer_sources = [s for path in (ipados18_profile, ROOT / 'feeds.toml') if path.is_file()
+                     for s in tomllib.loads(path.read_text()).get('source', []) if s.get('kind') == 'refer']
+    for source in refer_sources:
         override = next((s for s in overrides if s.get('kind') == 'refer' and s.get('name') == source['name']), {})
         path = Path(override['local']).expanduser() if override.get('local') else ROOT / 'refer/ipados18' / source['ref']
         if not path.is_absolute(): path = ROOT / path

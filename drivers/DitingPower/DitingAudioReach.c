@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-#include "ShengAudioReach.h"
-#include "ShengGpr.h"
+#include "DitingAudioReach.h"
+#include "DitingGpr.h"
 
 #define PARAM_HEADER 16u
 #define CMD_HEADER 16u

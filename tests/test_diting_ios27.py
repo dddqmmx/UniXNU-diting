@@ -114,14 +114,25 @@ class PrelinkCompletionTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 require_complete_prelink({**complete, kind: {'owner': {'0x1000': 1}}})
 
-    def test_profile_and_device_override_use_strict_prelink(self):
+    def test_default_board_and_profile_use_ios27_strict_prelink(self):
         root = Path(__file__).resolve().parents[1]
         board = tomllib.loads((root / 'board.toml').read_text())
         profile = tomllib.loads((root / 'os-profiles/ios-27.2.1-24B156/profile.toml').read_text())
-        for spec in (profile['kernel']['prelink'],
-                     board['os_overrides']['ios-27.2.1-24B156']['kernel']['prelink']):
+        porting = tomllib.loads((root / 'porting.toml').read_text())
+        self.assertEqual(board['board']['os_profile'], 'ios-27.2.1-24B156')
+        self.assertEqual(porting['device']['os_profile'], 'ios-27.2.1-24B156')
+        self.assertEqual(board['kernel']['defconfig'], 'diting_ios27_defconfig')
+        self.assertEqual(board['ipsw']['build'], '24B156')
+        self.assertEqual(board['payload']['adt']['chip_id'], '0x8150')
+        for spec in (profile['kernel']['prelink'], board['kernel']['prelink']):
             self.assertNotIn('--allow-missing', spec['extra_args'])
             self.assertIn('--fileset-no-reference-order', spec['extra_args'])
+        legacy = board['os_overrides']['ipados-18.7.10-22H374']
+        self.assertEqual(legacy['kernel']['defconfig'], 'diting_ipados18_defconfig')
+        self.assertEqual(legacy['ipsw']['build'], '22H374')
+        self.assertEqual(legacy['payload']['adt']['chip_id'], '0x8010')
+        self.assertEqual(set(legacy['remove']),
+                         {'ipsw.variant', 'kernel.prelink.early_security_init', 'kernel.prelink.extra_args'})
 
 
 class ComponentPatchTests(unittest.TestCase):

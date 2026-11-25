@@ -53,7 +53,7 @@ Diting 专属实现。协议与服务结构参照 UniXNU-sheng 的 Qualcomm 实�
 - ADSP 与 WLAN 共用 AOSS QMP owner，分别发送补零的 100/64 字节消息。超时不清空未消费邮箱，AOP 真实清零后才处理迟到完成与后续请求。
 - 触屏加入共享RPMh owner，ldoc2按本机provider请求1.8V/mode7；touch/WLAN/USB/audio共用
   GCC62008投票锁与回读。只有带HWCG的AHB分支允许idle halt；core/core2x/SE必须真实运行。
-- `DitingBattery.cpp` / `ShengBattmgr.c`：保留 UniXNU 协议 API 和诊断字段编号，按本机 Xiaomi 属性表、单位和通知消息读取 battery 0；不读取双电量计扩展、不发送充电属性写入。
+- `DitingBattery.cpp` / `DitingBattmgr.c`：保留 UniXNU 协议 API 和诊断字段编号，按本机 Xiaomi 属性表、单位和通知消息读取 battery 0；不读取双电量计扩展、不发送充电属性写入。
 - `DitingAudio.cpp`：`adsp_apps`、APM speaker/playback graph、TFA9873 配置、独立 SID1801 DMA 和输出环；只有真实初始化完成才发布 `DitingAudio`。尚无真机播放成功记录。
 
 ## 板级音频约束
