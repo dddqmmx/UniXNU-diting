@@ -695,6 +695,39 @@ static float brightness18_slider(void *display,float slider)
     }
     return brightness18_slider_original(display,slider);
 }
+static bool brightness18_diting_board(void)
+{
+    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
+    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
+    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+    if(!release)return false;
+    if(matching && get) {
+        CFMutableDictionaryRef dict=matching("IOService");
+        const void *key=CFSTR("DitingBacklightProtocol"),*value=CFSTR("sm8475-diting-dcs-v1");
+        CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if(dict && properties) {
+            CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+            uint32_t service=get(0,dict);
+            if(service){release(service);return true;}
+        } else {if(dict)CFRelease(dict);if(properties)CFRelease(properties);}
+    }
+    // CoreBrightness may load before the asynchronous first DCS read.
+    // Qualify the same L12 board contract now so its native software-curve
+    // startup guard is installed before the backlight service arrives.
+    // This does not publish a service or substitute a hardware readback.
+    uint32_t (*entry)(uint32_t,const char *)=dlsym(RTLD_DEFAULT,"IORegistryEntryFromPath");
+    CFTypeRef (*property)(uint32_t,CFStringRef,CFAllocatorRef,uint32_t)=dlsym(RTLD_DEFAULT,"IORegistryEntryCreateCFProperty");
+    if(!entry || !property)return false;
+    uint32_t chosen=entry(0,"IODeviceTree:/chosen");if(!chosen)return false;
+    CFTypeRef data=property(chosen,CFSTR("diting-dsi-backlight"),NULL,0);release(chosen);
+    static const struct {uint64_t base;uint32_t span,maximum,minimum,swapped,channel,version;} board={
+        0xae94000,0x400,4095,1,1,0,1};
+    _Static_assert(sizeof(board)==32,"Diting backlight ADT wire size");
+    bool qualified=data && CFGetTypeID(data)==CFDataGetTypeID() &&
+        CFDataGetLength((CFDataRef)data)==(CFIndex)sizeof(board) &&
+        !memcmp(CFDataGetBytePtr((CFDataRef)data),&board,sizeof(board));
+    if(data)CFRelease(data);return qualified;
+}
 static void brightness18_image(const struct mach_header *header,intptr_t slide)
 {
     if(brightness18_slider_original || strcmp(getprogname(),"backboardd") || header->magic!=MH_MAGIC_64)return;
@@ -711,17 +744,7 @@ static void brightness18_image(const struct mach_header *header,intptr_t slide)
         lc=(const void *)((const char *)lc+lc->cmdsize);
     }
     if(!matched)return;
-    // Restrict the adapter to the actually published NT37705 DCS service.
-    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
-    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
-    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
-    if(!matching||!get||!release)return;
-    CFMutableDictionaryRef dict=matching("IOService");
-    const void *key=CFSTR("DitingPanel"),*value=CFSTR("NT37705 Visionox / SM8475 DSI0");
-    CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
-    CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
-    uint32_t service=get(0,dict);if(!service)return;release(service);
+    if(!brightness18_diting_board())return;
     // Same exact 22H374 CoreBrightness UUID and actual Diting panel as below.
     // Its optional telemetry expects DisplayBrightness/NitsPhysical to be a
     // calibration dictionary; the board's native scalar state is not one.
