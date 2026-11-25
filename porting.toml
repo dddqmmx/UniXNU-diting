@@ -1,6 +1,23 @@
 schema_version = 1
 
 [[area]]
+id = "services196-wifi-station"
+status = "implemented"
+components = ["DitingPlatform24"]
+paths = ["drivers/DitingWifi/DitingWifiNet.cpp", "drivers/DitingWifi/ath11k/station.patch", "scripts/diting_wifi_station.py", "scripts/build-diting-ath11k.py", "scripts/build-diting-wifi-native.py", "kits/DitingPlatform24/build-support/merged-scripts/build-diting-ath11k.py", "tests/diting_wifi_station.c", "tests/test_diting_wifi_station.py", "migration/ipados18/services196-wifi-station.md"]
+inputs = ["用户确认 WPA2-Personal 或 WPA2/WPA3 兼容模式，密码由原生设置输入", "固定 Ath12kWifi f6bf561 station/shim 与 Linux v7.0.14 ath11k/MHI/QMI", "完成的 services195 私有系统/GPU/USB/触控/亮度/电池/ADSP 基线"]
+configuration = ["services196/wifi-20261115 独立源码和 XNU 缓存；SCHED_IDLE、nice19、ionice3、jobs1", "2.4/5 GHz、CCMP-128、PSK、非强制 PMF；保留实际 MAC 与原生设置", "不占用设备/USB，不写主工作树或共享缓存，GPU 工作优先"]
+procedure = ["只在构建副本应用 station patch，保留请求/状态锁和工作线程所有权", "实际 EAPOL/MIC/replay/GTK 重传与安装，授权后才接收数据，断线与队列满返回真实错误", "Darwin Ethernet RX/TX 接入 BPF；Linux errno 转换；主与 merged 配方选择同一当前构建归档", "实际 station/crypto/mac80211 ABI 的主机 AP 模拟器、ASan/UBSan 和已知密码学向量；独立完整内核构建"]
+findings = ["255 项主机检查 PASS：WPA2/兼容模式、错误密码、重传、GTK 轮换、收发、背压、接入点切换、扫描取消、重入请求和 beacon miss", "DHCP 的 BPF 消费者需要拆头前的完整 Ethernet mbuf；Linux 网络 errno 与 Darwin 编号不同，不能直接返回"]
+completion = ["实际 station 主机检查与 Wi-Fi arm64 归档编译 PASS；完整内核链接与八核打包 PASS", "必需 Wi-Fi/BPF 强符号和未解析零检查 PASS；内核 63779608 字节，镜像 101183488 字节，实际配方选择 diting_wifi=1"]
+limits = ["未部署，固件启动、扫描、关联、DHCP、DNS、网页和持续传输均缺本轮实机验收；不能标记联网 PASS", "纯 WPA3/SAE、强制 PMF、企业认证和 6 GHz 未实现；WPA2/WPA3 兼容须提供 PSK", "源代码留在独立 checkout，合入与设备测试等待 GPU 任务释放相应资源；不覆盖后续 GPU 候选"]
+next_action = ["GPU 空闲后将 Wi-Fi 源码补丁合入最新候选并按原生设置逐项验收；当前候选不自动部署"]
+evidence = [
+  {kind = "host", reported_kind = "host-build", reference = "migration/ipados18/services196-wifi-station.md", result = "实际 station/crypto 在 ASan/UBSan 下 255 checks、0 failures；最终 station 与原生接口 arm64 编译、完整内核链接、强符号/未解析零和八核打包 PASS"},
+  {kind = "source", reference = "migration/ipados18/services196-wifi-station.md", result = "强制 reflink 私有 XNU 缓存、生成依赖路径重定位；主工作树/GPU/USB/共享缓存/设备均未修改"}
+]
+
+[[area]]
 id = "services193-settings-brightness"
 status = "device-verified"
 components = ["DitingPlatform24"]

@@ -20,6 +20,8 @@ import importlib.util
 from diting_adt_contract import audit_adt
 from diting_memory import DEFAULT_MEMORY_MAP, load_memory_map
 from diting_touch_contract import adt_touch_properties, validate_touch_nodes
+from diting_native_inputs import options
+from diting_platform_identity import platform_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,6 +147,13 @@ def main():
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
     args = parser.parse_args()
+    # Keep per-device identity out of public hardware profiles and the nearly
+    # full DarwinBoot command line. This is a software UUID, not Apple ECID.
+    identity = options().get('platform_uuid')
+    try:
+        software_uuid = platform_identity(identity) if identity is not None else None
+    except ValueError as error:
+        parser.error(str(error))
     if (args.userdata_first_lba is None) != (args.userdata_last_lba is None):
         parser.error('userdata first and last LBA must be provided together')
     if args.userdata_first_lba is not None and not (0 < args.userdata_first_lba <= args.userdata_last_lba < 2**64):
@@ -187,6 +196,7 @@ def main():
     boot_nonce_hash = hashlib.sha384(os.urandom(32)).digest()
     backlight = json.loads((ROOT / 'configs/diting-display-sm8475.json').read_text())['brightness']
     chosen = [
+        *([('diting-platform-uuid', software_uuid)] if software_uuid is not None else []),
         ('random-seed', os.urandom(64)),
         ('osenvironment', b'main\0'),
         # MobileGestalt/FrontBoard use this software coordinate scale. Missing

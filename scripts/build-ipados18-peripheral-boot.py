@@ -7,7 +7,6 @@ standard Consumer reports. No Apple touch-controller driver is selected.
 import importlib.util
 import json
 import sys
-import uuid
 from pathlib import Path
 
 path=Path(__file__).with_name('build-ipados18-prelinked-boot.py')
@@ -53,6 +52,7 @@ base.plan=include_hid(base.plan)
 base.emit=include_hid(emit_hid(base.emit))
 if __name__=='__main__':
     from diting_native_inputs import options
+    from diting_platform_identity import platform_identity
     # Keep per-phone identity in ignored local.toml. The public board recipe
     # must not bake in an Apple ECID or another developer's hardware serial.
     supplied=any(item.startswith('--kernel-arg=diting_platform_uuid=') or
@@ -60,8 +60,8 @@ if __name__=='__main__':
          sys.argv[i+1].startswith('diting_platform_uuid='))
         for i,item in enumerate(sys.argv))
     value=options().get('platform_uuid')
-    if value and not supplied:
-        identity=uuid.UUID(value)
-        if not identity.int:raise SystemExit('platform_uuid must not be the null UUID')
-        sys.argv.append('--kernel-arg=diting_platform_uuid='+str(identity))
+    if value is not None:
+        platform_identity(value)
+    elif not supplied:
+        raise SystemExit('Configure a stable software platform_uuid in ignored local.toml before boot packaging; native network initialization requires IOPlatformUUID')
     base.main()

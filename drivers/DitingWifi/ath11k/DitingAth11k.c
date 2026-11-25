@@ -142,21 +142,3 @@ void ath11k_warn(struct ath11k_base *ab, const char *format, ...)
 { (void)ab; va_list a; va_start(a, format); says(4, format, a); va_end(a); }
 void ath11k_err(struct ath11k_base *ab, const char *format, ...)
 { (void)ab; va_list a; va_start(a, format); says(3, format, a); va_end(a); }
-
-/* The framework's supported channels come from firmware/regulatory state. */
-unsigned nw_wifi_channel_list(unsigned *out, unsigned capacity)
-{
- struct ieee80211_hw *hw=nw_wifi_hw();unsigned n=0;
- if (!hw || !out) return 0;
- for (unsigned b=0;b<NUM_NL80211_BANDS;b++) {
-  // Match the shared station scan policy and the Apple80211 channel codec,
-  // which currently publishes only 2.4/5 GHz channels on this board.
-  if(b==NL80211_BAND_6GHZ)continue;
-  struct ieee80211_supported_band *band=hw->wiphy->bands[b];if(!band)continue;
-  for (unsigned i=0;i<band->n_channels && n<capacity;i++) {
-   const struct ieee80211_channel *c=&band->channels[i];
-   if (!(c->flags & IEEE80211_CHAN_DISABLED)) out[n++]=c->center_freq;
-  }
- }
- return n;
-}

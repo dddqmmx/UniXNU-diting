@@ -1,0 +1,25 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8000,5 +8000,11 @@
+ #include "DitingUiRuntimeInstall.h"
+ #endif
++#if defined(XNU_DITING_WIFI_RUNTIME_INSTALL) && XNU_DITING_WIFI_RUNTIME_INSTALL
++#if !defined(DITING) || !DEVELOPMENT || SECURE_KERNEL || !XNU_OWNER_CACHE_MOUNT || !XNU_OWNER_DATA_UFS || XNU_OWNER_UNION_SYSTEMOS
++#error Wi-Fi service installation requires the bound Diting development UFS OS
++#endif
++#include "DitingWifiRuntimeInstall.h"
++#endif
+ #if defined(XNU_DITING_USB_DIAGNOSTICS) && XNU_DITING_USB_DIAGNOSTICS
+ #if !defined(DITING) || !DEVELOPMENT || SECURE_KERNEL
+ #error Diting USB diagnostics require the Diting development kernel
+@@ -8097,6 +8103,9 @@
+ #if defined(XNU_DITING_UI_RUNTIME_INSTALL) && XNU_DITING_UI_RUNTIME_INSTALL
+ 	diting_ui_runtime_prepare(p, (user_addr_t)scratch_addr);
+ #endif
++#if defined(XNU_DITING_WIFI_RUNTIME_INSTALL) && XNU_DITING_WIFI_RUNTIME_INSTALL
++	diting_wifi_runtime_prepare(p, (user_addr_t)scratch_addr);
++#endif
+ #if defined(XNU_DITING_USB_DIAGNOSTICS) && XNU_DITING_USB_DIAGNOSTICS
+ 	diting_usb_boot_capture_start();
+ #endif

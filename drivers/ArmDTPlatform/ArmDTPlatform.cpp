@@ -21,6 +21,7 @@
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
 #include <uuid/uuid.h>
+#include "DitingPlatformIdentity.h"
 
 extern "C" bool diting_cpu_start(IOService *platform);
 #if XNU_DITING_WIFI
@@ -43,6 +44,10 @@ volatile uint32_t armdt_platform_defaults_count = 0;
 volatile uint32_t armdt_platform_nvram_proxy = 0;
 volatile uint32_t armdt_platform_device_count = 0;
 volatile uint32_t armdt_platform_start_phase = 0;
+// Source: 0 unavailable, 1 legacy boot argument, 2 board ADT, 3 native UUID.
+// Status: 0 pending, 1 published, 2 absent, 3 invalid, 4 property write failed.
+volatile uint32_t diting_platform_uuid_source = 0;
+volatile uint32_t diting_platform_uuid_status = 0;
 extern volatile uint32_t armcpu_start_phase, armcpu_registered, armcpu_gic_ready;
 extern volatile int32_t armcpu_start_error;
 uint64_t diting_platform_startup_diagnostic(void)
@@ -215,13 +220,36 @@ bool ArmDTPlatform::configure (IOService *provider)
   // an explicitly supplied, stable software platform UUID derived by the
   // local build from this phone's SoC identity. Do not invent an Apple ECID
   // or let IPConfiguration hold configd's startup indefinitely.
-  char platformUUID[37] = {};uuid_t parsed;
-  if (!provider->getProperty(kIOPlatformUUIDKey) &&
-      PE_parse_boot_argn("diting_platform_uuid",platformUUID,sizeof platformUUID) &&
-      platformUUID[36]==0 && uuid_parse(platformUUID,parsed)==0 && !uuid_is_null(parsed)) {
-    provider->setProperty(kIOPlatformUUIDKey,platformUUID);
+  char platformUUID[37] = {}, validatedUUID[37] = {};uuid_t parsed;
+  OSString *nativeUUID = OSDynamicCast(OSString,provider->getProperty(kIOPlatformUUIDKey));
+  bool identityValid = false;
+  if (nativeUUID) {
+    identityValid = diting_platform_identity_copy(nativeUUID->getCStringNoCopy(),
+        nativeUUID->getLength()+1,validatedUUID);
+    diting_platform_uuid_source = 3;
+  } else if (PE_parse_boot_argn("diting_platform_uuid",platformUUID,sizeof platformUUID)) {
+    identityValid = diting_platform_identity_copy(platformUUID,sizeof platformUUID,validatedUUID);
+    diting_platform_uuid_source = 1;
+  } else {
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen",gIODTPlane);
+    OSObject *suppliedIdentity = chosen ? chosen->getProperty("diting-platform-uuid") : nullptr;
+    OSData *identity = OSDynamicCast(OSData,suppliedIdentity);
+    if (suppliedIdentity) {
+      identityValid = identity && diting_platform_identity_copy(identity->getBytesNoCopy(),
+          identity->getLength(),validatedUUID);
+      diting_platform_uuid_source = 2;
+    }
+    if (chosen) chosen->release();
+  }
+  identityValid = identityValid && uuid_parse(validatedUUID,parsed)==0 && !uuid_is_null(parsed);
+  if (identityValid && (nativeUUID || provider->setProperty(kIOPlatformUUIDKey,validatedUUID))) {
     IOService::publishResource(kIOPlatformUUIDKey,provider->getProperty(kIOPlatformUUIDKey));
-    IOLog("ArmDTPlatform: local software platform UUID published\n");
+    diting_platform_uuid_status = 1;
+    IOLog("ArmDTPlatform: platform UUID resource published source=%u\n",diting_platform_uuid_source);
+  } else {
+    diting_platform_uuid_status = identityValid ? 4 : (diting_platform_uuid_source ? 3 : 2);
+    IOLog("ArmDTPlatform: platform UUID unavailable source=%u status=%u; network initialization unready\n",
+        diting_platform_uuid_source,diting_platform_uuid_status);
   }
 
   OSIterator *iterator = getChildIterator (gIOServicePlane);

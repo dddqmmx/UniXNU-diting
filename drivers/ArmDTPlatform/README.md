@@ -26,6 +26,13 @@
 
 ### 启动顺序
 
+稳定的软件平台 UUID 从本机 ignored `local.toml` 的 `diting_build.platform_uuid` 写入
+`/chosen/diting-platform-uuid`（37 字节含 NUL）。平台专家严格校验后发布真实
+`IOPlatformUUID` 资源，让 `gethostuuid()` 和 configd 的网络插件完成初始化。
+该值保持跨启动不变；不使用 Apple ECID/chip-id 字段，不占用 DarwinBoot 的命令行。
+仍接受显式 `diting_platform_uuid` 旧参数，并优先保留有效原生平台 UUID。缺失或无效输入
+记录失败并继续平台启动，不能据此声称原生网络就绪。
+
 `configure()` 检查设备树结构和 CHRP NVRAM 输入，发布 CPU 与平台设备，并完成真实 CPU/GIC 启动；必要步骤失败时返回失败。电源、Wi-Fi 和平台注册按原启动顺序执行，GPU 入口随后执行。设备树缺少 CHRP 代理时记录错误并返回失败。
 
 2026-11-13：services171 调整可选外设与平台注册顺序后，实机八核和单核均仍触发 `IOSecureBSDRoot()` 的 `assert(pe)`，该顺序改动已撤回。services172 只记录实际启动阶段与 CPU 失败点，供同一项致命检查报告上下文；不以计数器替代硬件成功条件。

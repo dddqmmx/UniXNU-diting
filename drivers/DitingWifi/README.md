@@ -46,6 +46,20 @@ BDF 按 QMI chip/board ID 使用 Nothing CNSS2 的文件命名规则，AMSS 按
 
 ## 当前证据
 
+services196/wifi-20261115 是以 services195 为基线的独立 Wi-Fi 候选，未部署。
+实际 station 与 crypto 在主机接入点模拟器中通过 255 项 ASan/UBSan 检查：
+开放网络、WPA2-Personal、WPA2/WPA3 兼容模式的 PSK 路径、错误密码、
+四次握手重传、GTK 轮换、收发、队列背压、扫描取消和断线。
+WPA2 使用 CCMP-128，要求接入点提供 PSK 且不强制 PMF；WPA3-only/SAE 和企业认证尚未实现。
+`ath11k/station.patch` 只应用到固定上游源码的构建副本；上游源码和其他驱动保持原状。
+
+网络接口在拆分 Ethernet 头之前向 BPF 提交完整 RX mbuf，使 configd 的 DHCP
+客户端能在取得 IP 地址之前接收报文；TX 同样接入 BPF，并向 BSD 返回转换后的
+Darwin 错误码。原生设置继续负责输入密码和加入网络。完整内核链接与八核打包已通过，
+Wi-Fi/BPF 必需符号为强符号，未解析符号为零。主机检查与编译不能证明
+实机扫描、DHCP、DNS 或联网成功；源码保留在独立 checkout，合入及验收等待 GPU 任务释放资源。
+记录见 [services196 Wi-Fi](../../migration/ipados18/services196-wifi-station.md)。
+
 services185 已由用户确认进入系统，但触屏不工作；本轮 Wi-Fi 的 BDF 功放响应、扫描、
 关联和联网尚未验收。普通 regulator list 按 Nothing CNSS2 consumer 顺序生成，
 `smpe3` 不再提前直接使能；未请求的模式保持不变。
@@ -64,7 +78,8 @@ MHI RDDM 固件崩溃；BSS 扫描、认证、地址配置及联网尚无成功�
 只有 station 就绪且具有有效硬件 MAC 后才发布网络接口；失败记录原因并让 iOS 继续启动。
 不会用空的成功实现替代固件、扫描或链接结果。
 
-固件必须由 `prepare-diting-wifi.py` 从 Diting 当前活动槽的 modem 分区只读提取。
+固件默认由 `prepare-diting-wifi.py` 从 Diting 当前活动槽的 modem 分区只读提取；
+已有本地输入可显式使用 `--firmware-source local`，并要求来源记录为外部本地目录。
 保留与 `qca6490` 同级的本地 `local-inputs.json`；构建器读取来源记录，排除调试数据库
 和元数据，只嵌入无线固件及板级数据。Sheng 仅提供公共 station/shim 源码。
 services81 将 MAC 启动移到 QMI 完成注册之后，固件崩溃会停止 dispatcher、结束挂起的

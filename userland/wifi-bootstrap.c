@@ -225,11 +225,16 @@ int main(int argc,char **argv) {
         if(list)CFRelease(list);
         if(!count)continue;
         fprintf(stderr,"Diting Wi-Fi bootstrap: native manager discovered %ld device(s)\n",(long)count);
+        /* The native 22H374 key is a saved power-state enum (CFNumber),
+         * with a legacy CFBoolean migration path. It is not proof that
+         * association or a security policy has succeeded. */
         CFTypeRef allowed=property(manager,CFSTR("AllowEnable"));
         int observed=-1;
         if(allowed && CFGetTypeID(allowed)==CFBooleanGetTypeID())observed=CFBooleanGetValue(allowed);
+        else if(allowed && CFGetTypeID(allowed)==CFNumberGetTypeID())
+            (void)CFNumberGetValue(allowed,kCFNumberIntType,&observed);
         if(allowed)CFRelease(allowed);
-        fprintf(stderr,"Diting Wi-Fi bootstrap: native AllowEnable=%d (not an association result)\n",observed);
+        fprintf(stderr,"Diting Wi-Fi bootstrap: native saved power preference=%d (association untested)\n",observed);
         int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
         if(fd>=0){const char sent[]="native request dispatched\n";(void)write(fd,sent,sizeof(sent)-1);close(fd);}
         alarm(0);return 0;

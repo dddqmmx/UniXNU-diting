@@ -190,11 +190,8 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     jobs = [(gen / (n + '.c'), out / ('ath11k_' + n + '.o'), []) for n in ath]
     jobs += [(mhi / (n + '.c'), out / ('mhi_' + n + '.o'), ['-I', str(mhi)]) for n in ('init', 'main', 'pm', 'boot')]
     # WPA station nonces use Darwin's entropy source, not a timer/counter.
-    sta = (shared / 'src/nw_sta.c').read_text()
-    begin = sta.index('static void make_nonce(u8 *out) {')
-    end = sta.index('static void derive_ptk(void)', begin)
-    sta = sta[:begin] + 'extern void DitingWifiRandom(void *, size_t);\nstatic void make_nonce(u8 *out) { DitingWifiRandom(out, 32); }\n' + sta[end:]
-    (out / 'nw_sta_diting.c').write_text(sta)
+    from diting_wifi_station import prepare_station
+    prepare_station(shared / 'src/nw_sta.c', out)
     # Preserve the user's no-checksum policy in the shared loader too.
     runtime = (shared / 'shim/src/lx_rt.c').read_text()
     begin = runtime.index('  static int settled;\n', runtime.index('int lx_request_firmware('))
@@ -209,6 +206,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     jobs += [(replacements.get(n, shared / n), out / ('shared_' + Path(n).stem + '.o'), []) for n in common_sources]
     jobs += [(linux / ('drivers/soc/qcom/' + n + '.c'), out / (n + '.o'), []) for n in ('qmi_interface', 'qmi_encdec')]
     jobs += [(ROOT / 'drivers/DitingWifi/ath11k/DitingAth11k.c', out / 'DitingAth11k.o', [])]
+    jobs += [(ROOT / 'drivers/DitingWifi/ath11k/DitingWifiChannels.c', out / 'DitingWifiChannels.o', [])]
     commands = []
     def compile(job):
         src, obj, extra = job; cmd = [clang, *flags, *extra, '-c', str(src), '-o', str(obj)]
