@@ -106,6 +106,10 @@ static bool read_io(void *context, uint8_t opcode, unsigned address_bytes,
 static bool write_io(void *context, const uint8_t *data, unsigned length) {
     Mock *m = context; ++m->writes;
     assert(length == 3);
+    if (data[0] == 0xa2) {
+        assert(data[1] == 0x02 && (data[2] == 0x00 || data[2] == 0x01));
+        return m->fault != ScanFault;
+    }
     if (data[0] == 0xa4) {
         assert(!memcmp(data, (uint8_t[]){0xa4, 0, 1}, 3));
         assert(m->phase == 2); m->phase = 3;
@@ -245,7 +249,54 @@ static void test_fifo(void) {
     m = (Mock){.fifo_count = 32}; io = mock_io(&m); s = state();
     event(m.fifo[0], 1, 0, 0, 1, 1, 1); m.fifo[0][7] = 31;
     assert(diting_st61y_poll(&io, &s, emit, NULL, &report) == DitingSt61yPollEvents);
-    assert(report.events == 32 && m.fifo_count == 0);
+    assert(report.events == 32 && !report.overflow && m.fifo_count == 0 && s.contact[0].down);
+
+    /* True 32-event FIFO saturation must release retained contacts to prevent ghosts. */
+    m = (Mock){.fifo_count = 32}; io = mock_io(&m); s = state(); emit_count = 0;
+    for (unsigned i = 0; i < 32; ++i) {
+        event(m.fifo[i], i == 0 ? 1 : 2, 0, 0, 1, (uint16_t)(100 + i), 200);
+    }
+    m.fifo[0][7] = 31;
+    assert(diting_st61y_poll(&io, &s, emit, NULL, &report) == DitingSt61yPollEvents);
+    assert(report.events == 32 && report.overflow && !s.contact[0].down);
+    assert(emitted[emit_count - 1].type == DitingSt61yUp && emitted[emit_count - 1].id == 0);
+
+    /* Corrupted/invalid event inside a batch must release retained contacts. */
+    m = (Mock){.fifo_count = 2}; io = mock_io(&m); s = state(); emit_count = 0;
+    s.contact[2] = (DitingSt61yContact){true, 1000, 2000};
+    event(m.fifo[0], 1, 0, 0, 1, 100, 100); m.fifo[0][7] = 1;
+    memset(m.fifo[1], 0x55, 8); /* invalid low bits != 3 */
+    assert(diting_st61y_poll(&io, &s, emit, NULL, &report) == DitingSt61yPollEvents);
+    assert(report.invalid == 1 && !s.contact[0].down && !s.contact[2].down);
+
+    /* EVT_ID_STATUS_UPDATE FORCE_CAL/WATER/SS_RAW_SAT/POCKET release contacts; ECHO does not. */
+    s = state(); emit_count = 0;
+    s.contact[3] = (DitingSt61yContact){true, 300, 400};
+    uint8_t st_echo[8] = {0x43, 0x01, 0xa2, 0x02, 0x01, 0, 0, 0};
+    assert(diting_st61y_event(&s, st_echo, 8, emit, NULL) == DitingSt61yIgnored);
+    assert(s.contact[3].down);
+    uint8_t st_fcal[8] = {0x43, 0x05, 0x01, 0, 0, 0, 0, 0};
+    assert(diting_st61y_event(&s, st_fcal, 8, emit, NULL) == DitingSt61yStatusReleaseEvent);
+    assert(!s.contact[3].down && emitted[emit_count - 1].type == DitingSt61yUp);
+
+    /* Continuation packet after EVT_ID_USER_REPORT 0x53 0x02 0x18 must be skipped. */
+    m = (Mock){.fifo_count = 2}; io = mock_io(&m); s = state(); emit_count = 0;
+    memcpy(m.fifo[0], (uint8_t[]){0x53, 0x02, 0x18, 0, 0, 0, 0, 1}, 8);
+    event(m.fifo[1], 1, 0, 7, 1, 500, 500); /* looks like ENTER slot 7 if not skipped! */
+    assert(diting_st61y_poll(&io, &s, emit, NULL, &report) == DitingSt61yPollEvents);
+    assert(report.invalid == 0 && !s.contact[7].down && emit_count == 0);
+
+    /* FOD leave sentinel 0x33 0xb5 must be ignored without flagging invalid. */
+    s = state(); s.contact[0] = (DitingSt61yContact){true, 100, 200};
+    uint8_t fod_up[8] = {0x33, 0xb5, 0, 0, 0, 0, 0, 0};
+    assert(diting_st61y_event(&s, fod_up, 8, emit, NULL) == DitingSt61yIgnored);
+    assert(s.contact[0].down);
+
+    /* Charger mode helper writes A2 02 01 / A2 02 00 cleanly. */
+    m = (Mock){0}; io = mock_io(&m);
+    assert(diting_st61y_set_charger(&io, true));
+    assert(diting_st61y_set_charger(&io, false));
+    assert(m.writes == 2);
 }
 int main(void) {
     test_wire(); test_sysinfo(); test_start(); test_contacts(); test_invalid_and_reset(); test_fifo();

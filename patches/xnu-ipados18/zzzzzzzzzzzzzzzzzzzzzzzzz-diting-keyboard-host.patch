@@ -1,0 +1,57 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6004,6 +6004,31 @@
+     0, 0, sysctl_exec_inject, "A", "LIBRARY NAME... [; LIBRARY NAME...]");
+ 
++/* namei may supply a full executable path for application launches. Match
++ * the final component, using the supplied bound, as the log route does. */
++static void
++exec_inject_basename(const char **name, size_t *length)
++{
++	size_t begin = 0;
++	for (size_t i = 0; i < *length; ++i) if ((*name)[i] == '/') begin = i + 1;
++	*name += begin;
++	*length -= begin;
++}
++
++/* A paired keyboard candidate can cover Spotlight before the prepared
++ * static init is refreshed. Only the existing UI/InputUI rule is extended. */
++static bool
++exec_keyboard_host_alias(const char *library, size_t liblen,
++    const char *word, size_t wordlen, const char *name, size_t namelen,
++    int enabled)
++{
++	return enabled == 1 &&
++	    liblen == sizeof("/diting/libditing-ui18.dylib") - 1 &&
++	    memcmp(library, "/diting/libditing-ui18.dylib", liblen) == 0 &&
++	    wordlen == sizeof("InputUI") - 1 && memcmp(word, "InputUI", wordlen) == 0 &&
++	    namelen == sizeof("Spotlight") - 1 && memcmp(name, "Spotlight", namelen) == 0;
++}
++
+ static bool
+ exec_inject_env(struct image_params *imgp, char *env, size_t size)
+ {
+ 	char conf[sizeof(exec_inject_conf)];
+@@ -6017,5 +6033,12 @@
+ 	p = conf;
+ 	name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	int keyboard_host = 0;
++	PE_parse_boot_argn("diting_kbd", &keyboard_host, sizeof(keyboard_host));
++	keyboard_host = keyboard_host == 1 || keyboard_host == 3;
++	if (name == NULL || imgp->ip_ndp->ni_cnd.cn_namelen <= 0 ||
++	    imgp->ip_ndp->ni_cnd.cn_namelen > MAXPATHLEN) return false;
++	size_t namelen = imgp->ip_ndp->ni_cnd.cn_namelen;
++	exec_inject_basename(&name, &namelen);
+ 	used = strlcpy(env, "DYLD_INSERT_LIBRARIES=", size);
+ 	while (*p != 0) {
+ 		while (*p == ' ' || *p == ';') p++;
+@@ -6028,6 +6046,8 @@
+ 			while (*p && *p != ' ' && *p != ';') p++;
+-			if ((size_t)(p - word) == imgp->ip_ndp->ni_cnd.cn_namelen &&
++			if ((size_t)(p - word) == namelen &&
+ 			    p != word && strncmp(word, name, p - word) == 0) matched = true;
++			if (exec_keyboard_host_alias(library, liblen, word, p - word,
++			    name, namelen, keyboard_host)) matched = true;
+ 		}
+ 		if (matched && liblen && *library == '/') {
+ 			if (used + (any ? 1 : 0) + liblen >= size) return false;

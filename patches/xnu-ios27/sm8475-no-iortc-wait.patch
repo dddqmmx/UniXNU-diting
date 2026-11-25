@@ -1,0 +1,17 @@
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -77,8 +77,13 @@ IOKitInitializeTime( void )
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	(void)t;
++	IOLog("DITING: no DT RTC provider; initialize calendar fallback\n");
++#else
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
++#endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IONVRAM"), &t );

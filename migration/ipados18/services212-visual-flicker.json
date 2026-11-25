@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "candidate": "/home/dddqmmx/UniXNU/diting-work/build/services212/gmu-ack-observe-20261117-01",
+  "observed_utc": "2026-11-16T20:10:50.772038+00:00",
+  "question": "212 的颜色修复已完成上机测试。现在只看手机当前正常界面，蓝色／橙色交替闪烁还有吗？无需滑动或开关应用。",
+  "user_answer": "闪烁已消失",
+  "result": "PASS",
+  "scope": "current normal screen, visual blue/orange flicker only",
+  "map_and_all_colour": "UNQUALIFIED",
+  "physical_fps": "UNQUALIFIED",
+  "manual_interaction_required": false
+}

@@ -1,0 +1,17 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -785,4 +785,13 @@
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	/* Optional Diting SM8475 source-storage and USB console hooks. */
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	extern void native_source_storage_start(void) __attribute__((weak_import));
++	if (&native_source_storage_start)
++		native_source_storage_start();
++	extern void diting_usb_start(void) __attribute__((weak_import));
++	if (&diting_usb_start)
++		diting_usb_start();
++#endif
+ #if DEVELOPMENT || DEBUG

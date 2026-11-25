@@ -1,0 +1,52 @@
+schema_version = 1
+
+[target]
+os = "iOS"
+version = "27.2.1"
+build = "24B156"
+profile = "ios-27.2.1-24B156"
+product_type = "iPhone18,2"
+device_class = "v54ap"
+variant = "Customer Erase Install (IPSW)"
+chip_id = 0x8150
+board_id = 0x0e
+kernelcache = "kernelcache.release.v54"
+kernel_format = "MH_FILESET"
+kernel_arch = "arm64e"
+kernel_xnu = "13432.42.3"
+kernel_darwin = "27.2.0"
+
+[source_kernel]
+xnu = "12377.121.6"
+darwin = "25.5.0"
+revision = "ac9718fb1af618d5ce8678d0dc6e8a58f252216f"
+compatibility_series = "os-profiles/ios-27.2.1-24B156/patches/xnu/series"
+reason = "Apple's published source stops at xnu-12377; the newer binary ABI needs separate qualification"
+
+[hardware]
+board = "diting"
+soc = "SM8475"
+cpus = 8
+cpu_topology = "4 Cortex-A510 + 3 Cortex-A710 + 1 Cortex-X2"
+page_bytes = 4096
+timer_hz = 19200000
+native_pac_features_observed = true
+native_pac_key_access_qualified = false
+native_pac_el0_el1_roundtrip_qualified = false
+
+[images]
+os_member = "141-10103-223.dmg.aea"
+systemos_member = "141-10617-235.dmg.aea"
+appos_member = "141-08824-252.dmg"
+os_bytes = 10580131840
+os_volume_uuid = "2913A3C9-CACD-44DB-A47E-90F19C3610A5"
+systemos_bytes = 6322913280
+systemos_volume_uuid = "C78313FC-73C7-461D-A8A7-D3273E1B2B7B"
+appos_bytes = 16777216
+appos_volume_uuid = "3A8063C9-676F-44A3-B140-FE3C61DD90AE"
+
+[baseline]
+profile = "ipados-18.7.10-22H374"
+runtime = "services226 / keyboard-dock-20261118-01"
+persistent_boot = "services198"
+userdata_policy = "Preserve existing Data; plan new OS/SystemOS window placement from actual geometry"

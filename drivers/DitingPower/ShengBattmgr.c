@@ -92,9 +92,57 @@ void sheng_battmgr_refresh(ShengBattmgr *b, int slow)
     b->in_flight = 0;
 }
 
+uint32_t sheng_battmgr_thermal_level(int temp_centic, uint32_t current_level)
+{
+    if (current_level > SHENG_BATTMGR_THERMAL_MAX_LEVEL) current_level = SHENG_BATTMGR_THERMAL_MAX_LEVEL;
+    if (temp_centic >= 4500) return 3u;
+    if (current_level >= 3u) {
+        if (temp_centic >= 4400) return 3u;
+        if (temp_centic >= 4100) return 2u;
+        if (temp_centic >= 3700) return 1u;
+        return 0u;
+    }
+    if (temp_centic >= 4200) return 2u;
+    if (current_level == 2u) {
+        if (temp_centic >= 4100) return 2u;
+        if (temp_centic >= 3700) return 1u;
+        return 0u;
+    }
+    if (temp_centic >= 3800) return 1u;
+    if (current_level == 1u && temp_centic >= 3700) return 1u;
+    return 0u;
+}
+
+int sheng_battmgr_queue_write(ShengBattmgr *b, uint8_t opcode, uint8_t property, uint32_t value)
+{
+    if (!b || b->write_pending || b->write_in_flight) return 0;
+    const int allow_thermal = opcode == SHENG_BATTMGR_OP_BATTERY_SET &&
+        property == SHENG_BATTMGR_PROP_BATT_THERMAL_LEVEL && value <= SHENG_BATTMGR_THERMAL_MAX_LEVEL;
+    const int allow_icl = opcode == SHENG_BATTMGR_OP_USB_SET &&
+        property == SHENG_BATTMGR_PROP_USB_ICL &&
+        value >= SHENG_BATTMGR_ICL_MIN_UA && value <= SHENG_BATTMGR_ICL_MAX_UA;
+    if (!allow_thermal && !allow_icl) return 0;
+    b->write_opcode = opcode;
+    b->write_property = property;
+    b->write_value = value;
+    b->write_pending = 1;
+    return 1;
+}
+
 uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_BYTES])
 {
-    if (b->in_flight || b->cursor == kNoCycle || b->cursor >= kReadCount) return 0;
+    if (b->in_flight || b->write_in_flight) return 0;
+    if (b->write_pending) {
+        header(out, SHENG_BATTMGR_TYPE_REQUEST, b->write_opcode);
+        put32(out + 12, 0);
+        put32(out + 16, b->write_property);
+        put32(out + 20, b->write_value);
+        b->write_pending = 0;
+        b->write_in_flight = 1;
+        b->writes_sent++;
+        return SHENG_BATTMGR_REQUEST_BYTES;
+    }
+    if (b->cursor == kNoCycle || b->cursor >= kReadCount) return 0;
     const unsigned field = kReadOrder[b->cursor];
     header(out, SHENG_BATTMGR_TYPE_REQUEST, kFields[field].opcode);
     put32(out + 12, 0); put32(out + 16, kFields[field].property); put32(out + 20, 0);
@@ -136,6 +184,18 @@ static int advance(ShengBattmgr *b)
 
 static int failed_request(ShengBattmgr *b, int timeout)
 {
+    if (b->write_in_flight) {
+        b->write_in_flight = 0;
+        b->writes_err++;
+        if (timeout) {
+            b->timeouts++;
+            b->last_write_rc = -110;
+        } else {
+            b->errors++;
+            b->last_write_rc = -5;
+        }
+        return BmWriteDone;
+    }
     if (b->cursor == kNoCycle || b->cursor >= kReadCount || !b->in_flight) return BmIgnored;
     const unsigned field = kReadOrder[b->cursor];
     if (timeout) {
@@ -170,7 +230,7 @@ static int valid_value(unsigned field, int32_t value)
     case BmUsbType: case BmRealType: return value >= 0 && value <= 0xff;
     case BmUsbLimit: case BmUsbMax: case BmChargeCurrent: return value >= 0 && value <= 30000000;
     case BmChargeType: return value >= 0 && value <= 8;
-    case BmThermalLevel: return value >= 0 && value <= 16;
+    case BmThermalLevel: return value >= 0 && value <= 30000000; /* level 0..16 or FCC limit in uA */
     default: return 0;
     }
 }
@@ -197,6 +257,21 @@ int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length)
         (length == 12 || length == SHENG_BATTMGR_ENABLE_BYTES)) {
         b->enabled = 1;
         return BmEnabled;
+    }
+    if (b->write_in_flight && type == SHENG_BATTMGR_TYPE_REQUEST && length == SHENG_BATTMGR_REQUEST_BYTES &&
+        opcode == b->write_opcode && le32(data + 12) == b->write_property) {
+        const int32_t rc = (int32_t)le32(data + 20);
+        b->write_in_flight = 0;
+        b->responses++;
+        b->last_write_rc = rc;
+        if (rc == 0) {
+            b->writes_ok++;
+            sheng_battmgr_refresh(b, 0);
+        } else {
+            b->writes_err++;
+            b->errors++;
+        }
+        return BmWriteDone;
     }
     /* Only exact scalar replies may complete a property read. Never accept
      * a model string, an unrelated owner, or a late reply for another field. */
@@ -257,9 +332,14 @@ void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
     s->percent = s->charge_known ? (V(BmCapacity) + 50) / 100 : 0;
     s->charging = s->present && s->external && status == 1;
     s->fully_charged = s->present && s->external && status == 4;
-    s->critical = s->present && s->charge_known && s->source_known && !s->external && s->percent <= 2;
     s->voltage_mv = HAS(BmVoltage) ? V(BmVoltage) / 1000 : 0;
     s->current_ma = HAS(BmCurrent) ? (int)(-(int64_t)V(BmCurrent) / 1000) : 0;
+    {
+        const int weak_drain = s->external && HAS(BmCurrent) && s->current_ma < 0 &&
+            (s->percent <= 1 || (HAS(BmVoltage) && s->voltage_mv > 0 && s->voltage_mv < 3450));
+        s->critical = s->present && s->charge_known && s->source_known &&
+            ((!s->external && s->percent <= 2) || weak_drain);
+    }
     s->temperature_valid = HAS(BmTemperature);
     s->temperature = s->temperature_valid ? V(BmTemperature) : 0;
     s->raw_mah = HAS(BmCharge) ? V(BmCharge) : 0;
@@ -269,7 +349,10 @@ void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
     s->time_to_empty_min = HAS(BmTimeToEmpty) ? V(BmTimeToEmpty) / 60 : -1;
     s->time_to_full_min = HAS(BmTimeToFull) ? V(BmTimeToFull) : -1;
     if (s->external) {
-        s->adapter_family = family(HAS(BmUsbAdapter) ? V(BmUsbAdapter) : 0);
+        int adapter_type = HAS(BmUsbAdapter) && V(BmUsbAdapter) ? V(BmUsbAdapter) : 0;
+        if (!adapter_type && HAS(BmUsbType) && V(BmUsbType)) adapter_type = V(BmUsbType);
+        if (!adapter_type && HAS(BmRealType) && V(BmRealType)) adapter_type = V(BmRealType);
+        s->adapter_family = family(adapter_type);
         s->adapter_mv = HAS(BmUsbVoltage) ? V(BmUsbVoltage) / 1000 : 0;
         s->adapter_ma = HAS(BmUsbMax) ? V(BmUsbMax) / 1000 : 0;
         if (HAS(BmUsbLimit) && (!s->adapter_ma || V(BmUsbLimit) / 1000 < s->adapter_ma))

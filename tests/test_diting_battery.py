@@ -21,6 +21,7 @@ class BatteryProtocolTests(unittest.TestCase):
             '-I' + str(DEVICE / 'drivers/DitingPower'),
             str(DEVICE / 'tests/diting_battery_protocol.c'),
             str(DEVICE / 'drivers/DitingPower/ShengBattmgr.c'),
+            str(DEVICE / 'drivers/DitingPower/DitingUcsi.c'),
             '-o', str(cls.binary),
         ], check=True, capture_output=True, text=True)
 
@@ -61,6 +62,21 @@ class BatteryProtocolTests(unittest.TestCase):
 
     def test_malformed_frame_sanitizer_coverage(self):
         self.run_case('fuzz')
+
+    def test_usb_data_role_classification_and_ucsi_resolution(self):
+        self.run_case('usb_data_role')
+
+    def test_pmic_glink_multi_owner_routing_and_epoch(self):
+        self.run_case('pmic_glink')
+
+    def test_ucsi_glink_state_machine_and_connector_status(self):
+        self.run_case('ucsi')
+
+    def test_battmgr_safe_whitelisted_writes_and_thermal_hysteresis(self):
+        self.run_case('writes')
+
+    def test_weak_usb_net_drain_critical_alert(self):
+        self.run_case('weak_drain')
 
 
 if __name__ == '__main__':

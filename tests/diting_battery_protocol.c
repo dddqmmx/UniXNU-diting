@@ -7,6 +7,8 @@
 #include "ShengBattmgr.h"
 #include "DitingBatteryInbox.h"
 #include "DitingBatteryState.h"
+#include "DitingPmicGlink.h"
+#include "DitingUcsi.h"
 
 static void put32(uint8_t *p, uint32_t value)
 {
@@ -349,12 +351,315 @@ static void test_fuzz(void)
     }
 }
 
+static void test_usb_data_role(void)
+{
+    /* USB-A PC: SDP(1) and CDP(3) -> data host even if UCSI opmode is default/BC (-1). */
+    int cls = diting_battery_classify_usb_data(1, 1, 1, 1, 1, 1, 0, 0);
+    assert(cls == DitingUsbClassDataHost);
+    assert(diting_usb_resolve_data_online(1, -1, 0, cls) == 1);
+    cls = diting_battery_classify_usb_data(1, 1, 1, 3, 1, 3, 0, 0);
+    assert(cls == DitingUsbClassDataHost);
+    assert(diting_usb_resolve_data_online(-1, -1, 0, cls) == 1);
+
+    /* USB-A wall charger: DCP(2) and HVDCP(0x81) -> MUST return 0 even if UCSI sees 56k Rp DFP. */
+    cls = diting_battery_classify_usb_data(1, 1, 1, 2, 1, 2, 0, 0);
+    assert(cls == DitingUsbClassCharger);
+    assert(diting_usb_resolve_data_online(1, 1, 0, cls) == 0);
+    cls = diting_battery_classify_usb_data(1, 1, 0, 0, 1, 5, 1, 0x81);
+    assert(cls == DitingUsbClassCharger);
+    assert(diting_usb_resolve_data_online(1, 1, 1, cls) == 0);
+
+    /* USB-C PD laptop: PD(6) + UCSI connected + DFP + USB flag -> 1. */
+    cls = diting_battery_classify_usb_data(1, 1, 1, 6, 1, 6, 0, 0);
+    assert(cls == DitingUsbClassPdOrTypeC);
+    assert(diting_usb_resolve_data_online(1, 1, 1, cls) == 1);
+
+    /* USB-C PD wall brick: PD_PPS(8) + UCSI connected + DFP without USB flag -> 0. */
+    cls = diting_battery_classify_usb_data(1, 1, 1, 8, 1, 8, 0, 0);
+    assert(cls == DitingUsbClassPdOrTypeC);
+    assert(diting_usb_resolve_data_online(1, 0, 0, cls) == 0);
+    /* PD brick when UCSI not yet ready -> safe default 0. */
+    assert(diting_usb_resolve_data_online(-1, -1, 0, cls) == 0);
+
+    /* Unplugged (either UCSI disconnected or VBUS off) -> 0. */
+    assert(diting_usb_resolve_data_online(0, 0, 0, DitingUsbClassDataHost) == 0);
+    cls = diting_battery_classify_usb_data(0, 1, 0, 0, 0, 0, 0, 0);
+    assert(cls == DitingUsbClassCharger);
+    assert(diting_usb_resolve_data_online(-1, -1, 0, cls) == 0);
+
+    /* Pending both -> -1. */
+    cls = diting_battery_classify_usb_data(1, 1, 0, 0, 0, 0, 0, 0);
+    assert(cls == DitingUsbClassUnknown);
+    assert(diting_usb_resolve_data_online(-1, -1, 0, cls) == -1);
+}
+
+typedef struct {
+    unsigned state_calls, rx_calls;
+    int last_up;
+    uint32_t last_owner, last_len;
+} RouterSink;
+
+static void sink_state(void *ctx, int up)
+{
+    RouterSink *s = (RouterSink *)ctx;
+    s->state_calls++;
+    s->last_up = up;
+}
+static void sink_rx(void *ctx, const uint8_t *data, uint32_t len)
+{
+    RouterSink *s = (RouterSink *)ctx;
+    s->rx_calls++;
+    s->last_owner = get32(data);
+    s->last_len = len;
+}
+
+static void test_pmic_glink(void)
+{
+    DitingPmicGlinkRouter r;
+    diting_pmic_glink_router_init(&r);
+    RouterSink batt = {0}, ucsi = {0};
+    DitingPmicGlinkClient cb = {sink_state, sink_rx};
+    assert(diting_pmic_glink_router_register(&r, DITING_PMIC_GLINK_OWNER_BATTMGR, &cb, &batt) == 0);
+    assert(diting_pmic_glink_router_register(&r, DITING_PMIC_GLINK_OWNER_UCSI, &cb, &ucsi) == 0);
+    /* Reject duplicate owner. */
+    assert(diting_pmic_glink_router_register(&r, DITING_PMIC_GLINK_OWNER_BATTMGR, &cb, &batt) == -1);
+
+    /* Down channel drops messages. */
+    uint8_t msg[24] = {0};
+    put32(msg, DITING_PMIC_GLINK_OWNER_BATTMGR);
+    assert(!diting_pmic_glink_router_dispatch(&r, msg, sizeof msg));
+    assert(batt.rx_calls == 0 && r.rx_short == 1);
+
+    /* Bring channel up -> epoch increments, both clients retrieved. */
+    DitingPmicGlinkSlot slots[DITING_PMIC_GLINK_MAX_CLIENTS];
+    unsigned n = diting_pmic_glink_router_state(&r, 1, slots, DITING_PMIC_GLINK_MAX_CLIENTS);
+    assert(n == 2 && r.up == 1 && r.epoch == 1);
+    for (unsigned i = 0; i < n; ++i) slots[i].client.state(slots[i].context, 1);
+    assert(batt.state_calls == 1 && batt.last_up == 1 && ucsi.state_calls == 1 && ucsi.last_up == 1);
+
+    /* Route 32778 to batt, 32779 to ucsi, unknown 32780 dropped, short dropped. */
+    assert(diting_pmic_glink_router_dispatch(&r, msg, 24) == 1);
+    assert(batt.rx_calls == 1 && batt.last_owner == 32778 && ucsi.rx_calls == 0);
+    put32(msg, DITING_PMIC_GLINK_OWNER_UCSI);
+    assert(diting_pmic_glink_router_dispatch(&r, msg, 16) == 1);
+    assert(ucsi.rx_calls == 1 && ucsi.last_owner == 32779 && ucsi.last_len == 16);
+    put32(msg, 32780);
+    assert(diting_pmic_glink_router_dispatch(&r, msg, 16) == 0 && r.rx_unknown_owner == 1);
+    assert(diting_pmic_glink_router_dispatch(&r, msg, 11) == 0 && r.rx_short == 2);
+
+    /* TX owner validation. */
+    put32(msg, DITING_PMIC_GLINK_OWNER_UCSI);
+    assert(diting_pmic_glink_validate_tx(DITING_PMIC_GLINK_OWNER_UCSI, msg, 16, 512) == 1);
+    assert(diting_pmic_glink_validate_tx(DITING_PMIC_GLINK_OWNER_BATTMGR, msg, 16, 512) == 0);
+    assert(diting_pmic_glink_validate_tx(DITING_PMIC_GLINK_OWNER_UCSI, msg, 11, 512) == 0);
+
+    /* Down/up bumps epoch twice. */
+    diting_pmic_glink_router_state(&r, 0, NULL, 0);
+    assert(!r.up && r.epoch == 2);
+    diting_pmic_glink_router_state(&r, 1, NULL, 0);
+    assert(r.up && r.epoch == 3);
+}
+
+static void ucsi_write_resp(uint8_t out[16], uint32_t rc)
+{
+    put32(out, DITING_UCSI_OWNER);
+    put32(out + 4, DITING_UCSI_TYPE_REQ_RESP);
+    put32(out + 8, DITING_UCSI_OP_WRITE_BUF);
+    put32(out + 12, rc);
+}
+
+static void ucsi_notify_ind(uint8_t out[24], uint32_t cci)
+{
+    memset(out, 0, 24);
+    put32(out, DITING_UCSI_OWNER);
+    put32(out + 4, DITING_UCSI_TYPE_REQ_RESP);
+    put32(out + 8, DITING_UCSI_OP_NOTIFY_IND);
+    put32(out + 12, cci);
+}
+
+static void ucsi_read_resp(uint8_t out[64], uint32_t cci, uint16_t change, uint16_t flags, uint32_t rdo, uint8_t bc, uint32_t rc)
+{
+    memset(out, 0, 64);
+    put32(out, DITING_UCSI_OWNER);
+    put32(out + 4, DITING_UCSI_TYPE_REQ_RESP);
+    put32(out + 8, DITING_UCSI_OP_READ_BUF);
+    uint8_t *buf = out + 12;
+    buf[0] = 0x20; buf[1] = 0x01; /* UCSI v1.2 */
+    put32(buf + DITING_UCSI_OFF_CCI, cci);
+    buf[16] = (uint8_t)change; buf[17] = (uint8_t)(change >> 8);
+    buf[18] = (uint8_t)flags; buf[19] = (uint8_t)(flags >> 8);
+    put32(buf + 20, rdo);
+    buf[24] = bc;
+    put32(out + 12 + DITING_UCSI_BUF_SIZE, rc);
+}
+
+static void test_ucsi(void)
+{
+    DitingUcsi u;
+    DitingUcsiStatus st;
+    uint8_t tx[DITING_UCSI_WRITE_REQ_BYTES];
+    uint8_t wresp[16], nind[24], rresp[64];
+
+    diting_ucsi_init(&u);
+    diting_ucsi_snapshot(&u, &st);
+    assert(!st.valid && diting_ucsi_status_usb_data_online(&st) == -1);
+
+    /* Start -> SET_NOTIFICATION_ENABLE */
+    diting_ucsi_start(&u);
+    assert(diting_ucsi_next(&u, tx) == 64);
+    assert(get32(tx) == DITING_UCSI_OWNER && get32(tx + 8) == DITING_UCSI_OP_WRITE_BUF);
+    assert(tx[12 + DITING_UCSI_OFF_CONTROL] == DITING_UCSI_CMD_SET_NOTIFICATION_ENABLE);
+    assert(diting_ucsi_next(&u, tx) == 0); /* wait for write resp */
+
+    /* Simulate silent PPM: WRITE_RESP then timeout on WaitEnableNotify -> falls through to READ_BUF_REQ */
+    ucsi_write_resp(wresp, 0);
+    assert(diting_ucsi_receive(&u, wresp, 16) == UcsiProgress);
+    assert(diting_ucsi_timeout(&u) == UcsiProgress && u.timeouts == 0);
+    assert(diting_ucsi_next(&u, tx) == 12 && get32(tx + 8) == DITING_UCSI_OP_READ_BUF);
+    ucsi_read_resp(rresp, DITING_UCSI_CCI_COMMAND_COMPLETE, 0, 0, 0, 0, 0);
+    assert(diting_ucsi_receive(&u, rresp, 64) == UcsiProgress && u.enabled);
+
+    /* ACK_CC_CI for enable */
+    assert(diting_ucsi_next(&u, tx) == 64 && tx[12 + DITING_UCSI_OFF_CONTROL] == DITING_UCSI_CMD_ACK_CC_CI);
+    assert(diting_ucsi_receive(&u, wresp, 16) == UcsiProgress);
+
+    /* GET_CONNECTOR_STATUS(1) with out-of-order NOTIFY_IND arriving BEFORE WRITE_RESP */
+    assert(diting_ucsi_next(&u, tx) == 64);
+    assert(tx[12 + DITING_UCSI_OFF_CONTROL] == DITING_UCSI_CMD_GET_CONNECTOR_STATUS);
+    assert(tx[12 + DITING_UCSI_OFF_CONTROL + 2] == 1); /* connector 1 */
+    ucsi_notify_ind(nind, DITING_UCSI_CCI_COMMAND_COMPLETE);
+    assert(diting_ucsi_receive(&u, nind, 24) == UcsiNotified);
+    assert(diting_ucsi_receive(&u, wresp, 16) == UcsiProgress);
+    /* Jumps straight to READ_BUF_REQ without waiting again */
+    assert(diting_ucsi_next(&u, tx) == 12 && get32(tx + 8) == DITING_UCSI_OP_READ_BUF);
+
+    /* Reply: PD laptop (connected=1, opmode=PD(3), dir=0 sink, partner_flags=USB(1), partner=DFP(1), RDO=3000mA) */
+    uint16_t pd_laptop_flags = (uint16_t)(DitingUcsiPwrOpmodePd | (1u << 3) | (DITING_UCSI_PARTNER_FLAG_USB << 5) |
+                                          (DitingUcsiPartnerDfp << 13));
+    uint32_t rdo = (1u << 28) | (300u << 10) | 300u; /* 300 * 10 mA = 3000 mA */
+    ucsi_read_resp(rresp, DITING_UCSI_CCI_COMMAND_COMPLETE | (9u << 8), 0x4000, pd_laptop_flags, rdo, 1, 0);
+    assert(diting_ucsi_receive(&u, rresp, 64) == UcsiStatusUpdated);
+    diting_ucsi_snapshot(&u, &st);
+    assert(st.valid && st.connected == 1 && st.pwr_opmode == DitingUcsiPwrOpmodePd);
+    assert(st.partner_type == DitingUcsiPartnerDfp && st.partner_flags == DITING_UCSI_PARTNER_FLAG_USB);
+    assert(st.rdo_op_ma == 3000 && st.rdo_max_ma == 3000);
+    assert(diting_ucsi_status_is_pd_usb_host(&st) == 1 && diting_ucsi_status_usb_data_online(&st) == 1);
+
+    /* ACK_CC_CI includes both COMMAND_COMPLETE and CONNECTOR_CHANGE */
+    assert(diting_ucsi_next(&u, tx) == 64);
+    assert(tx[12 + DITING_UCSI_OFF_CONTROL] == DITING_UCSI_CMD_ACK_CC_CI);
+    assert((tx[12 + DITING_UCSI_OFF_CONTROL + 2] & 0x03) == 0x03);
+    assert(diting_ucsi_receive(&u, wresp, 16) == UcsiProgress);
+    assert(diting_ucsi_next(&u, tx) == 0); /* back to idle */
+
+    /* Connector change notification -> PD wall charger (no USB flag) -> data_online == 0 */
+    ucsi_notify_ind(nind, (1u << 1)); /* connector 1 changed */
+    assert(diting_ucsi_receive(&u, nind, 24) == UcsiNotified);
+    assert(diting_ucsi_next(&u, tx) == 64 && tx[12 + DITING_UCSI_OFF_CONTROL] == DITING_UCSI_CMD_GET_CONNECTOR_STATUS);
+    assert(diting_ucsi_receive(&u, wresp, 16) == UcsiProgress);
+    ucsi_notify_ind(nind, DITING_UCSI_CCI_COMMAND_COMPLETE);
+    assert(diting_ucsi_receive(&u, nind, 24) == UcsiProgress);
+    assert(diting_ucsi_next(&u, tx) == 12);
+    uint16_t pd_brick_flags = (uint16_t)(DitingUcsiPwrOpmodePd | (1u << 3) | (DitingUcsiPartnerDfp << 13));
+    ucsi_read_resp(rresp, DITING_UCSI_CCI_COMMAND_COMPLETE | (9u << 8), 0x4000, pd_brick_flags, rdo, 1, 0);
+    assert(diting_ucsi_receive(&u, rresp, 64) == UcsiStatusUpdated);
+    diting_ucsi_snapshot(&u, &st);
+    assert(st.valid && st.connected == 1 && diting_ucsi_status_is_pd_usb_host(&st) == 0);
+    assert(diting_ucsi_status_usb_data_online(&st) == 0);
+
+    /* Non-PD Type-C 1.5A/3.0A PC port (no PD USB flag) -> defer to APSD (-1), not forced 0. */
+    DitingUcsiStatus tc = st;
+    tc.pwr_opmode = DitingUcsiPwrOpmodeTypeC1_5;
+    assert(diting_ucsi_status_usb_data_online(&tc) == -1);
+    tc.pwr_opmode = DitingUcsiPwrOpmodeTypeC3_0;
+    assert(diting_ucsi_status_usb_data_online(&tc) == -1);
+    assert(diting_usb_resolve_data_online(1, 0, 0, DitingUsbClassDataHost) == 1);
+}
+
+static void test_writes(void)
+{
+    /* Thermal level hysteresis curve (0..3). */
+    assert(sheng_battmgr_thermal_level(3500, 0) == 0);
+    assert(sheng_battmgr_thermal_level(3800, 0) == 1);
+    assert(sheng_battmgr_thermal_level(3750, 1) == 1); /* hysteresis holds 1 */
+    assert(sheng_battmgr_thermal_level(3699, 1) == 0); /* drops at < 37.0C */
+    assert(sheng_battmgr_thermal_level(4200, 1) == 2);
+    assert(sheng_battmgr_thermal_level(4150, 2) == 2);
+    assert(sheng_battmgr_thermal_level(4099, 2) == 1);
+    assert(sheng_battmgr_thermal_level(4500, 0) == 3); /* immediate emergency clamp */
+    assert(sheng_battmgr_thermal_level(4450, 3) == 3);
+    assert(sheng_battmgr_thermal_level(4399, 3) == 2);
+
+    /* Strict whitelist enforcement. */
+    ShengBattmgr b;
+    uint8_t req[24], reply[24];
+    sheng_battmgr_init(&b);
+    assert(!sheng_battmgr_queue_write(&b, 0x36, 0, 1)); /* ship mode forbidden */
+    assert(!sheng_battmgr_queue_write(&b, 0x31, 10, 4)); /* level > 3 forbidden */
+    assert(!sheng_battmgr_queue_write(&b, 0x31, 9, 1));  /* wrong battery prop forbidden */
+    assert(!sheng_battmgr_queue_write(&b, 0x33, 5, 50000)); /* ICL < 100mA forbidden */
+    assert(!sheng_battmgr_queue_write(&b, 0x33, 5, 3500000)); /* ICL > 3A forbidden */
+    assert(!sheng_battmgr_queue_write(&b, 0x51, 0, 1)); /* Xiaomi OEM write forbidden */
+
+    /* Valid thermal write shares single in-flight slot and triggers readback refresh. */
+    assert(sheng_battmgr_queue_write(&b, SHENG_BATTMGR_OP_BATTERY_SET, SHENG_BATTMGR_PROP_BATT_THERMAL_LEVEL, 2));
+    assert(!sheng_battmgr_queue_write(&b, SHENG_BATTMGR_OP_USB_SET, SHENG_BATTMGR_PROP_USB_ICL, 500000)); /* busy */
+    assert(sheng_battmgr_next(&b, req) == 24);
+    assert(get32(req) == 32778 && get32(req + 4) == 1 && get32(req + 8) == 0x31);
+    assert(get32(req + 12) == 0 && get32(req + 16) == 10 && get32(req + 20) == 2);
+    assert(sheng_battmgr_next(&b, req) == 0); /* single in-flight */
+    /* Wrong opcode/prop reply ignored while write in-flight. */
+    response(reply, 0x30, 10, 2, 0);
+    assert(sheng_battmgr_receive(&b, reply, 24) == BmIgnored && b.write_in_flight);
+    /* Exact write ACK completes write and starts readback refresh. */
+    response(reply, 0x31, 10, 2, 0);
+    assert(sheng_battmgr_receive(&b, reply, 24) == BmWriteDone);
+    assert(!b.write_in_flight && b.writes_ok == 1 && b.writes_err == 0 && b.last_write_rc == 0);
+    assert(sheng_battmgr_next(&b, req) == 24 && get32(req + 8) == 0x30); /* readback started */
+
+    /* Write timeout & firmware error handling. */
+    sheng_battmgr_init(&b);
+    assert(sheng_battmgr_queue_write(&b, SHENG_BATTMGR_OP_USB_SET, SHENG_BATTMGR_PROP_USB_ICL, 1500000));
+    assert(sheng_battmgr_next(&b, req) == 24 && get32(req + 8) == 0x33 && get32(req + 16) == 5 && get32(req + 20) == 1500000);
+    assert(sheng_battmgr_timeout(&b) == BmWriteDone && b.writes_err == 1 && b.last_write_rc == -110);
+    assert(sheng_battmgr_queue_write(&b, SHENG_BATTMGR_OP_BATTERY_SET, SHENG_BATTMGR_PROP_BATT_THERMAL_LEVEL, 3));
+    assert(sheng_battmgr_next(&b, req) == 24);
+    response(reply, 0x31, 10, 3, 22);
+    assert(sheng_battmgr_receive(&b, reply, 24) == BmWriteDone && b.writes_err == 2 && b.last_write_rc == 22);
+}
+
+static void test_weak_drain(void)
+{
+    DitingBatteryState state = {0};
+    /* Normal charging at 1% (positive current_ma) is NOT critical. */
+    ShengBatterySnapshot s = source_sample(1, 1, 1, 1, 0);
+    s.voltage_mv = 3600; s.current_ma = 500;
+    assert(diting_battery_resolve(&state, &s) && !s.critical);
+
+    /* External connected but net draining (current_ma < 0) at 1% -> CRITICAL! */
+    s = source_sample(2, 1, 1, 1, 0);
+    s.voltage_mv = 3550; s.current_ma = -420;
+    assert(diting_battery_resolve(&state, &s) && s.critical);
+
+    /* External connected, net draining at 4% but undervoltage (< 3450 mV) -> CRITICAL! */
+    s = source_sample(3, 4, 1, 1, 0);
+    s.voltage_mv = 3420; s.current_ma = -300;
+    assert(diting_battery_resolve(&state, &s) && s.critical);
+
+    /* External connected, net draining at 8% and healthy voltage (3700 mV) -> NOT critical. */
+    s = source_sample(4, 8, 1, 1, 0);
+    s.voltage_mv = 3700; s.current_ma = -300;
+    assert(diting_battery_resolve(&state, &s) && !s.critical);
+}
+
 int main(int argc, char **argv)
 {
     const struct {const char *name; void (*run)(void);} cases[] = {
         {"wire", test_wire}, {"frames", test_frames}, {"ranges", test_ranges}, {"timeouts", test_timeouts},
         {"optional", test_optional}, {"notifications", test_notifications}, {"immutable", test_immutable},
         {"source", test_source}, {"empty", test_empty}, {"inbox", test_inbox}, {"fuzz", test_fuzz},
+        {"usb_data_role", test_usb_data_role}, {"pmic_glink", test_pmic_glink}, {"ucsi", test_ucsi},
+        {"writes", test_writes}, {"weak_drain", test_weak_drain},
     };
     unsigned ran = 0;
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; ++i) if (argc == 1 || !strcmp(argv[1], cases[i].name)) {

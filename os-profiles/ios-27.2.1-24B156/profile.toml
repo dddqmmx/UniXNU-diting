@@ -1,0 +1,146 @@
+[os]
+name = "ios-27.2.1-24B156"
+arch = "arm64e"
+# Apple has not published the source of the restore's xnu-13432.42.3.
+# This is the actual public source kernel, with the upstream compatibility series.
+darwin = "25.5.0"
+xnu_version = "12377.121.6"
+xnu_revision = "ac9718fb1af618d5ce8678d0dc6e8a58f252216f"
+driverkit_tag = "xnu-12377.121.6"
+trustcache_tag = "xnu-8796.101.5"
+ios_version = "27.2"
+abi = []
+
+[ipsw]
+url = "https://updates.cdn-apple.com/2026FallFCS/5cf23110-0e1e-4f62-aef3-746ff41c71f4/iPhone18,2_27.2.1_24B156_Restore.ipsw"
+product = "iPhone18,2"
+version = "27.2.1"
+build = "24B156"
+device_class = "v54ap"
+variant = "Customer Erase Install (IPSW)"
+chip_id = 0x8150
+board_id = 0x0e
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
+
+[kernel.prelink]
+tool = "kits/XnuPrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+# A fileset is placed by its segment map; the Darwin24 static slide is inapplicable.
+slide = "0"
+# 24B156 AMFI wrapper calling _initializeAppleMobileFileIntegrity (0xfffffe000927ac78) and returning 0.
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe000927b430"
+extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--fileset-no-reference-order"]
+roots = [
+  "com.apple.kec.corecrypto", "com.apple.filesystems.apfs",
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.security.AppleImage4",
+  "com.apple.kext.CoreTrust", "com.apple.security.sandbox",
+  "com.apple.iokit.IOStorageFamily", "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOSurface",
+  "com.apple.iokit.IOMobileGraphicsFamily", "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOReportFamily",
+]
+
+[adt.root.string]
+model = "iPhone18,2"
+target-type = "V54"
+compatible = "V54AP"
+
+[adt.chosen.string]
+osenvironment = "main"
+crypto-hash-method = "sha2-384"
+
+[adt.chosen.u32]
+board-id = 14
+security-domain = 1
+kernel-ctrr-to-be-enabled = 0
+certificate-production-status = 0
+effective-production-status-ap = 0
+certificate-security-mode = 1
+effective-security-mode-sep = 1
+amfi-only-platform-code = 1
+
+[adt.product.string]
+product-name = "iPhone 17 Pro Max"
+product-description = "iPhone 17 Pro Max"
+artwork-device-idiom = "phone"
+artwork-display-gamut = "sRGB"
+app-macho-architecture = "arm64e"
+partition-style = "iOS"
+
+[adt.product.u32]
+artwork-device-subtype = 2868
+artwork-scale-factor = 3
+thin-bezel = 1
+oled-display = 1
+dictation = 1
+offline-dictation = 1
+
+[adt.defaults.u32]
+vmm-present = 1
+sleep-disabled = 1
+"kern.maxvnodes" = 78848
+
+[adt.buttons.u32]
+home-button-type = 2
+
+[userdata]
+windows = [{ name = "OS", component = "OS" }, { name = "SystemOS", component = "Cryptex1,SystemOS" }]
+
+[root]
+# Measured from the matching decrypted 24B156 APFS superblocks.
+os_volume_uuid = "2913A3C9-CACD-44DB-A47E-90F19C3610A5"
+systemos_volume_uuid = "C78313FC-73C7-461D-A8A7-D3273E1B2B7B"
+
+[payload.adt]
+root_match_volume_uuid = "2913A3C9-CACD-44DB-A47E-90F19C3610A5"
+
+[[source]]
+name = "DitingPlatformHelpers"
+kind = "refer"
+git = "https://github.com/UniXNU/UniXNU-sheng.git"
+ref = "main"
+commit = "c8f92b208068eeaa4cd2b0f592671f04ee70076e"
+
+[[source]]
+name = "IOStorageFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
+ref = "IOStorageFamily-337.100.1"
+commit = "7edb88fbae296fb7c8ce2f64e115e116e566d51c"
+
+[[source]]
+name = "IOHIDFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOHIDFamily.git"
+ref = "IOHIDFamily-2238.120.5"
+commit = "e31e90a24c27ad6cbe981650d12a1a4124065b03"
+
+[[source]]
+name = "libplatform"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libplatform.git"
+ref = "libplatform-375.120.2"
+commit = "b7ed7cf5cf7dd12b98672435db2225a860f199d8"
+
+[[source]]
+name = "libdispatch"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libdispatch.git"
+ref = "libdispatch-1542.100.32"
+commit = "701f4d1a24ae9c6863901bbbb22624b7d1b87321"
+
+[[source]]
+name = "AvailabilityVersions"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/AvailabilityVersions.git"
+ref = "AvailabilityVersions-157.2"
+commit = "149b1777f3e8c2133042d8e188f72e3adf6a7110"
+
+[[source]]
+name = "libpthread"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/libpthread.git"
+ref = "libpthread-539.100.4"
+commit = "1f4f5265b319111142f1bf3a27d4484ef5a98314"

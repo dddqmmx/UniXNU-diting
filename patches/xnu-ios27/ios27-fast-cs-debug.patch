@@ -1,0 +1,47 @@
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -5880,6 +5880,20 @@
+ #define CS_NATIVE4K_CHUNK       (1024 * 1024)
+ #define CS_NATIVE4K_UNCACHED    (32 * 1024 * 1024)
+ 
++static int
++diting_fast_cs_enabled(void)
++{
++	static int cached = -1;
++	if (cached < 0) {
++		int v = 0;
++		cached = (PE_parse_boot_argn("diting_fast_cs", &v, sizeof(v)) && v == 1) ? 1 : 0;
++		if (cached) {
++			printf("DITING_CS: diting_fast_cs=1 skipping full 4K hash recomputation\n");
++		}
++	}
++	return cached;
++}
++
+ __attribute__((noinline))
+ static int
+ cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
+@@ -5895,6 +5908,9 @@
+ 	if (blob->csb_hash_pageshift <= PAGE_SHIFT) {
+ 		return 0;
+ 	}
++	if (diting_fast_cs_enabled()) {
++		return 0;
++	}
+ 	if (PAGE_SHIFT != 12 || blob->csb_hash_pageshift != 14 || cd == NULL || md == NULL ||
+ 	    md->cs_size == 0 || md->cs_size > CS_HASH_MAX_SIZE ||
+ 	    md->cs_digest_size > CS_HASH_MAX_SIZE || blob->csb_base_offset < 0 ||
+@@ -6060,5 +6076,12 @@
+ 			if (PAGE_SHIFT == 12 && blob->csb_hash_pageshift == 14) {
+ 				vm_size_t index = (vm_size_t)offset >> PAGE_SHIFT;
++				if (blob->csb_native4k_hashes == NULL && diting_fast_cs_enabled()) {
++					if (!(offset & PAGE_MASK) && offset < codeLimit) {
++						*bytes_processed = PAGE_SIZE;
++						*tainted = 0;
++						return TRUE;
++					}
++				}
+ 				if ((offset & PAGE_MASK) || offset >= codeLimit ||
+ 				    blob->csb_native4k_hashes == NULL ||
+ 				    index >= blob->csb_native4k_hash_count ||

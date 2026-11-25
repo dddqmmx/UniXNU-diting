@@ -194,11 +194,122 @@ static void errors() {
         assert(command.poll(1000) == Completion::Pending); // error does not prove retirement
         h.complete(true); assert(command.poll(1001) == Completion::Error);
         assert(command.finish()); assert(!h.registers[AckError / 4]);
+        bool sawAckClearPair = false;
+        for (size_t i = 0; i + 1 < h.writes.size(); ++i) {
+            if (h.writes[i].first == AckError && h.writes[i].second == (1u << 17) &&
+                h.writes[i + 1].first == AckError && h.writes[i + 1].second == 0) {
+                sawAckClearPair = true;
+                break;
+            }
+        }
+        assert(sawAckClearPair);
         assert(bool(h.registers[InterruptControl / 4] & ErrorPending) == foreign);
         assert(command.available() != foreign);
         if (foreign) assert(h.registers[ClockStatus / 4] == (1u << 16));
         for (auto write : h.writes) assert(write.first != ClockStatus);
     }
+}
+static void latchedAck() {
+    struct LatchedHardware : Hardware {
+        uint32_t armedClear = 0;
+        static void writeLatched(void *context, uint32_t offset, uint32_t value) {
+            auto &h = *static_cast<LatchedHardware *>(context);
+            if (offset == AckError) {
+                h.writes.emplace_back(offset, value);
+                if (value != 0) h.armedClear |= value;
+                else { h.registers[AckError / 4] &= ~h.armedClear; h.armedClear = 0; }
+                return;
+            }
+            Hardware::write(context, offset, value);
+        }
+        Io latchedIo() { return {this, read, writeLatched, delay}; }
+    };
+    LatchedHardware h; Command command; command.initialize(h.latchedIo());
+    const uint32_t query[] = {ReadBrightnessPacket};
+    assert(command.begin(query, 1, true, true, 0));
+    h.registers[AckError / 4] = 0x01000002u; // observed SoT Sync + bit 24
+    h.registers[InterruptControl / 4] |= ErrorPending;
+    h.complete(true);
+    assert(command.poll(1001) == Completion::Error);
+    assert(command.finish());
+    assert((h.registers[AckError / 4] & AckErrorMask) == 0);
+    assert(!(h.registers[InterruptControl / 4] & ErrorPending));
+    assert(command.available());
+}
+static void wakePolicy() {
+    // 1. Live failure sequence: boot 307 -> req#1 1280 -> sleep -> req#2 0 -> wake restores 1280.
+    WakePolicy p;
+    p.onInitialLevel(board, 307, 37 << 16);
+    assert(p.initialized && p.lastNonZeroLevel == 307 && p.currentTarget == 307);
+    auto a = p.onBrightnessRequest(board, 1280, 156 << 16, true);
+    assert(a.submit && !a.restored && a.target == 1280);
+    assert(p.lastNonZeroLevel == 1280 && p.lastNonZeroNits == (156 << 16));
+    a = p.onFramebufferState(board, false);
+    assert(a.submit && !a.restored && a.target == 0 && !p.fbPowered);
+    assert(p.lastNonZeroLevel == 1280);
+    // CoreBrightness sends brightness-nits=0 during sleep: must NOT clobber cached non-zero level.
+    a = p.onBrightnessRequest(board, 0, 0, true);
+    assert(a.submit && !a.restored && a.target == 0);
+    assert(p.lastNonZeroLevel == 1280 && p.lastNonZeroNits == (156 << 16));
+    // Duplicate sleep is a no-op.
+    a = p.onFramebufferState(board, false);
+    assert(!a.submit);
+    // Framebuffer wake restores cached level 1280.
+    a = p.onFramebufferState(board, true);
+    assert(a.submit && a.restored && a.target == 1280 && p.fbPowered && p.currentTarget == 1280);
+    // Duplicate wake is a no-op.
+    a = p.onFramebufferState(board, true);
+    assert(!a.submit);
+
+    // 2. Preserve user's lowest non-zero slider choice (level=1) across sleep/wake.
+    a = p.onBrightnessRequest(board, 1, 2 << 16, true);
+    assert(a.submit && a.target == 1 && p.lastNonZeroLevel == 1);
+    a = p.onFramebufferState(board, false);
+    assert(a.submit && a.target == 0);
+    a = p.onFramebufferState(board, true);
+    assert(a.submit && a.restored && a.target == 1);
+
+    // 3. EnableBacklight=false blocks wake until EnableBacklight=true arrives.
+    a = p.onEnableRequest(board, false);
+    assert(a.submit && a.target == 0 && !p.enabled && p.lastNonZeroLevel == 1);
+    a = p.onFramebufferState(board, false);
+    assert(!a.submit && !p.fbPowered);
+    a = p.onFramebufferState(board, true);
+    assert(!a.submit && p.fbPowered && p.currentTarget == 0);
+    a = p.onEnableRequest(board, true);
+    assert(a.submit && a.restored && a.target == 1 && p.enabled);
+
+    // 4. Brightness-nits=0 while awake followed by EnableBacklight=true restores cached brightness.
+    a = p.onBrightnessRequest(board, 1500, 180 << 16, true);
+    assert(a.target == 1500);
+    a = p.onBrightnessRequest(board, 0, 0, true);
+    assert(a.target == 0 && p.lastNonZeroLevel == 1500);
+    a = p.onEnableRequest(board, true);
+    assert(a.submit && a.restored && a.target == 1500);
+
+    // 5. Explicit non-zero brightness during sleep is not overwritten on subsequent wake.
+    a = p.onFramebufferState(board, false);
+    assert(a.submit && a.target == 0);
+    a = p.onBrightnessRequest(board, 900, 110 << 16, true);
+    assert(a.submit && a.target == 900);
+    a = p.onFramebufferState(board, true);
+    assert(!a.submit && p.currentTarget == 900);
+
+    // 6. Boot-only sleep/wake (before any setProperties) restores boot level.
+    WakePolicy bootOnly;
+    bootOnly.onInitialLevel(board, 307);
+    a = bootOnly.onFramebufferState(board, false);
+    assert(a.submit && a.target == 0);
+    a = bootOnly.onFramebufferState(board, true);
+    assert(a.submit && a.restored && a.target == 307);
+}
+static void retryError() {
+    assert(shouldRetryError(true, false, 1280, 307, true));
+    assert(shouldRetryError(true, false, 0, 307, true));
+    assert(!shouldRetryError(false, false, 1280, 307, true));
+    assert(!shouldRetryError(true, true, 1280, 307, true));
+    assert(!shouldRetryError(true, false, 1280, 307, false));
+    assert(!shouldRetryError(true, false, 307, 307, true));
 }
 static void displayOwner() {
     Hardware h; Command command; command.initialize(h.io());
@@ -231,6 +342,9 @@ int main(int argc, char **argv) {
     else if (name == "retained") retained();
     else if (name == "bta") bta();
     else if (name == "errors") errors();
+    else if (name == "latched-ack") latchedAck();
+    else if (name == "wake-policy") wakePolicy();
+    else if (name == "retry-error") retryError();
     else if (name == "display-owner") displayOwner();
     else assert(false);
     std::printf("PASS %s\n", name.c_str());

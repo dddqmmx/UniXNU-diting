@@ -68,6 +68,84 @@ inline bool readLevel(uint32_t count, uint32_t data0, uint32_t data1, uint32_t &
     return true;
 }
 
+inline bool shouldRetryError(bool published, bool alreadyRetried, uint32_t sending, uint32_t level, bool isWriteOrVerify) {
+    return published && !alreadyRetried && isWriteOrVerify && sending != level;
+}
+
+struct WakeAction {
+    bool submit = false;
+    bool restored = false;
+    uint32_t target = 0;
+};
+
+struct WakePolicy {
+    uint32_t lastNonZeroLevel = 0;
+    int32_t lastNonZeroNits = 0;
+    uint32_t currentTarget = 0;
+    bool fbPowered = true;
+    bool enabled = true;
+    bool initialized = false;
+
+    void onInitialLevel(const Board &board, uint32_t level, int32_t defaultNits = 0) {
+        const uint32_t clampedLevel = clamp(board, level);
+        initialized = true;
+        currentTarget = clampedLevel;
+        if (clampedLevel > 0) {
+            lastNonZeroLevel = clampedLevel;
+            if (defaultNits > 0) lastNonZeroNits = defaultNits;
+        }
+    }
+
+    WakeAction onBrightnessRequest(const Board &board, uint32_t level, int32_t nitsFixed = 0, bool hasNits = false) {
+        const uint32_t clampedLevel = clamp(board, level);
+        currentTarget = clampedLevel;
+        if (clampedLevel > 0) {
+            lastNonZeroLevel = clampedLevel;
+            if (hasNits && nitsFixed > 0) lastNonZeroNits = nitsFixed;
+            enabled = true;
+        }
+        return {true, false, clampedLevel};
+    }
+
+    WakeAction onFramebufferState(const Board &board, bool powered) {
+        if (fbPowered == powered) return {};
+        fbPowered = powered;
+        if (!powered) {
+            if (currentTarget > 0) {
+                lastNonZeroLevel = clamp(board, currentTarget);
+                currentTarget = 0;
+                return {true, false, 0};
+            }
+            return {};
+        }
+        if (enabled && currentTarget == 0 && lastNonZeroLevel > 0) {
+            const uint32_t target = clamp(board, lastNonZeroLevel);
+            currentTarget = target;
+            return {true, true, target};
+        }
+        return {};
+    }
+
+    WakeAction onEnableRequest(const Board &board, bool enable) {
+        if (!enable) {
+            enabled = false;
+            if (currentTarget > 0) {
+                lastNonZeroLevel = clamp(board, currentTarget);
+                currentTarget = 0;
+                return {true, false, 0};
+            }
+            return {};
+        }
+        enabled = true;
+        if (fbPowered && currentTarget == 0 && lastNonZeroLevel > 0) {
+            const uint32_t target = clamp(board, lastNonZeroLevel);
+            currentTarget = target;
+            return {true, true, target};
+        }
+        return {};
+    }
+};
+
 enum Register : uint32_t {
     Version = 0x000, Control = 0x004, Status = 0x008, FifoStatus = 0x00c,
     DmaControl = 0x03c, DmaLength = 0x04c, AckError = 0x068,
@@ -156,7 +234,10 @@ public:
         if (!active || !retired()) return false;
         const uint32_t ack = rd(AckError) & AckErrorMask;
         if (ack) {
+            // Qualcomm SM8475 DSI requires writing the status mask followed by
+            // an extra zero write to clear latched ACK/error bits (msm dsi_host.c).
             wr(AckError, ack);
+            wr(AckError, 0);
             // Clear a handled readback error only when there is no other
             // display/PHY/clock failure. Never reset or mask those owners.
             const uint32_t fifoErrors = (1u << 7) | (1u << 10) | (1u << 18) | (1u << 19) |

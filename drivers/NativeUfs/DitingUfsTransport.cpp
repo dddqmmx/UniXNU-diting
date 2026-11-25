@@ -47,6 +47,7 @@ struct UfsHost {
   bool writable = false;
 };
 static UfsHost gHost;
+static uint64_t gLogUserdataFirst, gLogUserdataLast;
 static uint32_t gWifiUfsReady;
 static bool gTransportAttempted;
 enum : uint64_t { kRootLogicalBlock = 512 };
@@ -253,8 +254,14 @@ public:
   IOReturn reportMaxValidBlock(UInt64 *v) override { *v = window.size / kRootLogicalBlock - 1; return kIOReturnSuccess; }
   IOReturn reportEjectability(bool *v) override { *v = false; return kIOReturnSuccess; }
   IOReturn reportRemovability(bool *v) override { *v = false; return kIOReturnSuccess; }
+  bool windowWritable() const {
+#if defined(XNU_DITING_IOS27_RO_SYSTEM) && XNU_DITING_IOS27_RO_SYSTEM
+    if (strcmp(window.name, "Data") != 0) return false;
+#endif
+    return gHost.writable && !(window.baseByte & 4095) && !(window.size & 4095);
+  }
   IOReturn reportWriteProtection(bool *v) override {
-    *v = !gHost.writable || (window.baseByte & 4095) || (window.size & 4095);
+    *v = !windowWritable();
     return kIOReturnSuccess;
   }
   IOReturn reportMediaState(bool *v, bool *changed) override { *v = online && gHost.ready; if (changed) *changed = false; return kIOReturnSuccess; }
@@ -470,7 +477,7 @@ bool DitingUfsBlock::start(IOService *provider) {
     return false;
   }
   gRootDiagnostic.windowBytes = window.size;
-  const bool writableWindow = gHost.writable && !(window.baseByte & 4095) && !(window.size & 4095);
+  const bool writableWindow = windowWritable();
   IOLog("DITING_UFS: SHNGROOT %s first read complete signature=1 base=%llx bytes=%llx; publish 512-byte %s disk\n",
         window.name, window.baseByte, window.size, writableWindow ? "read-write" : "read-only");
   setProperty("DitingReadOnly", !writableWindow);
@@ -500,7 +507,7 @@ IOReturn DitingUfsBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 blo
       buffer->getLength() < count * kRootLogicalBlock ||
       (buffer->getDirection() != kIODirectionIn && !write))
     return kIOReturnBadArgument;
-  if (write && (!gHost.writable || (window.baseByte & 4095) || (window.size & 4095)))
+  if (write && !windowWritable())
     return kIOReturnNotWritable;
   if (!online || !gHost.ready) return kIOReturnNotReady;
   uint64_t done = 0, bytes = count * kRootLogicalBlock;
@@ -571,7 +578,8 @@ extern "C" bool diting_ufs_transport_start(IOService *provider) {
   // Original prelinked storage metadata must be initialized before allocation.
   OSSharedPtr<const OSSymbol> name(OSSymbol::withCStringNoCopy("IOBlockStorageDevice"), OSNoRetain);
   const OSMetaClass *meta = name ? OSMetaClass::getMetaClassWithName(name.get()) : nullptr;
-  if (meta != &IOBlockStorageDevice::gMetaClass)
+  if (!meta || (meta != &IOBlockStorageDevice::gMetaClass &&
+                IOBlockStorageDevice::gMetaClass.getSuperClass() != meta))
     return transportFailure("original storage metaclass not registered");
   if (meta->getClassSize() != sizeof(IOBlockStorageDevice) || meta->getSuperClass() != &IOService::gMetaClass)
     return transportFailure("original storage class/parent ABI mismatch");
@@ -599,6 +607,8 @@ extern "C" bool diting_ufs_transport_start(IOService *provider) {
       layout.userdataLast >= gHost.blocks)
     return transportFailure("userdata geometry changed");
   if (layout.manifestStatus) return transportFailure("invalid SHNGROOT manifest/hash/bounds");
+  gLogUserdataFirst = layout.userdataFirst;
+  gLogUserdataLast = layout.userdataLast;
   static const struct { const char *name, *product, *signature; unsigned offset; } wanted[] = {
     {"OS", "Diting OS root", "EFI PART", 512},
     {"SystemOS", "Diting SystemOS", "NXSB", 32},
@@ -637,3 +647,76 @@ extern "C" bool diting_ufs_transport_start(IOService *provider) {
 }
 
 extern "C" bool diting_ufs_ready(void) { return __atomic_load_n(&gWifiUfsReady,__ATOMIC_ACQUIRE)!=0; }
+
+extern "C" int diting_ufs_write_log_blocks(const void *buf, uint32_t bytes) {
+  static constexpr uint64_t kLogOffsetBlocks = 14680064ULL; // 56 GiB into sda37 (outside OS/SystemOS/AppOS/Data[0..43.2 GiB] and below PWF2[64 GiB])
+  if (!buf || !bytes || (bytes & 4095) || !gHost.lock || !gHost.writable || !gLogUserdataFirst) return -1;
+  uint32_t totalBlocks = bytes / 4096;
+  uint64_t lba = gLogUserdataFirst + kLogOffsetBlocks;
+  if (lba + totalBlocks > gLogUserdataLast) return -2;
+  IOLockLock(gHost.lock);
+  IOReturn rc = kIOReturnNotReady;
+  if (gHost.ready && !gHost.poisoned && hostIdle()) {
+    rc = kIOReturnSuccess;
+    uint32_t done = 0;
+    const uint8_t *src = static_cast<const uint8_t *>(buf);
+    while (done < totalBlocks && rc == kIOReturnSuccess) {
+      uint32_t chunk = totalBlocks - done;
+      if (chunk > (kDataMax / 4096)) chunk = (kDataMax / 4096);
+      memcpy(gHost.virt + kDataOffset, src + uint64_t(done) * 4096, uint64_t(chunk) * 4096);
+      rc = hostWrite4kLocked(0, lba + done, chunk);
+      done += chunk;
+    }
+  }
+  IOLockUnlock(gHost.lock);
+  return rc == kIOReturnSuccess ? 0 : -3;
+}
+
+extern "C" int diting_ufs_write_log_blocks_panic(const void *buf, uint32_t bytes) {
+  static constexpr uint64_t kLogOffsetBlocks = 14680064ULL; // 56 GiB into sda37 (outside Data and below PWF2)
+  if (!buf || !bytes || (bytes & 4095) || !gHost.writable || !gLogUserdataFirst || !gHost.ready || gHost.poisoned) return -1;
+  uint32_t totalBlocks = bytes / 4096;
+  uint64_t lba = gLogUserdataFirst + kLogOffsetBlocks;
+  if (lba + totalBlocks > gLogUserdataLast) return -2;
+  for (uint32_t w = 0; w < 50000 && !hostIdle(); ++w) IODelay(1);
+  if (!hostIdle()) return -4;
+  IOReturn rc = kIOReturnSuccess;
+  uint32_t done = 0;
+  const uint8_t *src = static_cast<const uint8_t *>(buf);
+  while (done < totalBlocks && rc == kIOReturnSuccess) {
+    uint32_t chunk = totalBlocks - done;
+    if (chunk > (kDataMax / 4096)) chunk = (kDataMax / 4096);
+    memcpy(gHost.virt + kDataOffset, src + uint64_t(done) * 4096, uint64_t(chunk) * 4096);
+    rc = hostWrite4kLocked(0, lba + done, chunk);
+    done += chunk;
+  }
+  return rc == kIOReturnSuccess ? 0 : -3;
+}
+
+extern "C" int diting_ufs_read_fw_blocks(uint32_t blockOffset, void *buf, uint32_t bytes) {
+  static constexpr uint64_t kFwOffsetBlocks = 16777216ULL; // 64 GiB into sda37 (outside OS/SystemOS/AppOS/Data/Log)
+  static constexpr uint64_t kFwMaxBlocks = 16384ULL;       // 64 MiB firmware pack window
+  if (!buf || !bytes || (bytes & 4095) || !gHost.lock || !gLogUserdataFirst) return -1;
+  uint32_t totalBlocks = bytes / 4096;
+  if (uint64_t(blockOffset) + totalBlocks > kFwMaxBlocks) return -2;
+  uint64_t lba = gLogUserdataFirst + kFwOffsetBlocks + blockOffset;
+  if (lba + totalBlocks > gLogUserdataLast) return -2;
+  IOLockLock(gHost.lock);
+  IOReturn rc = kIOReturnNotReady;
+  if (gHost.ready && !gHost.poisoned && hostIdle()) {
+    rc = kIOReturnSuccess;
+    uint32_t done = 0;
+    uint8_t *dst = static_cast<uint8_t *>(buf);
+    while (done < totalBlocks && rc == kIOReturnSuccess) {
+      uint32_t chunk = totalBlocks - done;
+      if (chunk > (kDataMax / 4096)) chunk = (kDataMax / 4096);
+      rc = hostRead4kLocked(0, lba + done, chunk);
+      if (rc == kIOReturnSuccess) {
+        memcpy(dst + uint64_t(done) * 4096, gHost.virt + kDataOffset, uint64_t(chunk) * 4096);
+      }
+      done += chunk;
+    }
+  }
+  IOLockUnlock(gHost.lock);
+  return rc == kIOReturnSuccess ? 0 : -3;
+}

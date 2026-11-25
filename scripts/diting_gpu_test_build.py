@@ -132,13 +132,13 @@ def build(output_dir, sdk, vulkan_headers, env, codesign):
          '-Wno-missing-field-initializers', '-I' + str(headers), '-c', ROOT / 'userland/gpu-test18.mm', '-o', obj])
     objects.append(obj)
     run(['xcrun', 'clang++', *base, *objects, '-framework', 'Foundation', '-framework', 'CoreFoundation',
-         '-framework', 'IOKit', '-framework', 'Metal', '-framework', 'IOSurface', '-o', target])
+         '-framework', 'IOKit', '-framework', 'Metal', '-framework', 'IOSurface', '-lz', '-o', target])
     run([codesign, '--force', '--sign', '-', '--pagesize', '4096', '--entitlements',
          ROOT / 'userland/gpu-test18.entitlements', target])
     report = dict(schema=1, binary=str(target), commands=commands, vulkan_headers=str(headers),
                   shader_source='owned GLSL/SPIR-V and AIR/metallib generated locally', air_abi='PASS',
-                  profiles=['qualification', 'performance', 'all', 'ui'], policies=['auto', 'sysmem', 'gmem'],
-                  timeout_ms=120000, result_bytes=131072, target_fps=120, hardware_tested=False,
+                  profiles=['qualification', 'performance', 'all', 'ui', 'keyboard'], policies=['auto', 'sysmem', 'gmem'],
+                  timeout_ms=120000, result_bytes=1048576, target_fps=120, hardware_tested=False,
                   required_cases=json.loads((ROOT / 'configs/diting-gpu-tests.json').read_text())['cases'])
     (out / 'automation-build.json').write_text(json.dumps(report, indent=2) + '\n')
     return target, report

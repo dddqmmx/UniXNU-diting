@@ -1,0 +1,18 @@
+diff --git a/cctools/ld64/src/ld/OutputFile.cpp b/cctools/ld64/src/ld/OutputFile.cpp
+--- a/cctools/ld64/src/ld/OutputFile.cpp
++++ b/cctools/ld64/src/ld/OutputFile.cpp
+@@ -3104,6 +3104,14 @@
+ #if SUPPORT_ARCH_arm64e
+ void OutputFile::setFixup64e(uint8_t* fixUpLocation, uint64_t accumulator, Fixup::AuthData authData, const ld::Atom* toTarget)
+ {
++	// An absent static weak provider is an absolute NULL, not an image-relative
++	// authenticated pointer.  buildChainedFixupInfo already excludes absolute
++	// symbols; keep this slot zero without truncating a rebase to the high image.
++	if ( targetNeedsNoFixup(toTarget) && (accumulator == 0) && (toTarget->combine() == ld::Atom::combineByName) ) {
++		set64LE(fixUpLocation, 0);
++		return;
++	}
++
+ 	uint32_t bindOrdinal = 0;
+ 	uint64_t inlineAddend = 0;
+ 	bool isBind = needsBind(toTarget, true, &accumulator, &inlineAddend, &bindOrdinal);

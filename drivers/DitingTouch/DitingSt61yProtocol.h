@@ -154,6 +154,13 @@ static inline DitingSt61yResult diting_st61y_start(const DitingSt61yIo *io,
     return io->write(io->context, scan, sizeof(scan)) ? DitingSt61yOk : DitingSt61yScanWrite;
 }
 
+/* fts_spi fts_write_charge_status(): toggle ST61Y wired charger noise immunity. */
+static inline bool diting_st61y_set_charger(const DitingSt61yIo *io, bool wired) {
+    if (!io || !io->write) return false;
+    const uint8_t cmd[3] = {0xa2u, 0x02u, (uint8_t)(wired ? 1 : 0)};
+    return io->write(io->context, cmd, sizeof(cmd));
+}
+
 static inline const char *diting_st61y_reason(DitingSt61yResult result) {
     switch (result) {
     case DitingSt61yOk: return "scan submitted";
@@ -178,7 +185,7 @@ typedef void (*DitingSt61yEmit)(void *, unsigned, unsigned, uint32_t, uint32_t);
 enum { DitingSt61yDown = 1, DitingSt61yMove = 2, DitingSt61yUp = 3 };
 typedef enum {
     DitingSt61yIgnored, DitingSt61yContactEvent, DitingSt61yResetEvent,
-    DitingSt61yErrorEvent, DitingSt61yInvalidEvent
+    DitingSt61yErrorEvent, DitingSt61yInvalidEvent, DitingSt61yStatusReleaseEvent
 } DitingSt61yEventResult;
 
 /* READY/error requires reinitialization immediately. It must not be folded
@@ -217,7 +224,20 @@ static inline DitingSt61yEventResult diting_st61y_event(DitingSt61yState *state,
         return event[0] == 0x03 ? DitingSt61yResetEvent : DitingSt61yErrorEvent;
     }
     const unsigned kind = event[0] >> 4;
+    if (kind == 4) {
+        /* EVT_ID_STATUS_UPDATE (0x43): baseline recalibration, raw saturation,
+         * water or pocket transitions can drop hardware tracking without a
+         * per-finger LEAVE_POINT. Release retained contacts; leave ECHO alone. */
+        const unsigned st = event[1];
+        if (st == 0x05u || ((st == 0x06u || st == 0x07u || st == 0x0au) && event[2] == 1u)) {
+            diting_st61y_release(state, emit, context);
+            return DitingSt61yStatusReleaseEvent;
+        }
+        return DitingSt61yIgnored;
+    }
     if (kind != 1 && kind != 2 && kind != 3) return DitingSt61yIgnored;
+    /* fts_spi FOD release uses sentinel byte 0xb5 (slot 11); ignore cleanly. */
+    if (kind == 3 && event[1] == 0xb5u) return DitingSt61yIgnored;
     const unsigned id = event[1] >> 4, type = event[1] & 15;
     if (id >= DITING_ST61Y_CONTACTS) return DitingSt61yInvalidEvent;
     DitingSt61yContact *c = &state->contact[id];
@@ -245,19 +265,25 @@ typedef enum {
     DitingSt61yPollInvalid, DitingSt61yPollReset, DitingSt61yPollError
 } DitingSt61yPollResult;
 typedef struct {
-    unsigned events, invalid;
+    unsigned events, invalid, status_releases;
+    bool overflow;
     uint8_t last[8];
 } DitingSt61yPollReport;
 
-/* Consume the FIFO's bounded batch of changes. A failed SPI read can already
- * have consumed a leave event, so release retained contacts on a lost batch.
- * A controller reset/error stops the batch before stale contacts can reenter. */
+/* Consume the FIFO's bounded batch of changes. A failed SPI read, corrupted
+ * packet, or saturated 32-event FIFO can lose a leave event, so release
+ * retained contacts whenever a batch is compromised. A controller reset/error
+ * stops the batch before stale contacts can reenter. */
 static inline DitingSt61yPollResult diting_st61y_poll(const DitingSt61yIo *io,
         DitingSt61yState *state, DitingSt61yEmit emit, void *context,
         DitingSt61yPollReport *report) {
     if (!io || !io->read || !state || !emit || !report || !state->max_x || !state->max_y)
         return DitingSt61yPollInvalid;
-    *report = (DitingSt61yPollReport){0};
+    report->events = 0;
+    report->invalid = 0;
+    report->status_releases = 0;
+    report->overflow = false;
+    for (unsigned i = 0; i < 8; ++i) report->last[i] = 0;
     uint8_t events[DITING_ST61Y_FIFO_DEPTH * DITING_ST61Y_EVENT_BYTES];
     if (!io->read(io->context, DITING_ST61Y_FIFO, 0, 0, events, 8)) {
         diting_st61y_release(state, emit, context);
@@ -276,16 +302,37 @@ static inline DitingSt61yPollResult diting_st61y_poll(const DitingSt61yIo *io,
         diting_st61y_release(state, emit, context);
         return DitingSt61yPollBus;
     }
+    unsigned non_empty = 0;
+    bool skip_continuation = false;
     for (unsigned i = 0; i <= remaining; ++i) {
         const uint8_t *event = events + i * 8;
-        const DitingSt61yEventResult result = diting_st61y_event(state, event, 8, emit, context);
         ++report->events;
-        if (diting_st61y_needs_restart(result) || result == DitingSt61yInvalidEvent) {
+        if (event[0] != 0) ++non_empty;
+        if (skip_continuation) {
+            skip_continuation = false;
+            continue;
+        }
+        /* fts_spi: EVT_ID_USER_REPORT 0x53 0x02 0x18 is followed by an 8-byte
+         * continuation payload that must not be decoded as an event header. */
+        if (event[0] == 0x53u && event[1] == 0x02u && event[2] == 0x18u) {
+            skip_continuation = true;
+            continue;
+        }
+        const DitingSt61yEventResult result = diting_st61y_event(state, event, 8, emit, context);
+        if (result == DitingSt61yStatusReleaseEvent) {
+            ++report->status_releases;
+        } else if (diting_st61y_needs_restart(result) || result == DitingSt61yInvalidEvent) {
             for (unsigned j = 0; j < 8; ++j) report->last[j] = event[j];
             if (result == DitingSt61yResetEvent) return DitingSt61yPollReset;
             if (result == DitingSt61yErrorEvent) return DitingSt61yPollError;
             ++report->invalid;
         }
+    }
+    if (non_empty == DITING_ST61Y_FIFO_DEPTH) {
+        report->overflow = true;
+    }
+    if (report->invalid || report->overflow) {
+        diting_st61y_release(state, emit, context);
     }
     return DitingSt61yPollEvents;
 }

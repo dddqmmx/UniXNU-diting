@@ -1,0 +1,148 @@
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -902,6 +902,32 @@ ctrr_cpu_start_lck_init(void)
+ }
+ #endif
+ 
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++extern pmap_paddr_t cpu_ttep;
++#if HAS_NATIVE_PAC
++extern uint64_t native_pac_keys[];
++#endif
++extern void diting_ramoops_diagnostic_write(const char *str, int length);
++
++static unsigned
++diting_clean_start_tables(pmap_paddr_t physical, unsigned level)
++{
++	tt_entry_t *table = (tt_entry_t *)phystokv(physical);
++	unsigned pages = 1;
++	if (level < 3) {
++		for (unsigned i = 0; i < TTE_PGENTRIES; i++) {
++			tt_entry_t entry = os_atomic_load(&table[i], acquire);
++			if ((entry & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) ==
++			    (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
++				pages += diting_clean_start_tables(entry & ARM_TTE_TABLE_MASK, level + 1);
++			}
++		}
++	}
++	CleanPoC_DcacheRegion((vm_offset_t)table, ARM_PGBYTES);
++	return pages;
++}
++#endif
++
+ void
+ cpu_start(int cpu)
+ {
+@@ -942,6 +966,24 @@ cpu_start(int cpu)
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++		CleanPoC_DcacheRegion((vm_offset_t)&ResetHandlerData, sizeof(ResetHandlerData));
++		CleanPoC_DcacheRegion((vm_offset_t)&CpuDataEntries[0], sizeof(CpuDataEntries));
++		CleanPoC_DcacheRegion((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t));
++		CleanPoC_DcacheRegion((vm_offset_t)&cpu_ttep, sizeof(cpu_ttep));
++#if HAS_NATIVE_PAC
++		CleanPoC_DcacheRegion((vm_offset_t)native_pac_keys, 11 * sizeof(uint64_t));
++#endif
++		unsigned cleaned_pages = diting_clean_start_tables(cpu_ttep, 1);
++		__builtin_arm_dsb(DSB_SY);
++		{
++			char smsg[96];
++			int sn = snprintf(smsg, sizeof(smsg), "SCPU: start cpu=%d phys=0x%x pages=%u\n",
++			    cpu, cpu_data_ptr->cpu_phys_id, cleaned_pages);
++			if (sn > 0)
++				diting_ramoops_diagnostic_write(smsg, sn < (int)sizeof(smsg) ? sn : (int)sizeof(smsg) - 1);
++		}
++#endif
+ #if CONFIG_SPTM
+ 		/**
+ 		 * On SPTM devices, CTRR is configured entirely by the SPTM. Due to this, this logic
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -756,6 +756,11 @@
+ 	MSR_TTBR1_EL1_X0
+ 1:
+ 
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	// Keep physical LowExceptionVectorBase on secondary CPUs until arm_init_cpu
++	// installs TPIDR_EL1 (current_thread).
++	cbnz	x21, Lditing_keep_secondary_vectors
++#endif
+ 	// Set up the exception vectors
+ #if __ARM_KERNEL_PROTECT__
+ 	/* If this is not the first reset of the boot CPU, the alternate mapping
+@@ -772,6 +777,9 @@
+ 	sub		x0, x0, x23
+ 1:
+ 	MSR_VBAR_EL1_X0
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++Lditing_keep_secondary_vectors:
++#endif
+ 
+ #if HAS_APPLE_PAC
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+@@ -818,6 +826,9 @@
+ 	// Enable NEON
+ 	mov		x0, #(CPACR_FPEN_ENABLE)
+ 	msr		CPACR_EL1, x0
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	isb		sy
++#endif
+ #endif
+ 
+ 	// Clear thread pointer
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -774,6 +774,18 @@ arm_init_cpu(
+ 
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	{
++		extern char ExceptionVectorsBase[];
++		extern void diting_ramoops_diagnostic_write(const char *str, int length);
++		__builtin_arm_wsr64("VBAR_EL1", (uint64_t)ExceptionVectorsBase);
++		__builtin_arm_isb(ISB_SY);
++		char smsg[64];
++		int sn = snprintf(smsg, sizeof(smsg), "SCPU: cpu=%d enter\n", cpu_data_ptr->cpu_number);
++		if (sn > 0)
++			diting_ramoops_diagnostic_write(smsg, sn < (int)sizeof(smsg) ? sn : (int)sizeof(smsg) - 1);
++	}
++#endif
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(false);
+@@ -889,6 +901,15 @@ arm_init_cpu(
+ 	}
+ #endif
+ 
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	{
++		extern void diting_ramoops_diagnostic_write(const char *str, int length);
++		char smsg[64];
++		int sn = snprintf(smsg, sizeof(smsg), "SCPU: cpu=%d online\n", cpu_data_ptr->cpu_number);
++		if (sn > 0)
++			diting_ramoops_diagnostic_write(smsg, sn < (int)sizeof(smsg) ? sn : (int)sizeof(smsg) - 1);
++	}
++#endif
+ 	secondary_cpu_main(NULL);
+ }
+ 
+@@ -905,6 +925,13 @@ arm_init_idle_cpu(
+ #endif
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	{
++		extern char ExceptionVectorsBase[];
++		__builtin_arm_wsr64("VBAR_EL1", (uint64_t)ExceptionVectorsBase);
++		__builtin_arm_isb(ISB_SY);
++	}
++#endif
+ 
+ #if __arm64__
+ 	wfe_timeout_init();

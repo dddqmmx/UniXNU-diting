@@ -43,6 +43,12 @@ int main(){
   assert(readBcm(db.data(),db.size(),"MC3",ddr));assert(readBcm(db.data(),db.size(),"SH5",cache));
   assert(frequencyVote(ddr,DdrMaxKhz,DdrMaxKhz,vote) && vote==0x60000c7c);
   assert(frequencyVote(cache,LlccMaxKhz,LlccMaxKhz,vote) && vote==0x6000042a);++cases;
+  uint32_t dk=0,lk=0,dw=0,lw=0;
+  assert(profileVotes(ddr,cache,ProfileIdle,dk,lk,dw,lw) && dk==547000 && lk==300000 && dw && lw);
+  assert(profileVotes(ddr,cache,ProfileDisplay,dk,lk,dw,lw) && dk==768000 && lk==466000 && dw && lw);
+  assert(profileVotes(ddr,cache,ProfileActive,dk,lk,dw,lw) && dk==1708000 && lk==806000 && dw && lw);
+  assert(profileVotes(ddr,cache,ProfileMax,dk,lk,dw,lw) && dk==DdrMaxKhz && lk==LlccMaxKhz && dw==0x60000c7c && lw==0x6000042a);
+  assert(!profileVotes(ddr,cache,ProfileCount,dk,lk,dw,lw));++cases;
   assert(!frequencyVote(ddr,DdrMaxKhz+1,DdrMaxKhz,vote));ddr.width=65535;assert(!frequencyVote(ddr,DdrMaxKhz,DdrMaxKhz,vote));++cases;
  }
  for(unsigned corrupt=0;corrupt<5;++corrupt){

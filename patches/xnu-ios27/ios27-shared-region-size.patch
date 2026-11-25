@@ -1,0 +1,58 @@
+diff --git a/osfmk/mach/shared_region.h b/osfmk/mach/shared_region.h
+--- a/osfmk/mach/shared_region.h
++++ b/osfmk/mach/shared_region.h
+@@ -88,7 +88,7 @@
+ /* ARM64_TODO: move to higher memory */
+ #endif
+ #define SHARED_REGION_BASE_ARM64                0x180000000ULL
+-#define SHARED_REGION_SIZE_ARM64                0x180000000ULL
++#define SHARED_REGION_SIZE_ARM64                0x280000000ULL
+ #define SHARED_REGION_NESTING_BASE_ARM64        SHARED_REGION_BASE_ARM64
+ #define SHARED_REGION_NESTING_SIZE_ARM64        SHARED_REGION_SIZE_ARM64
+ #define SHARED_REGION_NESTING_MIN_ARM64         ?
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2364,7 +2364,10 @@
+ 		const mach_vm_address_t limit = SHARED_REGION_BASE_ARM64 + SHARED_REGION_SIZE_ARM64;
+ 		if (highest > SHARED_REGION_BASE_ARM64 && highest <= limit && limit - highest < max_slide) {
+ 			max_slide = (uint32_t)(limit - highest);
+ 		}
++		printf("DITING_SR: files=%u mappings=%u highest=0x%llx limit=0x%llx max_slide=0x%x\n",
++		    files_count, mappings_count, (unsigned long long)highest,
++		    (unsigned long long)limit, max_slide);
+ 	}
+ #endif /* __arm64__ */
+ 
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -5987,6 +5987,11 @@
+ 	blob->csb_native4k_hash_count = count;
+ 	storage = 0;
+ 	os_atomic_inc(&cs_native4k_ready_blobs, relaxed);
++	if (limit > CS_NATIVE4K_UNCACHED) {
++		printf("DITING_CS: prepare limit=%lluMiB total_bytes=%lluMiB read_ticks=%llu hash_ticks=%llu\n",
++		    (unsigned long long)(limit >> 20), (unsigned long long)(cs_native4k_bytes >> 20),
++		    (unsigned long long)cs_native4k_read_ticks, (unsigned long long)cs_native4k_hash_ticks);
++	}
+ 	error = 0;
+ out:
+ 	kfree_data(buffer, CS_NATIVE4K_CHUNK);
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -550,8 +550,11 @@
+ static void
+ arm64_implementation_specific_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far)
+ {
+-#pragma unused (state, esr, far)
+-	panic_plain("Unhandled implementation specific error\n");
++	uint64_t pc = state ? get_saved_state_pc(state) : 0;
++	uint64_t pa = far ? (uint64_t)kvtophys(far) : 0;
++	panic_plain("Unhandled implementation specific error: cpu=%d esr=0x%llx far=0x%lx pa=0x%llx pc=0x%llx phys=[0x%llx+0x%llx]\n",
++	    cpu_number(), (unsigned long long)esr, (unsigned long)far, (unsigned long long)pa,
++	    (unsigned long long)pc, (unsigned long long)gPhysBase, (unsigned long long)gPhysSize);
+ }
+ 
+ #if CONFIG_KERNEL_INTEGRITY

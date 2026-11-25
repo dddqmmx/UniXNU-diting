@@ -1,0 +1,608 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9103,6 +9103,197 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path,
+ #endif
+ 	"/sbin/launchd",
+ };
++
++#if DEVELOPMENT || DEBUG
++extern int native_diting_ufs_volume_device(const char *uuid, int kind, dev_t *device, char *path, size_t pathSize) __attribute__((weak_import));
++extern int native_diting_ufs_data_volume_device(const char *uuid, dev_t *device, char *path, size_t pathSize, uint64_t *bytes) __attribute__((weak_import));
++extern int native_diting_publish_boot_manifest(const char *os_uuid, const char *sys_uuid) __attribute__((weak_import));
++extern void commpage_update_dyld_flags(uint64_t);
++extern volatile int native_bindfs_boot_mount;
++
++static int
++diting_ios27_mkdir_parents(proc_t p, user_addr_t scratch, const char *path)
++{
++	char current[160];
++	size_t len = strlen(path);
++	if (len >= sizeof(current)) {
++		return ENAMETOOLONG;
++	}
++	vfs_context_t ctx = vfs_context_current();
++	for (size_t i = 1; i < len; ++i) {
++		if (path[i] != '/') {
++			continue;
++		}
++		memcpy(current, path, i);
++		current[i] = 0;
++		vnode_t existing = NULLVP;
++		if (vnode_lookup(current, 0, &existing, ctx) == 0) {
++			if (existing) vnode_put(existing);
++			continue;
++		}
++		struct mkdir_args req = {.path = scratch + 0xd00, .mode = 0755};
++		int32_t res = 0;
++		int err = copyout(current, req.path, i + 1);
++		if (err) {
++			return err;
++		}
++		err = mkdir(p, &req, &res);
++		if (err && err != EEXIST) {
++			return err;
++		}
++	}
++	return 0;
++}
++
++static int
++diting_ios27_bind_mount(proc_t p, user_addr_t scratch, const char *source, const char *point, int flags)
++{
++	struct mount_args req = {
++		.type = scratch + 0xa00,
++		.path = scratch + 0xa20,
++		.flags = MNT_RDONLY | flags,
++		.data = scratch + 0xb00,
++	};
++	int32_t res = 0;
++	int err;
++	if ((err = copyout("bindfs", req.type, 7)) ||
++	    (err = copyout(point, req.path, strlen(point) + 1)) ||
++	    (err = copyout(source, req.data, strlen(source) + 1))) {
++		return err;
++	}
++	native_bindfs_boot_mount = 1;
++	err = mount(p, &req, &res);
++	native_bindfs_boot_mount = 0;
++	return err;
++}
++
++static void
++diting_ios27_mount_volumes(proc_t p, user_addr_t scratch)
++{
++	unsigned enabled = 0;
++	if (!PE_parse_boot_argn("native-source-storage", &enabled, sizeof(enabled)) || enabled != 1) {
++		return;
++	}
++	if (!native_diting_ufs_volume_device) {
++		printf("DITING_INIT: native_diting_ufs_volume_device absent\n");
++		return;
++	}
++	static const char os_uuid[] = "2913A3C9-CACD-44DB-A47E-90F19C3610A5";
++	static const char sys_uuid[] = "C78313FC-73C7-461D-A8A7-D3273E1B2B7B";
++	static const char data_uuid[] = "24B15600-2721-4D17-9A56-D17124B15601";
++	dev_t dev = NODEV;
++	char dev_path[64] = {0};
++	uint64_t data_bytes = 0;
++	int err = 0;
++	int32_t res = 0;
++
++	/* Mark root IOMedia with EmbeddedDeviceTypeRoot. */
++	(void)native_diting_ufs_volume_device(os_uuid, 0, &dev, dev_path, sizeof(dev_path));
++	printf("DITING_INIT: OS root bound dev=%s\n", dev_path[0] ? dev_path : "(none)");
++
++	/* Mount SystemOS read-only union over /. */
++	if (native_diting_ufs_volume_device(sys_uuid, 1, &dev, dev_path, sizeof(dev_path))) {
++		uint8_t payload[0x150] = {0};
++		user64_addr_t spec = scratch + 0x160;
++		uint64_t mnt_flags = MNT_RDONLY;
++		uint16_t mode = 1;
++		uint32_t anon = 99;
++		memcpy(payload, &spec, sizeof(spec));
++		memcpy(payload + 8, &mnt_flags, sizeof(mnt_flags));
++		memcpy(payload + 16, &mode, sizeof(mode));
++		memcpy(payload + 0x144, &anon, sizeof(anon));
++		memcpy(payload + 0x148, &anon, sizeof(anon));
++		struct mount_args req = {
++			.type = scratch + 0x100,
++			.path = scratch + 0x120,
++			.flags = MNT_RDONLY | MNT_UNION,
++			.data = scratch + 0x200,
++		};
++		if ((err = copyout("apfs", req.type, 5)) == 0 &&
++		    (err = copyout("/", req.path, 2)) == 0 &&
++		    (err = copyout(dev_path, spec, strlen(dev_path) + 1)) == 0 &&
++		    (err = copyout(payload, req.data, sizeof(payload))) == 0) {
++			err = mount(p, &req, &res);
++		}
++		printf("DITING_INIT: SystemOS union mount dev=%s rc=%d\n", dev_path, err);
++		if (err == 0) {
++			dyld_flags |= UINT64_C(8);
++			commpage_update_dyld_flags(dyld_flags);
++			printf("DITING_INIT: dyld_flags=0x%llx\n", (unsigned long long)dyld_flags);
++			if (native_diting_publish_boot_manifest) {
++				int bm = native_diting_publish_boot_manifest(os_uuid, sys_uuid);
++				printf("DITING_INIT: boot-manifest-hash published=%d\n", bm);
++			}
++		}
++	} else {
++		printf("DITING_INIT: SystemOS UUID %s not found\n", sys_uuid);
++	}
++
++	/* Mount writable Data on /private/var. */
++	dev = NODEV;
++	dev_path[0] = 0;
++	if (native_diting_ufs_data_volume_device &&
++	    native_diting_ufs_data_volume_device(data_uuid, &dev, dev_path, sizeof(dev_path), &data_bytes)) {
++		uint8_t payload[0x150] = {0};
++		user64_addr_t spec = scratch + 0x160;
++		uint16_t mode = 1;
++		uint32_t anon = 99;
++		memcpy(payload, &spec, sizeof(spec));
++		memcpy(payload + 16, &mode, sizeof(mode));
++		memcpy(payload + 0x144, &anon, sizeof(anon));
++		memcpy(payload + 0x148, &anon, sizeof(anon));
++		struct mount_args req = {
++			.type = scratch + 0x100,
++			.path = scratch + 0x120,
++			.flags = 0,
++			.data = scratch + 0x200,
++		};
++		if ((err = copyout("apfs", req.type, 5)) == 0 &&
++		    (err = copyout("/private/var", req.path, 13)) == 0 &&
++		    (err = copyout(dev_path, spec, strlen(dev_path) + 1)) == 0 &&
++		    (err = copyout(payload, req.data, sizeof(payload))) == 0) {
++			err = mount(p, &req, &res);
++		}
++		printf("DITING_INIT: Data rw mount dev=%s bytes=%llu rc=%d\n",
++		    dev_path, (unsigned long long)data_bytes, err);
++		if (err == 0) {
++			int e1 = diting_ios27_mkdir_parents(p, scratch, "/private/var/ngpu/preboot/Cryptexes/OS/System/");
++			int e2 = diting_ios27_mkdir_parents(p, scratch, "/private/var/ngpu/preboot/Cryptexes/OS/usr/");
++			int b1 = -1, b2 = -1, b3 = -1;
++			if (!e1 && !e2) {
++				b1 = diting_ios27_bind_mount(p, scratch, "/private/var/ngpu/preboot", "/private/preboot", MNT_UNION);
++				if (!b1) {
++					b2 = diting_ios27_bind_mount(p, scratch, "/System", "/private/preboot/Cryptexes/OS/System", 0);
++					b3 = diting_ios27_bind_mount(p, scratch, "/usr", "/private/preboot/Cryptexes/OS/usr", 0);
++				}
++			}
++			printf("DITING_INIT: cryptex view mkdir=%d/%d bind=%d/%d/%d\n", e1, e2, b1, b2, b3);
++			/* Drop stale MobileGestalt cache if present from another OS build. */
++			static const char mg[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
++			struct unlink_args ureq = {.path = scratch + 0xc00};
++			if (copyout(mg, ureq.path, sizeof(mg)) == 0) {
++				int uerr = unlink(p, &ureq, &res);
++				printf("DITING_INIT: drop MobileGestalt cache rc=%d\n", uerr);
++			}
++		}
++	} else {
++		printf("DITING_INIT: Data UUID %s not found\n", data_uuid);
++	}
++
++	vnode_t vp = NULLVP;
++	int lrc = vnode_lookup("/sbin/launchd", 0, &vp, vfs_context_current());
++	if (vp) {
++		vnode_put(vp);
++		vp = NULLVP;
++	}
++	int drc = vnode_lookup("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e", 0, &vp, vfs_context_current());
++	if (vp) {
++		vnode_put(vp);
++		vp = NULLVP;
++	}
++	printf("DITING_INIT: verify /sbin/launchd=%d dyld_shared_cache=%d\n", lrc, drc);
++}
++#endif /* DEVELOPMENT || DEBUG */
+ 
+ /*
+  * load_init_program
+@@ -9158,6 +9296,9 @@ load_init_program(proc_t p)
+ #if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+ 	int data_error = native_owner_data_prepare(p, (user_addr_t)scratch_addr);
+ 	if (data_error) panic("offline scratch Data mount failed: %d", data_error);
++#endif
++#if DEVELOPMENT || DEBUG
++	diting_ios27_mount_volumes(p, (user_addr_t)scratch_addr);
+ #endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -2020,6 +2020,72 @@ proc_handle_critical_exit(proc_t p, int rv)
+ 	}
+ }
+ 
++extern void diting_dump_task_threads(const char *name, int pid, task_t task, int with_bt);
++extern void diting_ufs_log_flush(void) __attribute__((weak_import));
++void diting_dump_process_snapshot(void);
++void
++diting_dump_process_snapshot(void)
++{
++	struct diting_ps_item { int pid; char name[24]; };
++	struct diting_ps_item *snap = kalloc_data(256 * sizeof(*snap), Z_WAITOK_ZERO);
++	if (!snap) {
++		return;
++	}
++	int count = 0;
++	int total_procs = 0;
++	int ui_pids[6] = {0};
++	char ui_names[6][24] = {{0}};
++	int ui_count = 0;
++	proc_t p;
++	proc_list_lock();
++	ALLPROC_FOREACH(p) {
++		total_procs++;
++		if (ui_count < 6 && (!strcmp(p->p_name, "backboardd") || !strcmp(p->p_name, "SpringBoard") ||
++		    !strcmp(p->p_name, "PosterBoard") || !strcmp(p->p_name, "com.apple.datamigrator") ||
++		    !strcmp(p->p_name, "runningboardd") || !strcmp(p->p_name, "WindowServer"))) {
++			ui_pids[ui_count] = proc_getpid(p);
++			strlcpy(ui_names[ui_count], p->p_name, sizeof(ui_names[ui_count]));
++			ui_count++;
++		}
++		if (count < 256) {
++			snap[count].pid = proc_getpid(p);
++			strlcpy(snap[count].name, p->p_name, sizeof(snap[count].name));
++			count++;
++		}
++	}
++	proc_list_unlock();
++	printf("DITING_PS: count=%d total=%d ui=%d\n", count, total_procs, ui_count);
++	for (int i = 0; i < count; i += 6) {
++		printf("DITING_PS:");
++		for (int j = i; j < count && j < i + 6; j++) {
++			printf(" %d:%s", snap[j].pid, snap[j].name);
++		}
++		printf("\n");
++	}
++	kfree_data(snap, 256 * sizeof(*snap));
++	if (diting_ufs_log_flush) {
++		diting_ufs_log_flush();
++	}
++	for (int pass = 0; pass < 2; pass++) {
++		for (int i = 0; i < ui_count; i++) {
++			if (pass == 1 && strcmp(ui_names[i], "backboardd") != 0 && strcmp(ui_names[i], "SpringBoard") != 0) {
++				continue;
++			}
++			proc_t up = proc_find(ui_pids[i]);
++			if (up != PROC_NULL) {
++				task_t ut = proc_task(up);
++				if (ut != TASK_NULL) {
++					diting_dump_task_threads(ui_names[i], ui_pids[i], ut, pass);
++				}
++				proc_rele(up);
++			}
++			if (diting_ufs_log_flush) {
++				diting_ufs_log_flush();
++			}
++		}
++	}
++}
++
+ void
+ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ {
+@@ -2041,6 +2072,21 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ 		proc_handle_critical_exit(p, rv);
+ 	}
+ 
++	static int diting_sec_exits = 0;
++	int diting_log_exit = proc_getpid(p) <= 25 ||
++	    !strcmp(p->p_name, "launchd") || !strcmp(p->p_name, "backboardd") ||
++	    !strcmp(p->p_name, "SpringBoard") || !strcmp(p->p_name, "runningboardd") ||
++	    !strcmp(p->p_name, "lsd") || !strcmp(p->p_name, "containermanagerd") ||
++	    !strcmp(p->p_name, "WindowServer") || !strcmp(p->p_name, "mediaserverd") ||
++	    !strcmp(p->p_name, "keybagd") || !strcmp(p->p_name, "iconservicesagent") ||
++	    (!strcmp(p->p_name, "securityd") && ++diting_sec_exits <= 4);
++	if (diting_log_exit) {
++		char *desc = p->p_exit_reason ? exit_reason_get_string_desc(p->p_exit_reason) : NULL;
++		printf("DITING_EXIT: %s[%d] status=0x%x ns=%u code=0x%llx desc=%s\n", p->p_name, proc_getpid(p), rv,
++		    p->p_exit_reason ? p->p_exit_reason->osr_namespace : 0,
++		    p->p_exit_reason ? (unsigned long long)p->p_exit_reason->osr_code : 0ULL,
++		    desc ? desc : "(none)");
++	}
+ 	if (task) {
+ 		corpse_source = vm_map_is_corpse_source(get_task_map(task));
+ 	}
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -572,6 +572,84 @@ IOGetBootManifestHash(char *hash_data, size_t *hash_data_size)
+ 	return result;
+ }
+ 
++#if DEVELOPMENT || DEBUG
++#include <libkern/crypto/sha2.h>
++extern "C" int native_diting_publish_boot_manifest(const char *os_uuid, const char *sys_uuid);
++extern "C" int
++native_diting_publish_boot_manifest(const char *os_uuid, const char *sys_uuid)
++{
++	if (!os_uuid || !sys_uuid) {
++		return 0;
++	}
++	IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
++	if (!chosen) {
++		return 0;
++	}
++	bool ok = true;
++	if (!chosen->getProperty("boot-manifest-hash")) {
++		static const char domain[] = "Diting.OwnerBootSet.v1";
++		uint8_t digest[48];
++		SHA384_CTX ctx;
++		SHA384_Init(&ctx);
++		SHA384_Update(&ctx, domain, sizeof(domain));
++		SHA384_Update(&ctx, os_uuid, strlen(os_uuid));
++		SHA384_Update(&ctx, sys_uuid, strlen(sys_uuid));
++		SHA384_Final(digest, &ctx);
++		OSData *value = OSData::withBytes(digest, sizeof(digest));
++		ok = value && chosen->setProperty("boot-manifest-hash", value);
++		OSSafeReleaseNULL(value);
++	}
++	/*
++	 * Publish a stable software IOPlatformUUID before launchd starts so
++	 * gethostuuid()/IOBSDGetPlatformUUID() never blocks configd/IPConfiguration
++	 * indefinitely when Apple unique-chip-id/chip-id are absent.
++	 */
++	IOPlatformExpert *platform = IOService::getPlatform();
++	IOService *provider = platform ? platform->getProvider() : nullptr;
++	if (provider && !provider->getProperty(kIOPlatformUUIDKey)) {
++		uuid_string_t uuid_str = {};
++		uuid_t parsed = {};
++		bool have_uuid = false;
++		if (OSData *dt_uuid = OSDynamicCast(OSData, chosen->getProperty("diting-platform-uuid"))) {
++			if (dt_uuid->getLength() == sizeof(uuid_string_t)) {
++				const char *raw = static_cast<const char *>(dt_uuid->getBytesNoCopy());
++				if (raw && raw[sizeof(uuid_string_t) - 1] == '\0' &&
++				    uuid_parse(raw, parsed) == 0 && !uuid_is_null(parsed)) {
++					uuid_unparse_upper(parsed, uuid_str);
++					have_uuid = true;
++				}
++			}
++		}
++		if (!have_uuid) {
++			static const char uuid_domain[] = "Diting.OwnerPlatformUUID.v1";
++			uint8_t udigest[48];
++			SHA384_CTX uctx;
++			SHA384_Init(&uctx);
++			SHA384_Update(&uctx, uuid_domain, sizeof(uuid_domain));
++			SHA384_Update(&uctx, os_uuid, strlen(os_uuid));
++			SHA384_Update(&uctx, sys_uuid, strlen(sys_uuid));
++			SHA384_Final(udigest, &uctx);
++			udigest[6] = (uint8_t)((udigest[6] & 0x0F) | 0x50);
++			udigest[8] = (uint8_t)((udigest[8] & 0x3F) | 0x80);
++			uuid_unparse_upper(udigest, uuid_str);
++			have_uuid = true;
++		}
++		if (have_uuid) {
++			OSString *uuid_obj = OSString::withCString(uuid_str);
++			if (uuid_obj) {
++				if (provider->setProperty(kIOPlatformUUIDKey, uuid_obj)) {
++					IOService::publishResource(kIOPlatformUUIDKey, uuid_obj);
++					printf("DITING_INIT: software IOPlatformUUID published=%s\n", uuid_str);
++				}
++				uuid_obj->release();
++			}
++		}
++	}
++	chosen->release();
++	return ok ? 1 : 0;
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ #if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+ #if !DEVELOPMENT && !DEBUG
+ #error Owner image-set metadata is an offline development instrument
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -94,6 +94,9 @@
+ #include <string.h>
+ 
+ #include <pexpert/pexpert.h>
++#if __arm64__
++#include <arm/thread.h>
++#endif
+ 
+ #include <os/log.h>
+ #include <os/system_event_log.h>
+@@ -101,6 +104,10 @@
+ #include <libkern/coreanalytics/coreanalytics.h>
+ 
+ #include <sys/code_signing.h> /* for developer mode state */
++#include <vm/vm_protos.h>
++#ifdef MACH_BSD
++extern int proc_pid(struct proc *);
++#endif
+ 
+ bool panic_on_exception_triage = false;
+ 
+@@ -943,6 +943,41 @@ exception_triage(
+ #endif /* MACH_BSD */
+ #endif /* DEVELOPMENT || DEBUG */
+ 
++#ifdef MACH_BSD
++	if (get_bsdtask_info(task)) {
++		static int diting_sec_exc = 0;
++		int pid = proc_pid(get_bsdtask_info(task));
++		const char *pname = proc_best_name(get_bsdtask_info(task));
++		int want = pid <= 10 || !strcmp(pname, "backboardd") || !strcmp(pname, "SpringBoard") ||
++		    !strcmp(pname, "WindowServer") || !strcmp(pname, "runningboardd") ||
++		    !strcmp(pname, "containermanagerd") || !strcmp(pname, "mediaserverd") ||
++		    !strcmp(pname, "keybagd") || !strcmp(pname, "iconservicesagent") ||
++		    (!strcmp(pname, "securityd") && ++diting_sec_exc <= 3);
++		if (want) {
++			printf("DITING_EXC: %s[%d] type=0x%x code=0x%llx sub=0x%llx\n",
++			    pname, pid, exception, (unsigned long long)code[0],
++			    codeCnt > 1 ? (unsigned long long)code[1] : 0ULL);
++#if __arm64__
++			arm_saved_state_t *ss = find_user_regs(thread);
++			if (ss != NULL) {
++				printf("DITING_EXC: pc=0x%llx lr=0x%llx sp=0x%llx far=0x%llx esr=0x%x\n",
++				    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss),
++				    get_saved_state_far(ss), get_saved_state_esr(ss));
++				uint64_t fp = get_saved_state_fp(ss);
++				for (int fi = 0; thread == current_thread() && fi < 24 && fp && !(fp & 7); fi++) {
++					uint64_t frame[2];
++					if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
++						break;
++					}
++					printf("DITING_EXC:   #%d ret=0x%llx\n", fi, frame[1] & 0x00007fffffffffffULL);
++					if (frame[0] <= fp) break;
++					fp = frame[0];
++				}
++			}
++#endif
++		}
++	}
++#endif /* MACH_BSD */
+ #if __has_feature(ptrauth_calls)
+ 	if (exception & EXC_PTRAUTH_BIT) {
+ 		exception &= ~EXC_PTRAUTH_BIT;
+@@ -961,6 +1027,67 @@ exception_triage(
+ 	return exception_triage_thread(exception, code, codeCnt, thread);
+ }
+ 
++void diting_dump_task_threads(const char *name, int pid, task_t task, int with_bt);
++void
++diting_dump_task_threads(const char *name, int pid, task_t task, int with_bt)
++{
++	struct { uint32_t state; uint64_t pc, lr, fp, wev; } tinfo[24];
++	int n = 0;
++	vm_map_t map = VM_MAP_NULL;
++	task_lock(task);
++	if (with_bt) {
++		map = get_task_map(task);
++		if (map != VM_MAP_NULL) {
++			vm_map_reference(map);
++		}
++	}
++	thread_t th;
++	queue_iterate(&task->threads, th, thread_t, task_threads) {
++		if (n >= 24) {
++			break;
++		}
++		tinfo[n].state = th->state;
++		tinfo[n].wev = (uint64_t)th->wait_event;
++		tinfo[n].pc = tinfo[n].lr = tinfo[n].fp = 0;
++#if __arm64__
++		arm_saved_state_t *ss = find_user_regs(th);
++		if (ss != NULL) {
++			tinfo[n].pc = get_saved_state_pc(ss);
++			tinfo[n].lr = get_saved_state_lr(ss);
++			tinfo[n].fp = get_saved_state_fp(ss);
++		}
++#endif
++		n++;
++	}
++	task_unlock(task);
++	printf("DITING_TH: %s[%d] threads=%d pass=%d\n", name, pid, n, with_bt);
++	for (int i = 0; i < n; i++) {
++		if (!with_bt) {
++			printf("DITING_TH:   #%d st=0x%x pc=0x%llx lr=0x%llx fp=0x%llx wev=0x%llx\n",
++			    i, tinfo[i].state, tinfo[i].pc, tinfo[i].lr, tinfo[i].fp, tinfo[i].wev);
++		} else if (map != VM_MAP_NULL && tinfo[i].fp >= 0x100000000ULL &&
++		    tinfo[i].fp < 0x7000000000ULL && !(tinfo[i].fp & 7)) {
++			uint64_t fp = tinfo[i].fp;
++			printf("DITING_BT: %s#%d", name, i);
++			for (int f = 0; f < 10 && fp >= 0x100000000ULL && fp < 0x7000000000ULL && !(fp & 7); f++) {
++				uint64_t frame[2] = {0, 0};
++				if (vm_map_read_user(map, (vm_map_offset_t)fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++					break;
++				}
++				printf(" %llx", frame[1] & 0x00007fffffffffffULL);
++				if (frame[0] <= fp) {
++					break;
++				}
++				fp = frame[0];
++			}
++			printf("\n");
++		}
++	}
++	if (map != VM_MAP_NULL) {
++		vm_map_deallocate(map);
++	}
++}
++
+ kern_return_t
+ bsd_exception(
+ 	exception_type_t        exception,
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -557,6 +557,15 @@ native_mobile_graphics_load_probe(void)
+ 		extern void native_legacy_display_probe(void);
+ 		native_legacy_display_probe();
+ 	}
++#elif DEVELOPMENT || DEBUG
++	{
++		extern void native_legacy_display_probe(void) __attribute__((weak_import));
++		int legacy_register = 0;
++		if (native_mobile_graphics_load_status == 0 && &native_legacy_display_probe &&
++		    PE_parse_boot_argn("offline-legacy-register", &legacy_register, sizeof(legacy_register)) && legacy_register) {
++			native_legacy_display_probe();
++		}
++	}
+ #endif
+ 	int client_probe = 0;
+ 	if (native_mobile_graphics_load_status == 0 &&
+@@ -1099,6 +1107,16 @@ bsd_init(void)
+ 				native_owner_root_checkpoint(autherr, owner, device);
+ 			}
+ #endif
++#if DEVELOPMENT || DEBUG
++			if (autherr && !owner_authorized && rootvnode) {
++				unsigned diting_ufs = 0;
++				if (PE_parse_boot_argn("native-source-storage", &diting_ufs, sizeof(diting_ufs)) && diting_ufs == 1 &&
++				    (vfs_flags(vnode_mount(rootvnode)) & MNT_RDONLY)) {
++					printf("DITING_INIT: rootvp authorized on UFS OS window (autherr=%d)\n", autherr);
++					owner_authorized = 1;
++				}
++			}
++#endif
+ 			if (autherr && !owner_authorized) {
+ 				panic("rootvp not authenticated after mounting");
+ 			}
+@@ -1320,6 +1338,14 @@ bsd_autoconf(void)
+ 	extern void native_legacy_display_late_probe(void);
+ 	native_legacy_display_late_probe();
+ #endif
++#if (DEVELOPMENT || DEBUG) && (!defined(XNU_NATIVE_LEGACY_DISPLAY) || !XNU_NATIVE_LEGACY_DISPLAY)
++	{
++		extern void native_legacy_display_late_probe(void) __attribute__((weak_import));
++		if (&native_legacy_display_late_probe) {
++			native_legacy_display_late_probe();
++		}
++	}
++#endif
+ 	return result;
+ }
+ 
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1266,6 +1266,22 @@ panic_with_options(
+ 		vsnprintf(early_buf, EARLY_PANIC_BUFLEN, panic_format_str, copy_args);
+ 		va_end(copy_args);
+ 		diting_early_fb_panic(early_buf);
++		extern void diting_ramoops_diagnostic_write(const char *str, int length);
++		uint64_t fp = (uint64_t)__builtin_frame_address(0);
++		char bt[384];
++		int pos = snprintf(bt, sizeof(bt), "PANIC_BT:");
++		for (int fi = 0; fi < 14 && fp >= 0xfffffff000000000ULL && !(fp & 7); ++fi) {
++			uint64_t next_fp = ((const uint64_t *)fp)[0];
++			uint64_t ret_lr = ((const uint64_t *)fp)[1] | 0xfffffff000000000ULL;
++			int n = snprintf(bt + pos, sizeof(bt) - (size_t)pos, " 0x%llx", (unsigned long long)ret_lr);
++			if (n <= 0 || pos + n >= (int)sizeof(bt) - 2) break;
++			pos += n;
++			if (next_fp <= fp || next_fp - fp > 0x10000ULL) break;
++			fp = next_fp;
++		}
++		bt[pos++] = '\n';
++		bt[pos] = 0;
++		diting_ramoops_diagnostic_write(bt, pos);
+ 	}
+ #endif
+ 	/* For very early panics before XNU serial initialization. */

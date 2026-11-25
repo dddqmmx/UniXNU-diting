@@ -1,0 +1,19 @@
+{
+  "guest": "24B156",
+  "kernelcache_sha256": "f6f31ac427bed2cdcf1353a6d84e3c2897354a86b2cc708f0e330a99be9a5939",
+  "collection_slide": "0x1f000000000",
+  "instance_bytes": 136,
+  "virtual_entries": 168,
+  "metaclass": "0xfffffe000b9cf888",
+  "vptr": "0xfffffe0008310c10",
+  "get_meta_class": "0xfffffe000a09ab58",
+  "constructor": "0xfffffe000a09aa78",
+  "metaclass_constructor": "0xfffffe000a09aa24",
+  "destructor": "0xfffffe000a09aae8",
+  "operational_overrides": [],
+  "metadata_overrides": [0, 1, 7],
+  "constructor_aliases": [
+    "0xfffffe000a09aa78",
+    "0xfffffe000a09aab0"
+  ]
+}

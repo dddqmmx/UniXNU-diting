@@ -354,7 +354,9 @@ IOReturn AGXDeviceUserClient::dropViews(uint32_t token)
 }
 IOReturn AGXDeviceUserClient::clientClose()
 {
+#if !defined(DITING_GUEST_24B156)
     if(handoffOnly_ && handoffTask_) {diting_scanout_disconnect(handoffTask_);handoffTask_=nullptr;}
+#endif
     IOLockLock(g.lock);
     closing_=true;
     IOLockUnlock(g.lock);
@@ -397,7 +399,9 @@ IOReturn AGXDeviceUserClient::clientClose()
 }
 void AGXDeviceUserClient::free()
 {
+#if !defined(DITING_GUEST_24B156)
     if(handoffOnly_ && handoffTask_) {diting_scanout_disconnect(handoffTask_);handoffTask_=nullptr;}
+#endif
     for(auto *snapshot:traceSnapshots_)if(snapshot)snapshot->release();
     (void)dropViews(0);
     if(views_) {IODelete(views_,View,MaxViews);views_=nullptr;}
@@ -432,8 +436,12 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
         if(!live_ && !handoffOnly_ && !testOnly_)return kIOReturnNotReady;
         if(testOnly_ && kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
         IOMemoryDescriptor *scanout=nullptr;
+#if !defined(DITING_GUEST_24B156)
         if(testOnly_)diting_scanout_observe(nullptr,&scanout);
         else scanout=native_gop_handoff_memory();
+#else
+        scanout=native_gop_handoff_memory();
+#endif
         if(!scanout)return kIOReturnNotReady;
         *memory=scanout;                        /* already retained for the caller */
         *options=kIOMapAnywhere|kIOMapInhibitCache|(testOnly_?kIOMapReadOnly:0);
@@ -653,7 +661,11 @@ IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input
         if(!testOnly_ || kauth_cred_getuid(kauth_cred_get())!=0)return kIOReturnNotPrivileged;
         if(method==DitingGpuTestReadMode) {
             if(input_size || !output || output_size!=sizeof(DitingScanoutModeInfo))return kIOReturnBadArgument;
+#if !defined(DITING_GUEST_24B156)
             return diting_scanout_observe(static_cast<DitingScanoutModeInfo *>(output),nullptr);
+#else
+            return kIOReturnUnsupported;
+#endif
         }
         return gpuTestMethod(method,input,input_size,output,output_size);
     }
@@ -898,8 +910,10 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
         connection->setTestOnly();*handler=connection;return kIOReturnSuccess;
     }
     if(type==NativeAdrenoHandoffOpenType) {
+#if !defined(DITING_GUEST_24B156)
         const IOReturn handoff=diting_scanout_connect(owningTask);
         if(handoff) {connection->detach(provider);connection->release();return handoff;}
+#endif
         connection->setHandoffOnly(owningTask);
         *handler=connection;
         return kIOReturnSuccess;

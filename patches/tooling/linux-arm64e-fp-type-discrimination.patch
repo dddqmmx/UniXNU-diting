@@ -1,0 +1,48 @@
+# UniXNU 519d80242a5028ee123447b01bc3b809baed565f; BSD-2-Clause-Patent.
+# Match Apple arm64e -mkernel function-pointer type discrimination ABI on Linux.
+diff --git a/scripts/unixnu/kernel.py b/scripts/unixnu/kernel.py
+--- a/scripts/unixnu/kernel.py
++++ b/scripts/unixnu/kernel.py
+@@ -102,13 +102,16 @@ def linux_env(ctx):
+     profile = ctx.board.get('os', {})
+     arch = profile.get('arch', 'arm64')
+     ios_version = profile.get('ios_version', '17.0')
++    extra_flags = '-mllvm -disable-atexit-based-global-dtor-lowering'
++    if arch == 'arm64e':
++        extra_flags = '-fptrauth-function-pointer-type-discrimination ' + extra_flags
+     return {'PATH': os.pathsep.join([str(clt / 'bin'), str(toolchain / 'bin'), os.environ.get('PATH', '')]),
+             'LC_ALL': 'C', 'CLT_PREFIX': str(clt), 'XCTOOLCHAIN_PREFIX': str(xctoolchain),
+             'XNU_TOOLCHAIN_BIN': f'{clt / "bin"} {xctoolchain / "bin"}',
+             'UNIXNU_SDKROOT': str(fakeroot), 'UNIXNU_SDK_VERSION': ios_version,
+             'UNIXNU_PLATFORM_PATH': str(fakeroot / 'Platforms/iPhoneOS.platform'),
+             'CROSS_CLANG': str(toolchain / 'llvm/bin/clang'), 'DARWIN_TRIPLE': f'{arch}-apple-ios{ios_version}',
+-            'CROSS_EXTRA_FLAGS': '-mllvm -disable-atexit-based-global-dtor-lowering',
++            'CROSS_EXTRA_FLAGS': extra_flags,
+             'CCC_OVERRIDE_OPTIONS': '# +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global'}
+
+
+diff --git a/scripts/build-fileset-release-reference.py b/scripts/build-fileset-release-reference.py
+--- a/scripts/build-fileset-release-reference.py
++++ b/scripts/build-fileset-release-reference.py
+@@ -110,7 +110,7 @@ def main():
+         'lto_linker': {'path': lto_linker, 'sha256': file_hash(Path(lto_linker))} if lto_linker else None,
+         'liblto': {name: os.environ.get(name) for name in ('LIBLTO', 'LIBLTO_PATH')},
+         'environment': {name: value for name, value in os.environ.items()
+-                        if name.startswith(('XNU_', 'RC_', 'CCC_')) or name in ('CC', 'CXX', 'LD')},
++                        if name.startswith(('XNU_', 'RC_', 'CCC_', 'CROSS_')) or name in ('CC', 'CXX', 'LD')},
+     }
+     if reusable(final, cache_record, inputs):
+         print(f'reference inputs and digest match ({mode}): {final}')
+diff --git a/scripts/linux/prepare-xnu.py b/scripts/linux/prepare-xnu.py
+--- a/scripts/linux/prepare-xnu.py
++++ b/scripts/linux/prepare-xnu.py
+@@ -114,7 +114,8 @@ def build_cc_kext():
+     arch = os.environ.get('UNIXNU_XNU_ARCH', 'arm64')
+     ios_version = os.environ.get('UNIXNU_IOS_VERSION', '17.0')
+     inputs = {'arch': arch, 'ios_version': ios_version, 'llvm_commit': LLVM_COMMIT,
+-              'compiler': os.environ.get('CROSS_CLANG', 'xcrun clang')}
++              'compiler': os.environ.get('CROSS_CLANG', 'xcrun clang'),
++              'cross_extra_flags': os.environ.get('CROSS_EXTRA_FLAGS', '')}
+     stamp = out.with_suffix('.inputs.json')
+     if out.is_file() and stamp.is_file() and json.loads(stamp.read_text()) == inputs:
+         return

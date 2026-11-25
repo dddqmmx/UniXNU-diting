@@ -1,0 +1,25 @@
+diff --git a/osfmk/kern/recount.c b/osfmk/kern/recount.c
+--- a/osfmk/kern/recount.c
++++ b/osfmk/kern/recount.c
+@@ -1633,3 +1633,21 @@ recount_usage_free(recount_topo_t topo, struct recount_usage *usage)
+ 	assert(_topo_allocates[topo]);
+ 	zfree(_recount_usage_zones[topo], usage);
+ }
++
++/* Idle accounting for Diting's SM8475 EPSS CPU policy. */
++uint64_t diting_cpu_idle_mach(unsigned int cpu);
++uint64_t
++diting_cpu_idle_mach(unsigned int cpu)
++{
++	if (cpu > (unsigned int)ml_get_max_cpu_number()) {
++		return UINT64_MAX;
++	}
++	processor_t p = cpu_to_processor((int)cpu);
++	if (p == PROCESSOR_NULL || p->state == PROCESSOR_OFF_LINE) {
++		return UINT64_MAX;
++	}
++	struct recount_usage usage = { 0 };
++	uint64_t idle = 0;
++	recount_processor_usage(&p->pr_recount, &usage, &idle);
++	return idle;
++}

@@ -1,0 +1,56 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1425,6 +1425,36 @@ SYSCTL_PROC(_kern, OID_AUTO, initproc_spawned,
+     CTLFLAG_RW | CTLFLAG_KERN | CTLTYPE_INT | CTLFLAG_LOCKED, 0, 0,
+     sysctl_initproc_spawned, "I", "Boolean indicator that launchd has reached main");
+ 
++#if DEVELOPMENT || DEBUG
++static int
++diting_diagnostic_sysctl SYSCTL_HANDLER_ARGS
++{
++	char text[512];
++	proc_t process = current_proc();
++	if (!process) {
++		return EPERM;
++	}
++	if (!req->newptr || !req->newlen || req->newlen >= sizeof(text)) {
++		return EINVAL;
++	}
++	int error = SYSCTL_IN(req, text, req->newlen);
++	if (error) {
++		return error;
++	}
++	size_t n = req->newlen;
++	while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r')) {
++		n--;
++	}
++	text[n] = '\0';
++	printf("DITING_DIAG[%s:%d]: %s\n", process->p_name, proc_getpid(process), text);
++	return 0;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, diting_diagnostic,
++    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, diting_diagnostic_sysctl, "A", "Diting userspace GPU/renderer diagnostic record");
++#endif /* DEVELOPMENT || DEBUG */
++
+ #if DEVELOPMENT || DEBUG
+ 
+ /* disable user faults */
+diff --git a/bsd/kern/kern_newsysctl.c b/bsd/kern/kern_newsysctl.c
+--- a/bsd/kern/kern_newsysctl.c
++++ b/bsd/kern/kern_newsysctl.c
+@@ -1926,7 +1926,12 @@ sysctl_root(boolean_t from_kernel, boolean_t string_is_canonical, char *namestri
+ 	 * sandbox refuses the read, and a page size of -1 refused every IOSurface it was to draw into.
+ 	 */
+ 	const bool page_size_read = namelen == 2 && name[0] == CTL_HW && name[1] == HW_PAGESIZE && req->newptr == USER_ADDR_NULL;
++#if DEVELOPMENT || DEBUG
++	const bool diting_diag_write = oid->oid_name && strcmp(oid->oid_name, "diting_diagnostic") == 0 && req->oldptr == USER_ADDR_NULL && req->newptr != USER_ADDR_NULL;
++	if (!from_kernel && !page_size_read && !diting_diag_write) {
++#else
+ 	if (!from_kernel && !page_size_read) {
++#endif
+ 		error = mac_system_check_sysctlbyname(kauth_cred_get(),
+ 		    namestring,
+ 		    name,

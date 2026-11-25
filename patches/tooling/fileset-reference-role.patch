@@ -1,0 +1,9 @@
+diff --git a/scripts/build-fileset-release-reference.py b/scripts/build-fileset-release-reference.py
+--- a/scripts/build-fileset-release-reference.py
++++ b/scripts/build-fileset-release-reference.py
+@@ -153,4 +153,5 @@
+     flags = '-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=1 -DXNU_BOOT_PROGRESS=0'
++    flags += ' -DXNU_FILESET_REFERENCE=1'
+     args = ['make','-C',str(source),'build','SDKROOT=iphoneos',
+         'ARCH_CONFIGS=ARM64','MACHINE_CONFIGS=BCM2837','KERNEL_CONFIGS=RELEASE',
+         'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e','LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY',

@@ -10,6 +10,63 @@
 #include <pexpert/pexpert.h>
 #include <IOKit/IOLib.h>
 extern struct vnode *rootvnode; /* bsd/sys/vnode_internal.h */
+#if defined(DITING_GUEST_24B156)
+extern int diting_ufs_read_fw_blocks(uint32_t blockOffset, void *buf, uint32_t bytes) __attribute__((weak_import));
+static char ufs_adsp_handle;
+static uint32_t ufs_adsp_off, ufs_adsp_size;
+static int adsp_ufs_open(uint64_t *size) {
+ if(!&diting_ufs_read_fw_blocks)return ENOENT;
+ unsigned char *hdr=IOMallocData(16384);
+ if(!hdr)return ENOMEM;
+ int rc=diting_ufs_read_fw_blocks(0,hdr,16384);
+ if(rc){IOFreeData(hdr,16384);return EIO;}
+ unsigned count=0;
+ if(memcmp(hdr,"PWF2",4)){IOFreeData(hdr,16384);return ENOENT;}
+ memcpy(&count,hdr+4,4);
+ if(count>(16384u-8u)/40u){IOFreeData(hdr,16384);return EFTYPE;}
+ uint32_t found_off=0,found_len=0;
+ for(unsigned i=0;i<count;i++) {
+  const unsigned char *e=hdr+8+i*40;
+  if(e[31]==0 && !strcmp((const char *)e,"adsp.mbn")) {
+   memcpy(&found_off,e+32,4);memcpy(&found_len,e+36,4);break;
+  }
+ }
+ IOFreeData(hdr,16384);
+ if(!found_len || (found_off&4095u) || found_len>64u*1024u*1024u)return ENOENT;
+ ufs_adsp_off=found_off;ufs_adsp_size=found_len;
+ *size=found_len;
+ IOLog("DitingAdsp: opened signed adsp.mbn from UFS PWF2 pack off=0x%x bytes=%u\n",found_off,found_len);
+ return 0;
+}
+static int adsp_ufs_read(uint64_t offset,void *to,size_t length) {
+ if(offset>ufs_adsp_size||length>ufs_adsp_size-offset)return EINVAL;
+ unsigned char *page=IOMallocData(4096);
+ if(!page)return ENOMEM;
+ unsigned char *dst=(unsigned char *)to;
+ uint64_t cur=offset;size_t rem=length;
+ int rc=0;
+ while(rem) {
+  uint64_t abs_pos=(uint64_t)ufs_adsp_off+cur;
+  uint32_t blk=(uint32_t)(abs_pos>>12);
+  uint32_t in_blk=(uint32_t)(abs_pos&4095u);
+  if(in_blk==0 && rem>=4096u) {
+   uint32_t chunk=(uint32_t)(rem&~4095u);
+   if(chunk>256u*1024u)chunk=256u*1024u;
+   rc=diting_ufs_read_fw_blocks(blk,dst,chunk);
+   if(rc)break;
+   dst+=chunk;cur+=chunk;rem-=chunk;
+  } else {
+   rc=diting_ufs_read_fw_blocks(blk,page,4096u);
+   if(rc)break;
+   size_t take=4096u-in_blk;if(take>rem)take=rem;
+   memcpy(dst,page+in_blk,take);
+   dst+=take;cur+=take;rem-=take;
+  }
+ }
+ IOFreeData(page,4096);
+ return rc?EIO:0;
+}
+#endif
 #if DITING_ADSP_BUILTIN
 #include <libkern/zlib.h>
 #include "DitingAdspArchive.h"
@@ -60,6 +117,12 @@ int sheng_fw_open(const char *path,void **handle,uint64_t *size) {
  if(!rootvnode)return ENXIO;
  vnode_t vnode=NULLVP;vfs_context_t ctx=vfs_context_kernel();
  int rc=vnode_open(path,FREAD|O_NOFOLLOW,0,0,&vnode,ctx);
+#if defined(DITING_GUEST_24B156)
+ if(rc==ENOENT) {
+  int uerr=adsp_ufs_open(size);
+  if(!uerr){*handle=&ufs_adsp_handle;return 0;}
+ }
+#endif
 #if DITING_ADSP_BUILTIN
  unsigned enabled=0;
  if(rc==ENOENT&&PE_parse_boot_argn("diting_adsp_builtin",&enabled,sizeof(enabled))&&enabled==1) {
@@ -77,6 +140,9 @@ int sheng_fw_open(const char *path,void **handle,uint64_t *size) {
 }
 int sheng_fw_read(void *handle,uint64_t offset,void *to,size_t length) {
  if(!handle||!to||length>1024*1024||offset>64*1024*1024||length>64*1024*1024-offset)return EINVAL;
+#if defined(DITING_GUEST_24B156)
+ if(handle==&ufs_adsp_handle)return adsp_ufs_read(offset,to,length);
+#endif
 #if DITING_ADSP_BUILTIN
  if(handle==&builtin_handle) {
   if(!builtin_data||offset>builtin_bytes||length>builtin_bytes-offset)return EINVAL;
@@ -88,6 +154,9 @@ int sheng_fw_read(void *handle,uint64_t offset,void *to,size_t length) {
  return rc?rc:resid?EIO:0;
 }
 void sheng_fw_close(void *handle) {
+#if defined(DITING_GUEST_24B156)
+ if(handle==&ufs_adsp_handle){ufs_adsp_off=0;ufs_adsp_size=0;return;}
+#endif
 #if DITING_ADSP_BUILTIN
  if(handle==&builtin_handle) {
   if(builtin_data)IOFreeData(builtin_data,builtin_bytes);

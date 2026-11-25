@@ -39,12 +39,13 @@ struct DitingGpuTestCommand {
             result.profile = !strcmp(words[2], "qualification") ? DitingGpuTestQualification :
                 !strcmp(words[2], "performance") ? DitingGpuTestPerformance :
                 !strcmp(words[2], "all") ? DitingGpuTestAll :
-                !strcmp(words[2], "ui") ? DitingGpuTestUI : 0;
+                !strcmp(words[2], "ui") ? DitingGpuTestUI :
+                !strcmp(words[2], "keyboard") ? DitingGpuTestKeyboard : 0;
             result.policy = !strcmp(words[3], "auto") ? DitingGpuTestAuto :
                 !strcmp(words[3], "sysmem") ? DitingGpuTestSysmem :
                 !strcmp(words[3], "gmem") ? DitingGpuTestGmem : 99;
             if (result.profile && result.policy <= DitingGpuTestGmem &&
-                (result.profile != DitingGpuTestUI || result.policy == DitingGpuTestAuto)) result.op = Run;
+                (result.profile < DitingGpuTestUI || result.policy == DitingGpuTestAuto)) result.op = Run;
         }
         if (count == 3 && !strcmp(words[1], "cancel") && decimal(words[2], result.job) && result.job) result.op = Cancel;
         if (count == 5 && !strcmp(words[1], "result") && decimal(words[2], result.job) && result.job &&

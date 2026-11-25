@@ -1,0 +1,15 @@
+diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -627,6 +627,11 @@
+ csblob_get_identity(struct cs_blob *csblob)
+ {
+ 	const CS_CodeDirectory *cd;
++	/* 24B156 returns no identity after the signature blob is invalidated. */
++	if ((csblob->csb_flags & CS_VALID) == 0) {
++		return NULL;
++	}
++
+ 
+ 	cd = (const CS_CodeDirectory *)csblob_find_blob(csblob, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
+ 	if (cd == NULL) {

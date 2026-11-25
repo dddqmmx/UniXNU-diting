@@ -32,8 +32,12 @@ void diting_wifi_net_failed(void);
 int nw_wifi_firmware_error(void);
 void DitingWifiNetStaticInit(void);
 bool diting_ufs_ready(void);
-void diting_ramoops_diagnostic_write(const char *, int);
+#ifdef DITING_GUEST_24B156
+int diting_ufs_read_fw_blocks(uint32_t blockOffset, void *buf, uint32_t bytes) __attribute__((weak_import));
+#else
 extern const uint8_t diting_wifi_firmware[], diting_wifi_firmware_end[];
+#endif
+void diting_ramoops_diagnostic_write(const char *, int);
 }
 extern kmod_info_t g_kernel_kmod_info;
 namespace {
@@ -74,6 +78,12 @@ bool fail(const char *s) {log(3,s);return false;}
 bool supplyVote(const char *resource,const char *operation,uint32_t address,uint32_t value) {
  checkpoint(operation,resource,"RUNNING",address,value);
  const bool ok=diting_rpmh_vote(address,value);
+ checkpoint(operation,resource,ok?"PASS":"FAIL",address,value);
+ return ok;
+}
+bool consumerSupplyVote(DitingRpmhConsumer consumer,const char *resource,const char *operation,uint32_t address,uint32_t value) {
+ checkpoint(operation,resource,"RUNNING",address,value);
+ const bool ok=diting_rpmh_consumer_vote(consumer,address,value);
  checkpoint(operation,resource,ok?"PASS":"FAIL",address,value);
  return ok;
 }
@@ -196,13 +206,23 @@ bool supplies() {
   if(!supplyVote(r.name,"VRM enable",res.address+4,1)){ok=false;break;}
   if(!railReady(r)){ok=fail("physical WLAN supply did not follow RPMh request");break;}
  }
- // Retain the actual highest allowed ARC parent votes, as the GPU owner
- // does; never lower a shared CX/MX vote inherited from another consumer.
+ // Vote via the shared RPMh consumer aggregator using live.dtb PCIe0 corner
+ // (NOM = 0x100 = 256) with an SVS (0x80 = 128) baseline floor, instead of
+ // permanently locking mx.lvl/cx.lvl to the highest AUX corner.
  const char *parents[]={"mx.lvl","cx.lvl"};
- for(const char *name:parents)if(ok){QcomRpmhResource res={};if(qcom_cmd_db_find(copy,0x20000,name,&res)||((res.address>>16)&7)!=3||!res.level_count){checkpoint("ARC input",name,"FAIL",res.address);ok=false;break;}unsigned index=0;for(unsigned i=1;i<res.level_count;i++)if(res.levels[i]>res.levels[index])index=i;ok=supplyVote(name,"ARC parent",res.address,index);}
+ for(const char *name:parents)if(ok){
+  QcomRpmhResource res={};
+  uint32_t floorIdx=0,nomIdx=0;
+  if(qcom_cmd_db_find(copy,0x20000,name,&res)||((res.address>>16)&7)!=3||!res.level_count||
+     qcom_rpmh_level_index(&res,0x80u,&floorIdx)||qcom_rpmh_level_index(&res,0x100u,&nomIdx)){
+   checkpoint("ARC input",name,"FAIL",res.address);ok=false;break;
+  }
+  ok=consumerSupplyVote(DitingRpmhFloor,name,"ARC floor",res.address,floorIdx)&&
+     consumerSupplyVote(DitingRpmhWlan,name,"ARC parent",res.address,nomIdx);
+ }
  // The actual PCIe ref_clk_src is RPMH_CXO_CLK, not just GCC CLKREF_EN.
  // clk-rpmh.c waipio_bi_tcxo votes xo.lvl=3 while this consumer is active.
- if(ok){QcomRpmhResource xo={};ok=!qcom_cmd_db_find(copy,0x20000,"xo.lvl",&xo)&&((xo.address>>16)&7)==3&&supplyVote("xo.lvl","XO clock",xo.address,3);if(!ok)checkpoint("XO clock","xo.lvl","FAIL",xo.address,3);}
+ if(ok){QcomRpmhResource xo={};ok=!qcom_cmd_db_find(copy,0x20000,"xo.lvl",&xo)&&((xo.address>>16)&7)==3&&consumerSupplyVote(DitingRpmhWlan,"xo.lvl","XO clock",xo.address,3);if(!ok)checkpoint("XO clock","xo.lvl","FAIL",xo.address,3);}
  if(ok)ok=bcmVote(copy,"SN7");
  IOFreeData(copy,0x20000);checkpoint("all supply requests","supplies",ok?"PASS":"FAIL");if(ok)log(6,"SM8475 WLAN rail requests acknowledged");return ok;
 }
@@ -533,6 +553,37 @@ void freeHeap(void *p) {if(p){auto b=static_cast<uint8_t *>(p)-16;IOFreeData(b,*
 void halt() {stopped=1;if(hostMmioReady){dbi.w(MsiEnable,0);parf.w(0x22c,0);}if(tlmm.v)pin(94,1u|1u<<9,0);diting_wifi_net_failed();IOLog("DitingWifi: worker stopped; DMA retained until reset\n");thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
 void poll() {if(nw_wifi_firmware_error()){log(3,"QCA6490 firmware failed; stop dispatcher and preserve normal iOS boot");halt();}if(initDeadline&&now()>initDeadline){log(3,"firmware initialization exceeded deadline");halt();}if(dmaOwned){unsigned fs=smmu.r(cbOffset+0x58);if(fs&0xc00001fe){IOLog("DitingWifi: owned SMMU fault=%x FAR=%x%08x FSYNR0=%x\n",fs,smmu.r(cbOffset+0x64),smmu.r(cbOffset+0x60),smmu.r(cbOffset+0x68));halt();}}}
 void sleep(unsigned ms) {while(ms){poll();unsigned part=ms>100?100:ms;IOSleep(part);ms-=part;}poll();}
+void publishMacProps(const uint8_t m[6], bool overwrite) {
+ if (IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane)) {
+  if (overwrite || !chosen->getProperty("mac-address-wifi0")) chosen->setProperty("mac-address-wifi0", const_cast<uint8_t *>(m), 6);
+  chosen->release();
+ }
+ if (IORegistryEntry *wlan = IORegistryEntry::fromPath("/arm-io/wlan", gIODTPlane)) {
+  if (overwrite || !wlan->getProperty("local-mac-address")) wlan->setProperty("local-mac-address", const_cast<uint8_t *>(m), 6);
+  wlan->release();
+ }
+}
+bool installationMac(uint8_t out[6]) {
+ auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
+ auto root=chosen?OSDynamicCast(OSData,chosen->getProperty("root-matching")):nullptr;
+ const char *bytes=root?static_cast<const char *>(root->getBytesNoCopy()):nullptr;
+ const size_t n=root?root->getLength():0;
+ const char marker[]="<key>UUID</key><string>";const size_t markerSize=sizeof(marker)-1;
+ const char *uuid=nullptr;
+ for(size_t i=0;bytes && i+markerSize+36<n;i++)if(!memcmp(bytes+i,marker,markerSize)){uuid=bytes+i+markerSize;break;}
+ char digits[32];unsigned count=0;
+ for(unsigned i=0;uuid && i<36;i++) {
+  const char c=uuid[i];if(c=='-')continue;
+  if(!((c>='0'&&c<='9')||(c>='A'&&c<='F')||(c>='a'&&c<='f'))){count=0;break;}
+  if(count<sizeof(digits))digits[count++]=c;
+ }
+ if(chosen)chosen->release();
+ if(count!=32)return false;
+ auto hexv=[](char c)->uint8_t {return c<='9'?uint8_t(c-'0'):c<='F'?uint8_t(c-'A'+10):uint8_t(c-'a'+10);};
+ out[0]=0x02;
+ for(unsigned i=0;i<5;i++)out[i+1]=uint8_t((hexv(digits[22+i*2])<<4)|hexv(digits[23+i*2]));
+ return true;
+}
 int fwGet(const char *path,const uint8_t **data,size_t *size) {
  const char *name=path;for(const char *p=path;*p;p++)if(*p=='/')name=p+1;
  if(!strcmp(name,"wlan_mac.bin")) {
@@ -541,22 +592,9 @@ int fwGet(const char *path,const uint8_t **data,size_t *size) {
   // as the upstream board ABI permits. Never send all-zero vdev identity.
   static char identity[40];
   if(!identity[0]) {
-   auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
-   auto root=chosen?OSDynamicCast(OSData,chosen->getProperty("root-matching")):nullptr;
-   const char *bytes=root?static_cast<const char *>(root->getBytesNoCopy()):nullptr;
-   const size_t n=root?root->getLength():0;
-   const char marker[]="<key>UUID</key><string>";const size_t markerSize=sizeof(marker)-1;
-   const char *uuid=nullptr;
-   for(size_t i=0;bytes && i+markerSize+36<n;i++)if(!memcmp(bytes+i,marker,markerSize)){uuid=bytes+i+markerSize;break;}
-   char digits[32];unsigned count=0;
-   for(unsigned i=0;uuid && i<36;i++) {
-    const char c=uuid[i];if(c=='-')continue;
-    if(!((c>='0'&&c<='9')||(c>='A'&&c<='F')||(c>='a'&&c<='f'))){count=0;break;}
-    if(count<sizeof(digits))digits[count++]=c;
-   }
-   if(count==32)snprintf(identity,sizeof(identity),"Intf0MacAddress=02%.*s\n",10,digits+22);
-   if(chosen)chosen->release();
-   if(!identity[0])return -1;
+   uint8_t m[6];
+   if(!installationMac(m))return -1;
+   snprintf(identity,sizeof(identity),"Intf0MacAddress=%02x%02x%02x%02x%02x%02x\n",m[0],m[1],m[2],m[3],m[4],m[5]);
    IOLog("DitingWifi: locally administered address assigned from installation identity\n");
   }
   *data=reinterpret_cast<const uint8_t *>(identity);*size=strlen(identity);return 0;
@@ -564,9 +602,44 @@ int fwGet(const char *path,const uint8_t **data,size_t *size) {
  // Linux WCN6855 hw2 firmware uses the vendor v2 image. Select from the
  // actual TCSR HW major (pci.c uses the same register), never PCI revision.
  if(!strcmp(name,"amss.bin")&&((bar.r(0x224)>>8)&15)==2)name="amss20.bin";
+#ifdef DITING_GUEST_24B156
+ if(!&diting_ufs_read_fw_blocks)return -1;
+ static uint8_t *fwHdr;
+ static unsigned fwCount;
+ if(!fwHdr) {
+  auto *h=static_cast<uint8_t *>(IOMallocData(16384));
+  if(!h)return -1;
+  if(diting_ufs_read_fw_blocks(0,h,16384)||memcmp(h,"PWF2",4)){IOFreeData(h,16384);return -1;}
+  unsigned c=0;memcpy(&c,h+4,4);
+  if(c>(16384u-8u)/40u){IOFreeData(h,16384);return -1;}
+  fwHdr=h;fwCount=c;
+ }
+ struct FwCache { char name[32]; uint8_t *buf; size_t len; };
+ static FwCache cache[12];
+ static unsigned cacheUsed;
+ for(unsigned i=0;i<cacheUsed;i++) {
+  if(!strcmp(cache[i].name,name)){*data=cache[i].buf;*size=cache[i].len;return 0;}
+ }
+ for(unsigned i=0;i<fwCount;i++) {
+  const uint8_t *e=fwHdr+8+i*40;
+  if(strnlen(reinterpret_cast<const char *>(e),32)>=32||strcmp(reinterpret_cast<const char *>(e),name))continue;
+  unsigned off=0,len=0;memcpy(&off,e+32,4);memcpy(&len,e+36,4);
+  if((off&4095u)||!len||len>16u*1024u*1024u)return -1;
+  const uint32_t aligned=(len+4095u)&~4095u;
+  auto *buf=static_cast<uint8_t *>(IOMallocData(aligned));
+  if(!buf)return -1;
+  if(diting_ufs_read_fw_blocks(off>>12,buf,aligned)){IOFreeData(buf,aligned);return -1;}
+  if(cacheUsed<12){strlcpy(cache[cacheUsed].name,name,32);cache[cacheUsed].buf=buf;cache[cacheUsed].len=len;++cacheUsed;}
+  *data=buf;*size=len;
+  IOLog("DitingWifi: UFS PWF2 firmware %s off=0x%x bytes=%u\n",name,off,len);
+  return 0;
+ }
+ return -1;
+#else
  const size_t total=size_t(diting_wifi_firmware_end-diting_wifi_firmware);unsigned count=0;if(total<8||memcmp(diting_wifi_firmware,"PWF2",4))return -1;memcpy(&count,diting_wifi_firmware+4,4);
  if(count>(total-8)/40)return -1;
  for(unsigned i=0;i<count;i++){const uint8_t *e=diting_wifi_firmware+8+i*40;if(strnlen(reinterpret_cast<const char *>(e),32)>=32||strcmp(reinterpret_cast<const char *>(e),name))continue;unsigned off,len;memcpy(&off,e+32,4);memcpy(&len,e+36,4);if(off>total||len>total-off)return -1;*data=diting_wifi_firmware+off;*size=len;IOLog("DitingWifi: firmware %s bytes=%u\n",name,len);return 0;}return -1;
+#endif
 }
 int cfgRead(int o,int n,uint32_t *v) {unsigned off=unsigned(o);if(off&0x80000000)off=(off&0x7fffffff)+pcieCap;if(!v||(n!=1&&n!=2&&n!=4)||off>4096-unsigned(n)||(off&(unsigned(n)-1)))return -1;*v=n==1?cfg.v[off]:n==2?*reinterpret_cast<volatile uint16_t *>(cfg.v+off):cfg.r(off);return 0;}
 int cfgWrite(int o,int n,uint32_t v) {unsigned off=unsigned(o);if(off&0x80000000)off=(off&0x7fffffff)+pcieCap;if((n!=1&&n!=2&&n!=4)||off>4096-unsigned(n)||(off&(unsigned(n)-1)))return -1;if(off<0x40&&!(off==4&&n==2&&dmaOwned&&(v&~7u)==0))return -1;if(n==1)cfg.v[off]=uint8_t(v);else if(n==2)*reinterpret_cast<volatile uint16_t *>(cfg.v+off)=uint16_t(v);else cfg.w(off,v);__asm__ volatile("dsb sy":::"memory");return 0;}
@@ -624,7 +697,7 @@ void worker(void *,wait_result_t) {
  }
  {bool net=false,irqSeen=false;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
    if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
-     auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
+     publishMacProps(st.mac, true);
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
      DitingWifiNetStaticInit();if(OSMetaClass::postModLoad(handle)!=kIOReturnSuccess)goto done;
      diting_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
@@ -668,6 +741,10 @@ extern "C" void diting_wifi_start_optional(void) {
  diting_rpmh_init();
  uint32_t enabled=0;if(!PE_parse_boot_argn("diting_wifi",&enabled,sizeof enabled)||enabled!=1)return;
  static uint32_t started;if(__atomic_exchange_n(&started,1,__ATOMIC_ACQ_REL))return;
+ // Publish local-mac-address and mac-address-wifi0 before launchd starts
+ // MobileGestalt/wifid so WifiAddressData is available from boot.
+ uint8_t earlyMac[6];
+ if (installationMac(earlyMac)) publishMacProps(earlyMac, false);
  // These network classes are linked into the native kernel, not loaded as a
  // separate kext. Register their metaclasses before publishing any service.
  thread_t t=nullptr;if(kernel_thread_start(worker,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);else log(3,"WiFi worker allocation failed");

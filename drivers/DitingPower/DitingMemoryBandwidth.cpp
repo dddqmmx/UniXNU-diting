@@ -18,6 +18,10 @@ IOMemoryMap *dbMap, *llccMap, *broadcastMap, *bwmonMap[2];
 volatile uint8_t *llcc, *broadcast, *bwmon[2];
 uint32_t started;
 bool bandwidthRetained;
+Bcm savedBcms[2] = {};
+unsigned bwMode = 0; // 0=disabled, 1=dynamic, 2=locked-max
+unsigned currentProfile = ProfileActive;
+uint32_t profileTransitions = 0;
 uint64_t nowUs() { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000; }
 uint32_t rd(volatile uint8_t *base, unsigned off) {
     const uint32_t value = *reinterpret_cast<volatile uint32_t *>(base + off);
@@ -131,16 +135,19 @@ extern "C" void diting_memory_bandwidth_start(void) {
     diting_memory_diagnostic.version = 1; diting_memory_diagnostic.bytes = sizeof(DitingMemoryDiagnostic);
     diting_memory_diagnostic.stage = 1;
     unsigned enabled = 1; PE_parse_boot_argn("diting_memory_bw", &enabled, sizeof(enabled));
-    diting_memory_diagnostic.enabled = enabled == 1;
-    if (enabled != 1) { end(); IOLockUnlock(lock); return; }
+    diting_memory_diagnostic.enabled = enabled != 0;
+    if (enabled == 0) { bwMode = 0; end(); IOLockUnlock(lock); return; }
+    bwMode = enabled >= 2 ? 2u : 1u;
+    const unsigned initialProfile = bwMode == 2u ? unsigned(ProfileMax) : unsigned(ProfileActive);
     auto db = map(dbMap, 0x80860000, 0x20000);
     Bcm bcms[2] = {};
-    uint32_t addresses[2] = {}, values[2] = {};
-    const uint32_t khz[] = {DdrMaxKhz, LlccMaxKhz};
+    uint32_t addresses[2] = {}, values[2] = {}, khz[2] = {};
     bool ok = db && readBcm(const_cast<const uint8_t *>(db), 0x20000, "MC3", bcms[0]) &&
-        readBcm(const_cast<const uint8_t *>(db), 0x20000, "SH5", bcms[1]) && bcms[0].address != bcms[1].address;
+        readBcm(const_cast<const uint8_t *>(db), 0x20000, "SH5", bcms[1]) && bcms[0].address != bcms[1].address &&
+        profileVotes(bcms[0], bcms[1], initialProfile, khz[0], khz[1], values[0], values[1]);
     for (unsigned i = 0; ok && i < 2; ++i) {
-        ok = frequencyVote(bcms[i], khz[i], khz[i], values[i]); addresses[i] = bcms[i].address;
+        savedBcms[i] = bcms[i];
+        addresses[i] = bcms[i].address;
         const uint32_t fields[] = {bcms[i].address, bcms[i].unit, bcms[i].width, bcms[i].vcd, khz[i], values[i]};
         for (unsigned j = 0; j < 6; ++j) diting_memory_diagnostic.bcm[i][j] = fields[j];
     }
@@ -149,13 +156,47 @@ extern "C" void diting_memory_bandwidth_start(void) {
         diting_memory_diagnostic.stage = 2;
         // Same APSS owner as GPU/WLAN/ADSP, active TCS0..2 only. MC3/SH5
         // are CPU resources; the GMU's SH0/MC0/ACV requests remain intact.
-        if (diting_rpmh_vote_many(addresses, values, 2)) diting_memory_diagnostic.stage = 3;
-        else diting_memory_diagnostic.error = -2;
+        if (diting_rpmh_vote_many(addresses, values, 2)) {
+            currentProfile = initialProfile;
+            diting_memory_diagnostic.stage = 3;
+        } else diting_memory_diagnostic.error = -2;
     }
     end(); IOLockUnlock(lock);
-    IOLog("DITING MEMORY: stage=%u error=%d MC3=%x/%x requested_ddr_khz=%u SH5=%x/%x requested_llcc_khz=%u\n",
-        diting_memory_diagnostic.stage, diting_memory_diagnostic.error,
+    IOLog("DITING MEMORY: mode=%u profile=%u stage=%u error=%d MC3=%x/%x requested_ddr_khz=%u SH5=%x/%x requested_llcc_khz=%u\n",
+        bwMode, currentProfile, diting_memory_diagnostic.stage, diting_memory_diagnostic.error,
         addresses[0], values[0], khz[0], addresses[1], values[1], khz[1]);
+}
+extern "C" bool diting_memory_bandwidth_set_profile(unsigned level) {
+    if (!lock || bwMode != 1u) return false;
+    if (level >= ProfileCount) level = ProfileMax;
+    IOLockLock(lock);
+    if (diting_memory_diagnostic.stage < 3 || level == currentProfile) {
+        const bool ok = diting_memory_diagnostic.stage >= 3;
+        IOLockUnlock(lock);
+        return ok;
+    }
+    uint32_t khz[2] = {}, values[2] = {};
+    const uint32_t addresses[2] = {savedBcms[0].address, savedBcms[1].address};
+    if (!profileVotes(savedBcms[0], savedBcms[1], level, khz[0], khz[1], values[0], values[1])) {
+        IOLockUnlock(lock);
+        return false;
+    }
+    const bool ok = diting_rpmh_vote_many(addresses, values, 2);
+    if (ok) {
+        begin();
+        currentProfile = level;
+        profileTransitions++;
+        for (unsigned i = 0; i < 2; ++i) {
+            diting_memory_diagnostic.bcm[i][4] = khz[i];
+            diting_memory_diagnostic.bcm[i][5] = values[i];
+        }
+        end();
+    }
+    IOLockUnlock(lock);
+    return ok;
+}
+extern "C" unsigned diting_memory_bandwidth_profile(void) {
+    return __atomic_load_n(&currentProfile, __ATOMIC_ACQUIRE);
 }
 extern "C" int diting_memory_gpu_cache(void) {
     diting_memory_bandwidth_start();
@@ -190,9 +231,9 @@ extern "C" unsigned diting_memory_snapshot_text(char *out, unsigned capacity) {
     if (!lock || !IOLockTryLock(lock)) return 0;
     begin(); sample(); end();
     const int n = snprintf(out, capacity,
-        "[memory] stage=%u error=%d MC3=%x/%x DDR_request_khz=%u SH5=%x/%x LLCC_request_khz=%u cache=%u/%d\n"
+        "[memory] mode=%u profile=%u trans=%u stage=%u error=%d MC3=%x/%x DDR_request_khz=%u SH5=%x/%x LLCC_request_khz=%u cache=%u/%d\n"
         "LLCC GPUHTW=%x/%x/%x GPU=%x/%x/%x WRSC=%x RETAIN=%x BWMON_EN=%x/%x SW=%x/%x raw_only=1\n",
-        diting_memory_diagnostic.stage, diting_memory_diagnostic.error,
+        bwMode, currentProfile, profileTransitions, diting_memory_diagnostic.stage, diting_memory_diagnostic.error,
         diting_memory_diagnostic.bcm[0][0], diting_memory_diagnostic.bcm[0][5], diting_memory_diagnostic.bcm[0][4],
         diting_memory_diagnostic.bcm[1][0], diting_memory_diagnostic.bcm[1][5], diting_memory_diagnostic.bcm[1][4],
         diting_memory_diagnostic.cache_ready, diting_memory_diagnostic.cache_result,

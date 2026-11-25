@@ -77,6 +77,14 @@ def main():
         result=require(fastboot('boot',str(a.boot_image.resolve())),'fastboot',120)
         print(result.stdout+result.stderr,flush=True)
         save('waiting-for-timed-return')
+        if a.reader_image:
+            # Wait for the initial bootloader USB session to tear down before polling for return.
+            drop_limit=time.monotonic()+15
+            while time.monotonic()<drop_limit:
+                devices=poll([a.fastboot,'devices','-l'])
+                if not any(line.split()[:1]==[a.serial] for line in devices.stdout.splitlines()):
+                    break
+                time.sleep(0.5)
         limit=time.monotonic()+a.timeout
         reader_started=False
         while time.monotonic()<limit:

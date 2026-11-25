@@ -298,3 +298,41 @@ failed_gpu:
     d->poisoned=1;d->hfi.poisoned=1;
     return status;
 }
+
+DitingGpuStatus DitingAdrenoGmuSetPowerLevel(DitingGpuGmuDevice *d,unsigned gpu_index,
+    unsigned bus_index,DitingGpuPowerResult *r)
+{
+    if(!r)return DitingGpuArgument;
+    *r=(DitingGpuPowerResult){0};r->resources_must_retain=1;
+    if(!d || !d->power_started || !d->fw_ready || !d->hfi_ready ||
+       !d->io.platform_ready || !d->io.read32 || !d->io.now_us || !d->io.wait_us)
+        return DitingGpuPrerequisite;
+    if(d->poisoned || d->hfi.poisoned)return DitingGpuPoisoned;
+    if(d->hfi.pending_header)return DitingGpuBusy;
+    if(gpu_index<1 || gpu_index>13 || bus_index>=12)return DitingGpuArgument;
+    DitingGpuStatus status=healthy(d,r);
+    if(status)return status;
+    uint64_t begin=0;
+    if(d->io.now_us(d->io.cookie,&begin))return DitingGpuIo;
+    r->begin_us=r->end_us=begin;
+    r->phase=1;r->command=30;r->header=0;
+    uint32_t performance_vote[]={1,gpu_index,bus_index};
+    r->transport=DitingAdrenoHfiSend(&d->hfi,30,performance_vote,3,&r->header);
+    if(r->header)r->published=1;
+    if(r->transport!=DitingAdrenoHfiSuccess) {
+        d->poisoned=1;d->hfi.poisoned=1;
+        return DitingGpuIo;
+    }
+    status=wait_ack(d,r,begin,begin,1000000);
+    if(status) {
+        d->poisoned=1;d->hfi.poisoned=1;
+        return status;
+    }
+    status=healthy(d,r);
+    if(status) {
+        d->poisoned=1;d->hfi.poisoned=1;
+        return status;
+    }
+    r->phase=2;
+    return DitingGpuSuccess;
+}

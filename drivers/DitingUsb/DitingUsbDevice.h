@@ -17,15 +17,19 @@
 #include "../DitingPower/GeniI2c.h"
 #include "../DitingPower/DitingLowDma.h"
 extern "C" bool diting_ufs_ready(void);
-extern "C" int diting_battery_usb_online(void);
-extern "C" bool diting_usb_mux_publish(void);
-extern "C" void diting_usb_mux_session(bool);
-extern "C" bool diting_usb_mux_receive(const void *,unsigned);
-extern "C" bool diting_usb_mux_can_receive(unsigned);
-extern "C" bool diting_usb_mux_bridge_ready(void);
-extern "C" void diting_usb_mux_attached(bool);
-extern "C" bool diting_usb_mux_serial(char *,unsigned);
-extern "C" unsigned diting_usb_mux_transmit(void *,unsigned);
+extern "C" int diting_battery_usb_online(void) __attribute__((weak_import));
+extern "C" int diting_battery_usb_data_online(void) __attribute__((weak_import));
+extern "C" int diting_ucsi_usb_data_online(void) __attribute__((weak_import));
+extern "C" unsigned diting_battery_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_cpu_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" bool diting_usb_mux_publish(void) __attribute__((weak_import));
+extern "C" void diting_usb_mux_session(bool) __attribute__((weak_import));
+extern "C" bool diting_usb_mux_receive(const void *,unsigned) __attribute__((weak_import));
+extern "C" bool diting_usb_mux_can_receive(unsigned) __attribute__((weak_import));
+extern "C" bool diting_usb_mux_bridge_ready(void) __attribute__((weak_import));
+extern "C" void diting_usb_mux_attached(bool) __attribute__((weak_import));
+extern "C" bool diting_usb_mux_serial(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_usb_mux_transmit(void *,unsigned) __attribute__((weak_import));
 #include "Dwc3Registers.h"
 #include "DitingDwc3Stop.h"
 #include "DitingUsbDiagnostics.h"
@@ -39,11 +43,38 @@ extern "C" unsigned diting_display_snapshot_text(char *,unsigned) __attribute__(
 extern "C" unsigned diting_display_colour_text(char *,unsigned) __attribute__((weak_import));
 extern "C" unsigned diting_display_solid_text(const char *,char *,unsigned) __attribute__((weak_import));
 extern "C" unsigned diting_panel_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_backlight_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_buttons_snapshot_text(char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_wifi_usb_command(const char *,char *,unsigned) __attribute__((weak_import));
+extern "C" unsigned diting_touch_usb_command(const char *,char *,unsigned) __attribute__((weak_import));
 extern "C" unsigned diting_scanout_pixels_text(const char *,char *,unsigned) __attribute__((weak_import));
 extern "C" unsigned diting_gpu_test_text(const char *,char *,unsigned) __attribute__((weak_import));
-extern "C" {extern volatile int32_t native_adsp_stats[16],native_battery_stats[16];extern char native_adsp_text[96];}
+extern "C" {
+extern volatile int32_t native_adsp_stats[16] __attribute__((weak_import));
+extern volatile int32_t native_battery_stats[16] __attribute__((weak_import));
+extern char native_adsp_text[96] __attribute__((weak_import));
+}
 namespace DitingUsb {
 #include "../NativeUfs/SmmuTakeover.h"
+static bool usbForceMode,adspEnabledMode,adspFallbackActive;
+// OptionalProviders.S provides weak -2 stub when DitingBattery is unlinked; chained
+// arm64e kernels cannot encode authenticated fixups to absolute zero.
+static int cableOnline() {
+ if(usbForceMode)return 1;
+ const int dataRole=diting_battery_usb_data_online();
+ if(dataRole==0 || dataRole==1)return dataRole;
+ const int vbusState=diting_battery_usb_online();
+ if(vbusState==0)return 0;
+#ifdef DITING_GUEST_24B156
+ if(!adspEnabledMode)return vbusState<0?1:vbusState;
+ if(adspFallbackActive)return 1;
+ if(dataRole==-2)return vbusState==-2?1:vbusState;
+ return -1;
+#else
+ if(dataRole==-2)return vbusState==-2?-1:vbusState;
+ return -1;
+#endif
+}
 struct Map {
  IOMemoryMap *map=nullptr;volatile uint32_t *p=nullptr;
  bool open(uint64_t pa,size_t bytes,IOOptionBits cache=kIOMapInhibitCache) {
@@ -73,6 +104,7 @@ static bool unavailable(const char *reason) {
 }
 #include "DitingUsbPhy.h"
 static uint64_t physical;
+static IOBufferMemoryDescriptor *dmaDesc;
 static unsigned eventOffset,stage,statusDep,controlBytes,controlDep,packet=64;
 static bool failed,configured,dtr,txActive,rxActive,logReady;
 static bool cableConnected;
@@ -88,15 +120,20 @@ static bool txReply;
 static uint32_t logCursor,txEnd;
 static IOService *service;
 static constexpr unsigned DmaBytes=DitingLowDma::UsbBytes,EpTrb=0x1000,EpData=0x2000,TxTrb=0x3000,RxTrb=0x3020,TxData=0x4000,RxData=0x5000;
+#ifdef DITING_GUEST_24B156
+/* Apple Debug USB VID/PID (05ac:1881) matched by standard systemd 70-debug-appliance.hwdb -> uaccess ACL, keeping pure CDC-ACM (02/02 + 0a/00). */
+static uint8_t device[]={18,1,0,2,2,0,0,64,0xac,0x05,0x81,0x18,0,1,1,2,3,1};
+#else
 static uint8_t device[]={18,1,0,2,2,0,0,64,0xff,0xff,0x28,0x01,0,1,1,2,3,1};
-static uint8_t config[]={9,2,67,0,2,1,0,0xc0,50,
+#endif
+static uint8_t config[]={9,2,67,0,2,1,0,0xc0,250,
  9,4,0,0,1,2,2,1,0,5,0x24,0,0x10,1,5,0x24,1,0,1,4,0x24,2,2,5,0x24,6,0,1,
  7,5,0x82,3,16,0,16,9,4,1,0,2,10,0,0,0,
  7,5,0x81,2,64,0,0,7,5,0x01,2,64,0,0};
 // Mux first for native mobile-host discovery, plus a separate CDC IAD.
 // Apple protocol VID/PID is used only by this opt-in compatibility function.
 // Product/manufacturer continue to identify the actual Diting port.
-static uint8_t composite[]={9,2,98,0,3,1,0,0xc0,50,
+static uint8_t composite[]={9,2,98,0,3,1,0,0xc0,250,
  9,4,0,0,2,0xff,0xfe,2,0,7,5,0x03,2,64,0,0,7,5,0x83,2,64,0,0,
  8,11,1,2,2,2,1,0,
  9,4,1,0,1,2,2,1,4,5,0x24,0,0x10,1,5,0x24,1,0,2,4,0x24,2,2,5,0x24,6,1,2,
@@ -139,35 +176,53 @@ static void input(const unsigned char *data,unsigned size) {
      IOLog("DitingUSB command: %s %s; syncing filesystems\n",commandLine,accepted?"accepted":"busy/rejected");
     } else if(!strcmp(commandLine,"status")) {
      used+=diting_usb_snapshot(reply+used,unsigned(ReplyPayloadBytes-used));
+    } else if(!strcmp(commandLine,"battery") || !strcmp(commandLine,"charger")) {
+     if(const unsigned n=diting_battery_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting battery/charger snapshot not linked\n");
+    } else if(!strcmp(commandLine,"cpu")) {
+     if(const unsigned n=diting_cpu_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting CPU policy not linked\n");
     } else if(!strcmp(commandLine,"gpu")) {
-     if(&diting_gpu_snapshot_text)used+=diting_gpu_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_gpu_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting GPU clock reader not linked\n");
     } else if(!strcmp(commandLine,"gpu bandwidth")) {
-     if(&diting_memory_bandwidth_probe_text)used+=diting_memory_bandwidth_probe_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_memory_bandwidth_probe_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"BANDWIDTH schema=1 status=SKIP reason=probe-not-linked register_writes=0\n");
     } else if(!strcmp(commandLine,"display")) {
-     if(&diting_display_snapshot_text)used+=diting_display_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_display_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting display timing reader not linked\n");
     } else if(!strcmp(commandLine,"display color")) {
-     if(&diting_display_colour_text)used+=diting_display_colour_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_display_colour_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting display colour reader not linked\n");
     } else if(!strncmp(commandLine,"display solid ",14) || !strncmp(commandLine,"display fetch-swap ",19)) {
-     if(&diting_display_solid_text)used+=diting_display_solid_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_display_solid_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"SOLID schema=1 available=0 accepted=0 reason=controller-not-linked\n");
     } else if(!strcmp(commandLine,"display panel")) {
-     if(&diting_panel_snapshot_text)used+=diting_panel_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_panel_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting panel mode reader not linked\n");
+    } else if(!strcmp(commandLine,"backlight")) {
+     if(const unsigned n=diting_backlight_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting backlight not linked\n");
+    } else if(!strcmp(commandLine,"buttons")) {
+     if(const unsigned n=diting_buttons_snapshot_text(reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting buttons not linked\n");
+    } else if(!strcmp(commandLine,"wifi") || !strncmp(commandLine,"wifi ",5)) {
+     if(const unsigned n=diting_wifi_usb_command(commandLine,reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting Wi-Fi not linked\n");
+    } else if(!strcmp(commandLine,"hid") || !strncmp(commandLine,"hid ",4)) {
+     if(const unsigned n=diting_touch_usb_command(commandLine,reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
+     else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting HID injector not linked\n");
     } else if(!strncmp(commandLine,"display pixels",14)) {
-     if(&diting_scanout_pixels_text)used+=diting_scanout_pixels_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_scanout_pixels_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: Diting current console reader not linked\n");
     } else if(!strncmp(commandLine,"gputest ",8)) {
-     if(&diting_gpu_test_text)used+=diting_gpu_test_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used));
+     if(const unsigned n=diting_gpu_test_text(commandLine,reply+used,unsigned(ReplyPayloadBytes-used)))used+=n;
      else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"GPUTEST schema=1 available=0 reason=broker-not-linked\n");
     } else if(!strncmp(commandLine,"trace ",6)) {
      uint64_t after=0;unsigned records=0;
      alignas(8) unsigned char raw[sizeof(NativeGpuTraceStreamHeader)+NativeGpuTraceStreamRecords*sizeof(NativeGpuTraceRecord)];
      const bool valid=diting_usb_parse_trace(commandLine,&after,&records);
-     const unsigned got=valid && &native_gpu_trace_range?native_gpu_trace_range(after,records,raw,sizeof(raw)):0;
+     const unsigned got=valid?native_gpu_trace_range(after,records,raw,sizeof(raw)):0;
      if(got && got<=sizeof(raw)) {
       diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"GPU trace bytes=%u\nDATA ",got);
       const unsigned encoded=diting_usb_base64(raw,got,reply+used,unsigned(ReplyPayloadBytes-used));
@@ -188,7 +243,7 @@ static void input(const unsigned char *data,unsigned size) {
       diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"\n");
      }
      if(!got)diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"unavailable: use 1..512 bytes of mapped kernel RAM\n");
-    } else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"commands: status | gpu [bandwidth] | display [color/panel/pixels] | display fetch-swap MS | display solid status/cancel/blue/green/red [MS 1000..60000] | gputest status/run/result/cancel | trace AFTER COUNT(1..20) | read HEX-KVA BYTES | reboot rec | reboot fastboot | help\n");
+    } else diting_usb_reply_add(reply,ReplyPayloadBytes,&used,"commands: status | battery | cpu | gpu [bandwidth] | display [color/panel/pixels] | display fetch-swap MS | display solid status/cancel/blue/green/red [MS 1000..60000] | backlight | buttons | wifi | hid | gputest status/run/result/cancel | trace AFTER COUNT(1..20) | read HEX-KVA BYTES | reboot rec | reboot fastboot | help\n");
     if(used && reply[used-1]!='\n')diting_usb_reply_add(reply,sizeof(reply),&used,"\n");
     diting_usb_reply_add(reply,sizeof(reply),&used,"DitingUSB END %s\n",commandLine);
     replyBytes=used<sizeof(reply)?used:unsigned(sizeof(reply)-1);replyCursor=0;
@@ -428,7 +483,21 @@ static bool initialize() {
  // cannot be bounded by a software polling timeout. Require explicit board
  // handoff BEFORE the first controller read or shared-SMMU write.
  phase("dma-reservation");bool firmwarePhy=false;
- if(!DitingLowDma::usbAddress(physical))return unavailable("independent UEFI USB DMA reservation absent or overlapping");
+ if(!DitingLowDma::usbAddress(physical)) {
+#ifdef DITING_GUEST_24B156
+  if(!dmaDesc) {
+   dmaDesc=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+    IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPhysicallyContiguous)|IOOptionBits(kIOMemoryMapperNone),
+    DmaBytes,4096);
+  }
+  IOByteCount segLen=0;
+  physical=dmaDesc?uint64_t(dmaDesc->getPhysicalSegment(0,&segLen,kIOMemoryMapperNone)):0;
+  if(!physical || segLen<DmaBytes || (physical&4095) || physical>(1ULL<<36)-DmaBytes)
+   return unavailable("kernel USB DMA allocation failed");
+#else
+  return unavailable("independent UEFI USB DMA reservation absent or overlapping");
+#endif
+ }
  const bool firmwareStopped=DitingLowDma::usbHandoff(&firmwarePhy);
  uint64_t handoff[4]={},firmwareStatus[2]={};
  auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
@@ -446,13 +515,27 @@ static bool initialize() {
  // remains a failure; neither the loader record nor its flags are fabricated.
  const bool noProducer=recorded&&!handoff[0]&&!handoff[1]&&!handoff[2]&&!handoff[3]&&
   firmwareStatus[0]==1&&firmwareStatus[1]==0x800000000000000eULL;
+#ifndef DITING_GUEST_24B156
  if(!firmwareStopped&&!noProducer)return unavailable("firmware USB ownership record invalid or stop failed");
+#else
+ (void)noProducer;
+#endif
  // Firmware certifies DMA quiescence independently. Establish the actual
  // Diting board PHY here when the loader did not retain it; no fabricated bit.
  phase("board-phy");if(!firmwarePhy && !prepareBoardPhy())return false;
  if(firmwarePhy && (!gcc.open(0x100000,0xa0000) || !(gcc.r(0x49004)&0x80000000) ||
     (gcc.r(0x49018)&0x80000001)!=1 || (gcc.r(0x49024)&0x80000001)!=1))return unavailable("retained USB clocks unavailable");
  phase("controller-map");if(!core.open(0xa600000,0xe000)||!qscratch.open(0xa6f8800,0x400))return unavailable("controller/QSCRATCH mapping");
+#ifdef DITING_GUEST_24B156
+ {
+  const uint32_t gctl0=core.r(DWC3_GCTL),g2=core.r(DWC3_GUSB2PHYCFG(0)),g3=core.r(DWC3_GUSB3PIPECTL(0)),dsts0=core.r(DWC3_DSTS),qgen0=qscratch.r(0x08);
+  IOLog("DitingUSB: pre-stop GCTL=%x GUSB2=%x GUSB3=%x DSTS=%x QGEN=%x QHS=%x\n",
+        gctl0,g2,g3,dsts0,qgen0,qscratch.r(0x10));
+  if(DWC3_GCTL_PRTCAP(gctl0)!=DWC3_GCTL_PRTCAP_DEVICE) {
+   core.w(DWC3_GCTL,(gctl0&~(3u<<12))|DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE));
+  }
+ }
+#endif
  phase("controller-stop");
  const auto stopped=diting_dwc3_stop_device([](unsigned o){return core.r(o);},[](unsigned o,uint32_t v){core.w(o,v);},[](unsigned ms){if(ms)IOSleep(ms);else IODelay(1);});
  if(diagnosticLock)IOSimpleLockLock(diagnosticLock);
@@ -461,8 +544,51 @@ static bool initialize() {
  if(diagnosticLock)IOSimpleLockUnlock(diagnosticLock);
  if(stopped.error)return unavailable(stopped.error);
  IOLog("DitingUSB: %s retirement confirmed DSTS=%x events-acked=%u end-errors=%u; loader flags=%llx\n",firmwareStopped?"firmware plus hardware":"independent hardware",stopped.dsts,stopped.acknowledged,stopped.commandErrors,handoff[3]);
- phase("controller-reset");core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_CSFTRST);
+ phase("controller-reset");
+#ifdef DITING_GUEST_24B156
+ // Before DWC3_DCTL_CSFTRST: disable clock gating and PHY suspend on USB2/USB3,
+ // and route UTMI as PIPE clock on HS-only usb_nop_phy (dwc3_qcom_select_utmi_clk)
+ // whenever PIPE_UTMI_CLK_SEL|PIPE3_PHYSTATUS_SW are not both set (cold boot).
+ core.w(DWC3_GCTL,core.r(DWC3_GCTL)|DWC3_GCTL_DSBLCLKGTNG);
+ core.w(DWC3_GUSB2PHYCFG(0),core.r(DWC3_GUSB2PHYCFG(0))&~(DWC3_GUSB2PHYCFG_SUSPHY|DWC3_GUSB2PHYCFG_ENBLSLPM));
+ core.w(DWC3_GUSB3PIPECTL(0),core.r(DWC3_GUSB3PIPECTL(0))&~(1u<<17));
+ if((qscratch.r(0x08)&((1u<<0)|(1u<<3)))!=((1u<<0)|(1u<<3))) {
+  qscratch.w(0x08,qscratch.r(0x08)|(1u<<8));IODelay(200);
+  qscratch.w(0x08,qscratch.r(0x08)|(1u<<0)|(1u<<3));IODelay(200);
+  qscratch.w(0x08,qscratch.r(0x08)&~(1u<<8));IODelay(200);
+  IOLog("DitingUSB: cold-boot selected QSCRATCH UTMI-as-PIPE QGEN=%x\n",qscratch.r(0x08));
+ }
+ core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_CSFTRST);
+ if(!wait(DWC3_DCTL,DWC3_DCTL_CSFTRST,0,250)) {
+  IOLog("DitingUSB: CSFTRST #1 timeout (DCTL=%x DSTS=%x GCTL=%x GUSB2=%x GUSB3=%x QGEN=%x); trying core+PHY reset\n",
+        core.r(DWC3_DCTL),core.r(DWC3_DSTS),core.r(DWC3_GCTL),core.r(DWC3_GUSB2PHYCFG(0)),core.r(DWC3_GUSB3PIPECTL(0)),qscratch.r(0x08));
+  qscratch.w(0x08,qscratch.r(0x08)|(1u<<8));IODelay(200);
+  qscratch.w(0x08,qscratch.r(0x08)|(1u<<0)|(1u<<3));IODelay(200);
+  qscratch.w(0x08,qscratch.r(0x08)&~(1u<<8));IODelay(200);
+  core.w(DWC3_GCTL,core.r(DWC3_GCTL)|DWC3_GCTL_CORESOFTRESET);
+  core.w(DWC3_GUSB3PIPECTL(0),(core.r(DWC3_GUSB3PIPECTL(0))&~(1u<<17))|(1u<<31));
+  core.w(DWC3_GUSB2PHYCFG(0),(core.r(DWC3_GUSB2PHYCFG(0))&~(DWC3_GUSB2PHYCFG_SUSPHY|DWC3_GUSB2PHYCFG_ENBLSLPM))|DWC3_GUSB2PHYCFG_PHYSOFTRST);
+  IOSleep(5);
+  core.w(DWC3_GUSB3PIPECTL(0),core.r(DWC3_GUSB3PIPECTL(0))&~(1u<<31));
+  core.w(DWC3_GUSB2PHYCFG(0),core.r(DWC3_GUSB2PHYCFG(0))&~DWC3_GUSB2PHYCFG_PHYSOFTRST);
+  IOSleep(5);
+  core.w(DWC3_GCTL,core.r(DWC3_GCTL)&~DWC3_GCTL_CORESOFTRESET);
+  IOSleep(5);
+  core.w(DWC3_GCTL,(core.r(DWC3_GCTL)&~(3u<<12))|DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE)|DWC3_GCTL_DSBLCLKGTNG);
+  core.w(DWC3_GUSB2PHYCFG(0),core.r(DWC3_GUSB2PHYCFG(0))&~(DWC3_GUSB2PHYCFG_SUSPHY|DWC3_GUSB2PHYCFG_ENBLSLPM));
+  core.w(DWC3_GUSB3PIPECTL(0),core.r(DWC3_GUSB3PIPECTL(0))&~(1u<<17));
+  core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_CSFTRST);
+  if(!wait(DWC3_DCTL,DWC3_DCTL_CSFTRST,0,250)) {
+   IOLog("DitingUSB: CSFTRST #2 timeout (DCTL=%x DSTS=%x GCTL=%x GUSB2=%x GUSB3=%x QGEN=%x)\n",
+         core.r(DWC3_DCTL),core.r(DWC3_DSTS),core.r(DWC3_GCTL),core.r(DWC3_GUSB2PHYCFG(0)),core.r(DWC3_GUSB3PIPECTL(0)),qscratch.r(0x08));
+   return unavailable("controller soft reset timeout; SID0 unchanged");
+  }
+  IOLog("DitingUSB: cold-boot core+PHY reset recovered CSFTRST DSTS=%x\n",core.r(DWC3_DSTS));
+ }
+#else
+ core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_CSFTRST);
  if(!wait(DWC3_DCTL,DWC3_DCTL_CSFTRST,0,250))return unavailable("controller soft reset timeout; SID0 unchanged");
+#endif
  // DMA RAM needs a Normal non-cacheable mapping for memset/memcpy and
  // unaligned USB payloads. Device-MMIO attributes belong only to registers.
  phase("sid0-lease");
@@ -480,6 +606,7 @@ static bool initialize() {
  unsigned enableMux=0;PE_parse_boot_argn("diting_usb_mux",&enableMux,sizeof enableMux);
  unsigned enablePhone=0;PE_parse_boot_argn("diting_usb_iphone",&enablePhone,sizeof enablePhone);
  muxEnabled=enableMux==1&&diting_usb_mux_publish();
+ if(enableMux==1&&!muxEnabled)IOLog("DitingUSB: Mux provider unavailable; Mux not published\n");
  iphoneIdentity=muxEnabled&&enablePhone==1;
  if(muxEnabled){device[4]=0;device[8]=0xac;device[9]=5;device[10]=0xa8;device[11]=0x12;}
  bridgeStarted=mach_absolute_time();
@@ -498,7 +625,7 @@ static bool initialize() {
  IOLog("DitingUSB: DWC3 prepared id=%x SID0 DMA=%llx; waiting for real PMIC USB session\n",core.r(DWC3_GSNPSID),physical);return true;
 }
 static void cableSession() {
- const int online=diting_battery_usb_online();if(online<0 || bool(online)==cableConnected)return;
+ const int online=cableOnline();if(online<0 || bool(online)==cableConnected)return;
  if(online&&muxEnabled&&!diting_usb_mux_bridge_ready()) {
   // Host usbmux has a finite VERSION deadline. Do not enumerate a Mux
   // function before its real service bridge can consume that request.
@@ -517,7 +644,9 @@ static void cableSession() {
   core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_RUN_STOP);cableConnected=true;
  } else {
   core.w(DWC3_DCTL,core.r(DWC3_DCTL)&~DWC3_DCTL_RUN_STOP);
-  if(!wait(DWC3_DSTS,DWC3_DSTS_DEVCTRLHLT,DWC3_DSTS_DEVCTRLHLT,250)){failed=true;return;}
+  if(!wait(DWC3_DSTS,DWC3_DSTS_DEVCTRLHLT,DWC3_DSTS_DEVCTRLHLT,500)) {
+   IOLog("DitingUSB: DEVCTRLHLT timeout on disconnect (DSTS=%x); detaching session for replug recovery\n",core.r(DWC3_DSTS));
+  }
   qscratch.w(0x10,qscratch.r(0x10)&~hs);qscratch.w(0x30,qscratch.r(0x30)&~ss);
   cableConnected=false;disconnect();
   if(muxEnabled)diting_usb_mux_attached(false);
@@ -532,6 +661,13 @@ static void cableSession() {
  if(diagnosticLock)IOSimpleLockUnlock(diagnosticLock);
 }
 static void worker(void *,wait_result_t) {
+#ifndef DITING_GUEST_24B156
+ // A missing PMIC provider cannot authorize a VBUS override or DMA takeover.
+ if(diting_battery_usb_online()==-2) {
+  unavailable("real PMIC cable-session provider absent");
+  thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);return;
+ }
+#endif
  // Root storage must have finished its exact SID/bank migration before
  // optional USB touches either the shared SMMU or the inherited controller.
  // Sleep only this worker; a failed/missing root never blocks boot here.
@@ -543,9 +679,36 @@ static void worker(void *,wait_result_t) {
   phase("unavailable","root transport unavailable");
   thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);return;
  }
- IOLog("DitingUSB: root transport ready; starting independent USB DMA\n");
+ IOLog("DitingUSB: root transport ready; checking USB data role (force=%u adsp=%u)\n",
+       unsigned(usbForceMode),unsigned(adspEnabledMode));
+ // Never program the eUSB2 PHY / NXP repeater or assert RUN_STOP on a wall
+ // charger (DCP/HVDCP/non-USB PD). Defer controller initialization until a
+ // real USB data host is confirmed, or until ADSP fails to start.
+ if(!usbForceMode && adspEnabledMode) {
+  phase("waiting-usb-data-role");
+  unsigned pendingTicks=0;
+  for(;;) {
+   const int online=cableOnline();
+   if(online==1)break;
+   const int adspStage=native_adsp_stats[0];
+   const int battStage=native_battery_stats[0];
+   if(online<0) {
+    ++pendingTicks;
+    if(adspStage<0 || battStage<0 || (pendingTicks>=50 && battStage<4)) {
+     adspFallbackActive=true;
+     IOLog("DitingUSB: ADSP/Battery unavailable (adsp=%d batt=%d ticks=%u); falling back to USB console init\n",
+           adspStage,battStage,pendingTicks);
+     break;
+    }
+   } else {
+    pendingTicks=0; // Battery/UCSI alive and explicitly reporting unplugged or pure wall charger
+   }
+   IOSleep(500);
+  }
+ }
+ IOLog("DitingUSB: USB data host authorized; starting independent USB DMA\n");
  if(initialize()) {
-  while(!failed){cableSession();if(cableConnected){events();console();mux();}IOSleep(configured?2:10);}
+  while(!failed){cableSession();if(cableConnected){events();console();mux();}IOSleep(configured?2:(cableConnected?10:50));}
   core.w(DWC3_DCTL,core.r(DWC3_DCTL)&~DWC3_DCTL_RUN_STOP);
   // Retain DMA/lease if retirement is unknown. Never reuse active pages.
   IOLog("DitingUSB: controller failed, output stopped; DMA retained\n");
@@ -555,6 +718,11 @@ static void worker(void *,wait_result_t) {
 }
 static void start() {
  unsigned enabled=0;if(!PE_parse_boot_argn("diting_usb",&enabled,sizeof(enabled)) || enabled!=1)return;
+ unsigned force=0,adsp=0;
+ PE_parse_boot_argn("diting_usb_force",&force,sizeof(force));
+ PE_parse_boot_argn("diting_adsp",&adsp,sizeof(adsp));
+ usbForceMode=force==1;
+ adspEnabledMode=adsp==2;
  static uint32_t started;
  if(__atomic_exchange_n(&started,1,__ATOMIC_ACQ_REL))return;
  diagnosticLock=IOSimpleLockAlloc();
@@ -568,18 +736,25 @@ extern "C" unsigned diting_usb_snapshot(char *out,unsigned capacity) {
  if(DitingUsb::diagnosticLock)IOSimpleLockLock(DitingUsb::diagnosticLock);
  copy=DitingUsb::diagnostic;
  if(DitingUsb::diagnosticLock)IOSimpleLockUnlock(DitingUsb::diagnosticLock);
+ char adsp[192],battery[96];
+ const bool hasAdsp=native_adsp_stats[0]||native_adsp_text[0],hasBattery=native_battery_stats[0]!=0;
+ if(hasAdsp)snprintf(adsp,sizeof adsp,"ADSP stage=%d error=%d rx=%d tx=%d scm=%x:%x detail=%.95s",
+  native_adsp_stats[0],native_adsp_stats[1],native_adsp_stats[9],native_adsp_stats[10],native_adsp_stats[13],native_adsp_stats[14],native_adsp_text);
+ else strlcpy(adsp,"ADSP unavailable",sizeof adsp);
+ if(hasBattery)snprintf(battery,sizeof battery,"Battery stage=%d percent=%d flags=%x",
+  native_battery_stats[0],native_battery_stats[1],native_battery_stats[5]);
+ else strlcpy(battery,"Battery unavailable",sizeof battery);
  uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
  const int n=snprintf(out,capacity,
   "DitingUSB snapshot v1 uptime_us=%llu phase=%s reason=%s\n"
   "firmware stage=%llu status=%llx handoff=%llx:%llx:%llx:%llx dma=%llx ownership=%u\n"
   "stop id=%x GCTL=%x DCTL=%x DSTS=%x endpoints=%x buffers=%u acknowledged=%u end_errors=%u\n"
-  "transport cable=%u configured=%u mux=%u connections=%u configurations=%u events=%u command_errors=%u PMIC_online=%d\n"
-  "ADSP stage=%d error=%d rx=%d tx=%d scm=%x:%x detail=%.95s Battery stage=%d percent=%d flags=%x\n"
+  "transport cable=%u configured=%u mux=%u connections=%u configurations=%u events=%u command_errors=%u PMIC_online=%d data_role=%d usb_force=%u\n"
+  "%s %s\n"
   "RAM symbols usb=%llx/%u adsp=%llx/%u battery=%llx/%u\n",
   ns/1000,copy.phase,copy.reason,copy.firmwareStatus[0],copy.firmwareStatus[1],copy.handoff[0],copy.handoff[1],copy.handoff[2],copy.handoff[3],copy.dma,copy.flags,
   copy.stop.id,copy.stop.gctl,copy.stop.dctl,copy.stop.dsts,copy.stop.endpoints,copy.stop.buffers,copy.stop.acknowledged,copy.stop.commandErrors,
-  unsigned(copy.cable),unsigned(copy.configuration),unsigned(copy.mux),copy.connections,copy.configurations,copy.events,copy.commandFailures,diting_battery_usb_online(),
-  native_adsp_stats[0],native_adsp_stats[1],native_adsp_stats[9],native_adsp_stats[10],native_adsp_stats[13],native_adsp_stats[14],native_adsp_text,native_battery_stats[0],native_battery_stats[1],native_battery_stats[5],
-  uint64_t(uintptr_t(&DitingUsb::diagnostic)),unsigned(sizeof(DitingUsb::diagnostic)),uint64_t(uintptr_t(native_adsp_stats)),unsigned(sizeof(native_adsp_stats)),uint64_t(uintptr_t(native_battery_stats)),unsigned(sizeof(native_battery_stats)));
+  unsigned(copy.cable),unsigned(copy.configuration),unsigned(copy.mux),copy.connections,copy.configurations,copy.events,copy.commandFailures,DitingUsb::cableOnline(),diting_battery_usb_data_online(),unsigned(DitingUsb::usbForceMode),adsp,battery,
+  uint64_t(uintptr_t(&DitingUsb::diagnostic)),unsigned(sizeof(DitingUsb::diagnostic)),uint64_t(uintptr_t(native_adsp_stats)),hasAdsp?unsigned(sizeof(native_adsp_stats)):0u,uint64_t(uintptr_t(native_battery_stats)),hasBattery?unsigned(sizeof(native_battery_stats)):0u);
  return n>0?(unsigned(n)<capacity?unsigned(n):capacity-1):0;
 }

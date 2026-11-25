@@ -27,10 +27,16 @@ void sheng_adsp_probe(void);
 void sheng_audio_probe(void);
 void sheng_battery_start(void);
 void DitingBatteryStaticInit(void);
+#ifdef DITING_GUEST_24B156
+void diting_cpu_policy_start(void);
+#endif
 volatile int32_t native_battery_stats[16];
 void diting_power_start_optional(void) {
  diting_rpmh_init();
  diting_memory_bandwidth_start();
+#ifdef DITING_GUEST_24B156
+ diting_cpu_policy_start();
+#endif
  // Register the transport classes independently of ADSP readiness. Actual
  // USB/audio services still publish only after their own hardware succeeds.
  if(diting_audio_service_classes_ready())DitingUsb::start();

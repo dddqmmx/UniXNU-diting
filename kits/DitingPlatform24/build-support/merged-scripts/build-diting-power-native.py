@@ -61,7 +61,7 @@ def main():
   obj=out/'DitingAdspFirmware.o'
   subprocess.run(['xcrun','clang','-target','arm64-apple-ios18.0','-c',str(adsp_assembly),'-o',str(obj)],env=env,check=True)
   objects.append(obj)
- NAMES=('../DitingProbe.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp') if a.resources_only else ('ShengBattmgr.c','DitingBattery.cpp') if a.battery_only else ('QcomRpmh.c','QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','DitingFirmware.c','DitingAdsp.cpp','DitingBattery.cpp','DitingAudio.cpp','DitingAudioService.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp','DitingPower.cpp','DitingBacklight.cpp','DitingDisplayTiming.cpp','../DitingProbe.cpp')
+ NAMES=('../DitingProbe.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp') if a.resources_only else ('ShengBattmgr.c','DitingUcsi.c','DitingPmicGlink.cpp','DitingBattery.cpp') if a.battery_only else ('QcomRpmh.c','QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','DitingUcsi.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','DitingFirmware.c','DitingAdsp.cpp','DitingPmicGlink.cpp','DitingBattery.cpp','DitingAudio.cpp','DitingAudioService.cpp','DitingPlatformResources.cpp','DitingMemoryBandwidth.cpp','DitingPower.cpp','DitingBacklight.cpp','DitingDisplayTiming.cpp','../DitingProbe.cpp')
  for name in NAMES:
   source=(shared if name=='QcomRpmh.c' else ROOT/'drivers/DitingPower')/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]

@@ -1,0 +1,288 @@
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -38,8 +38,25 @@
+ } KERNEL;
+ 
+ STATIC EFI_HANDLE  mImage;
++STATIC EFI_HANDLE  mReplacedHandle;
++STATIC VOID        *mReplacedLoader;
+ UINT64 EFIAPI DarwinCurrentEl (VOID);
+-VOID EFIAPI DarwinEnter (UINT64 Args, UINT64 Entry, UINT64 Memory, UINT64 Size, UINT64 VideoBase, UINT64 VideoBytes);
++VOID EFIAPI DarwinEnter (UINT64 Args, UINT64 Entry, UINT64 Memory, UINT64 PopulatedBytes, UINT64 VideoBase, UINT64 VideoBytes);
++VOID EFIAPI DarwinEnterEnd (VOID);
++
++STATIC
++VOID
++FlushRange (UINT64 Base, UINT64 Bytes)
++{
++  UINT64 Ctr, Line, Address;
++  __asm__ volatile ("mrs %0, ctr_el0" : "=r" (Ctr));
++  Line = 4ULL << ((Ctr >> 16) & 15);
++  __asm__ volatile ("dsb sy" ::: "memory");
++  for (Address = Base & ~(Line - 1); Address < Base + Bytes; Address += Line) {
++    __asm__ volatile ("dc civac, %0" :: "r" (Address) : "memory");
++  }
++  __asm__ volatile ("dsb sy" ::: "memory");
++}
+ 
+ #define READ_SYSREG(Name)  ({ UINT64 Value_; __asm__ volatile ("mrs %0, " #Name : "=r" (Value_)); Value_; })
+ 
+@@ -430,7 +447,9 @@
+     Extended = FALSE;
+     for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+       Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+-      if ((Descriptor->Type == EfiConventionalMemory) && (Descriptor->PhysicalStart == End) &&
++      if ((Descriptor->Type == EfiConventionalMemory) &&
++          (Descriptor->Attribute & EFI_MEMORY_WB) && !(Descriptor->Attribute & EFI_MEMORY_RUNTIME) &&
++          (Descriptor->PhysicalStart == End) &&
+           (Descriptor->NumberOfPages != 0) && (Descriptor->NumberOfPages < (MAX_UINT64 - End) / EFI_PAGE_SIZE)) {
+         End += EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages);
+         Extended = TRUE;
+@@ -448,17 +467,13 @@
+ 
+ STATIC
+ VOID
+-DiagDraw (CONST CHAR16 *Text, UINTN Row)
++DiagDrawVideo (CONST CHAR16 *Text, UINTN Row, CONST UINT64 Video[6])
+ {
+-  EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
+-  UINT64                       Video[6];
+   UINTN                        Scale = 4, X = 0, Y, Index, Gx, Gy, Dx, Dy, Cell, Line;
+   UINT32                       *Fb;
+   UINT64                       Glyph, Data;
+   CHAR16                       Ch;
+ 
+-  if (EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop)) ||
+-      EFI_ERROR (DarwinBootVideoFromGop (Gop, Video))) { return; }
+   Cell = 6 * Scale;
+   Line = 14 * Scale;
+   Y = Video[4] / 4 + Row * Line;
+@@ -488,6 +503,29 @@
+     }
+     X += Cell;
+   }
++  FlushRange (Video[0], Video[2] * Video[4]);
++}
++
++STATIC
++VOID
++DiagDraw (CONST CHAR16 *Text, UINTN Row)
++{
++  EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
++  UINT64                       Video[6];
++  if (!EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop)) &&
++      !EFI_ERROR (DarwinBootVideoFromGop (Gop, Video)) && Video[0]) {
++    DiagDrawVideo (Text, Row, Video);
++  }
++}
++
++STATIC
++VOID
++HandoffStage (CONST UINT64 Video[6], UINTN Row, CONST CHAR16 *Text, UINT64 Status)
++{
++  CHAR16 Line[80];
++  if (!Video[0]) { return; }
++  UnicodeSPrint (Line, sizeof (Line), L"%s %016lx", Text, Status);
++  DiagDrawVideo (Line, Row, Video);
+ }
+ 
+ STATIC
+@@ -518,7 +556,8 @@
+   Status = EFI_OUT_OF_RESOURCES;
+   for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+     Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+-    if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0)) { continue; }
++    if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0) ||
++        !(Descriptor->Attribute & EFI_MEMORY_WB) || (Descriptor->Attribute & EFI_MEMORY_RUNTIME)) { continue; }
+     End = RunEnd (Map, Size, Stride, Descriptor->PhysicalStart,
+                   Descriptor->PhysicalStart + EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages));
+     RunBytes = End - Descriptor->PhysicalStart;
+@@ -599,6 +638,9 @@
+   UINTN                           Attempt;
+   CHAR8                           CommandLine[1024];
+   UINT64                          Video[6];
++  UINT64                          TrampolineAddress;
++  UINTN                           TrampolineBytes;
++  VOID                            (EFIAPI *Enter)(UINT64, UINT64, UINT64, UINT64, UINT64, UINT64);
+ 
+   (VOID)This;
+   if ((Request == NULL) || (Request->Volume == NULL) || (Request->KernelPath == NULL)) { return EFI_INVALID_PARAMETER; }
+@@ -729,12 +771,20 @@
+   AddonAddress = ALIGN_VALUE (TrustCacheAddress + TrustCacheSize, SIZE_16KB);
+   PolicyAddress = ALIGN_VALUE (AddonAddress + AddonSize, SIZE_16KB);
+   Used = ALIGN_VALUE (PolicyAddress + PolicySize, SIZE_16KB) - Address;
++  TrampolineAddress = Address + Used;
++  TrampolineBytes = (UINTN)DarwinEnterEnd - (UINTN)DarwinEnter;
++  if ((TrampolineBytes == 0) || (TrampolineBytes > EFI_PAGE_SIZE)) { Status = EFI_LOAD_ERROR; goto Fail; }
++  Used += EFI_PAGE_SIZE;
+   if (Used > WindowSize - BLOCK_SIZE) {
+     Print (L"DARWINBOOT: used %lu window %lu kernel %lu ramdisk %lu\n", (UINT64)Used, (UINT64)WindowSize, (UINT64)(Kernel.End - Kernel.Base), (UINT64)RamdiskBytes);
+     Status = EFI_BAD_BUFFER_SIZE;
+     goto Fail;
+   }
+   ZeroMem ((VOID *)(UINTN)Address, (UINTN)Used);
++  CopyMem ((VOID *)(UINTN)TrampolineAddress, (VOID *)(UINTN)DarwinEnter, TrampolineBytes);
++  FlushRange (TrampolineAddress, TrampolineBytes);
++  __asm__ volatile ("ic iallu\n\tdsb sy\n\tisb" ::: "memory");
++  Enter = (VOID (EFIAPI *)(UINT64, UINT64, UINT64, UINT64, UINT64, UINT64))(UINTN)TrampolineAddress;
+   for (Index = 0; Index < Kernel.Count; Index++) {
+     CopyMem ((VOID *)(UINTN)(Address + Kernel.Segments[Index].Address - Kernel.Base),
+              (UINT8 *)Image + Kernel.Segments[Index].FileOffset, (UINTN)Kernel.Segments[Index].FileSize);
+@@ -788,37 +838,22 @@
+          Video[0], Video[1], Video[2], Video[3], Video[4], Video[5]);
+   Print (L"DARWINBOOT: command line: %a\n", CommandLine);
+   Print (L"DARWINBOOT: inputs validated; exiting boot services\n");
+-
+-  //
+-  // The same facts in large type over the whole screen. The firmware's log
+-  // draws far larger than the text console, and the form feed clears the
+-  // screen first. This is what stays visible if the kernel never draws.
+-  //
+-  DEBUG ((DEBUG_ERROR, "\fDARWINBOOT: hand-off to the kernel\n\n"));
+-  DEBUG ((DEBUG_ERROR, "kernel   va 0x%lx  pa 0x%lx\n", Kernel.Base, Address));
+-  DEBUG ((DEBUG_ERROR, "entry    pa 0x%lx\n", Address + Kernel.Entry - Kernel.Base));
+-  DEBUG ((DEBUG_ERROR, "args     pa 0x%lx  window 0x%lx bytes\n", ArgsAddress, (UINT64)WindowSize));
+-  DEBUG ((DEBUG_ERROR, "video    base 0x%lx  %lux%lu  row %lu bytes  %lu bpp\n", Video[0], Video[3], Video[4], Video[2], Video[5]));
+-  DEBUG ((DEBUG_ERROR, "entry words %08x %08x %08x %08x\n",
+-          ReadUnaligned32 ((CONST UINT32 *)(UINTN)(Address + Kernel.Entry - Kernel.Base)),
+-          ReadUnaligned32 ((CONST UINT32 *)(UINTN)(Address + Kernel.Entry - Kernel.Base + 4)),
+-          ReadUnaligned32 ((CONST UINT32 *)(UINTN)(Address + Kernel.Entry - Kernel.Base + 8)),
+-          ReadUnaligned32 ((CONST UINT32 *)(UINTN)(Address + Kernel.Entry - Kernel.Base + 12))));
+-  DEBUG ((DEBUG_ERROR, "CurrentEL %lu  SCTLR_EL1 0x%lx  TCR_EL1 0x%lx\n", DarwinCurrentEl () >> 2, READ_SYSREG (sctlr_el1), READ_SYSREG (tcr_el1)));
+-  DEBUG ((DEBUG_ERROR, "ID_AA64MMFR0_EL1 0x%lx  (PARange %lu, 4 KiB granule %a)\n", READ_SYSREG (id_aa64mmfr0_el1),
+-          READ_SYSREG (id_aa64mmfr0_el1) & 0xF, (((READ_SYSREG (id_aa64mmfr0_el1) >> 28) & 0xF) == 0xF) ? "NOT supported" : "supported"));
+-  DEBUG ((DEBUG_ERROR, "ID_AA64PFR0_EL1  0x%lx\n", READ_SYSREG (id_aa64pfr0_el1)));
+-  DEBUG ((DEBUG_ERROR, "\nExiting boot services. A green bar across the top\nmarks the loader handoff before the kernel branch.\n"));
++  HandoffStage (Video, 0, L"PA", Address);
++  HandoffStage (Video, 1, L"ENTRY", Address + Kernel.Entry - Kernel.Base);
++  HandoffStage (Video, 5, L"TRAMP", TrampolineAddress);
+   for (Attempt = 0; Attempt < 3; Attempt++) {
+     MapSize = Capacity;
+     Status = gBS->GetMemoryMap (&MapSize, Map, &Key, &Stride, &Version);
+     if (EFI_ERROR (Status)) {
++      HandoffStage (Video, 2, L"GETMAP ERROR", Status);
+       if (Attempt == 0) { goto Fail; }
+       CpuDeadLoop ();
+     }
++    HandoffStage (Video, 3, L"EXIT CALL", Attempt);
+     Status = gBS->ExitBootServices (mImage, Key);
++    HandoffStage (Video, 4, L"EXIT RETURN", Status);
+     if (!EFI_ERROR (Status)) {
+-      DarwinEnter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, WindowSize, Video[0], Video[2] * Video[4]);
++      Enter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, Used, Video[0], Video[2] * Video[4]);
+       CpuDeadLoop ();
+     }
+     if (Status != EFI_INVALID_PARAMETER) { CpuDeadLoop (); }
+@@ -846,6 +881,9 @@
+ EFIAPI
+ Unload (EFI_HANDLE ImageHandle)
+ {
++  if (mReplacedHandle != NULL) {
++    return gBS->ReinstallProtocolInterface (mReplacedHandle, &gUniXNULoaderProtocolGuid, &mLoader, mReplacedLoader);
++  }
+   return gBS->UninstallMultipleProtocolInterfaces (ImageHandle, &gUniXNULoaderProtocolGuid, &mLoader, NULL);
+ }
+ 
+@@ -856,12 +894,30 @@
+   EFI_LOADED_IMAGE_PROTOCOL *Loaded;
+   EFI_STATUS               Status;
+   VOID                     *Existing;
++  EFI_HANDLE               *Handles;
++  UINTN                    Count;
+ 
+   (VOID)SystemTable;
+-  Status = gBS->LocateProtocol (&gUniXNULoaderProtocolGuid, NULL, &Existing);
+-  if (!EFI_ERROR (Status)) { return EFI_ALREADY_STARTED; }
+   Status = gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded);
+   if (EFI_ERROR (Status)) { return Status; }
++  Status = gBS->LocateProtocol (&gUniXNULoaderProtocolGuid, NULL, &Existing);
++  if (!EFI_ERROR (Status)) {
++    if (((UNIXNU_LOADER_PROTOCOL *)Existing)->Revision != UNIXNU_LOADER_REVISION) { return EFI_UNSUPPORTED; }
++    Status = gBS->LocateHandleBuffer (ByProtocol, &gUniXNULoaderProtocolGuid, NULL, &Count, &Handles);
++    if (EFI_ERROR (Status)) { return Status; }
++    if (Count != 1) { FreePool (Handles); return EFI_UNSUPPORTED; }
++    Status = gBS->ReinstallProtocolInterface (Handles[0], &gUniXNULoaderProtocolGuid, Existing, &mLoader);
++    if (!EFI_ERROR (Status)) {
++      mReplacedHandle = Handles[0];
++      mReplacedLoader = Existing;
++      mImage = ImageHandle;
++      Loaded->Unload = Unload;
++      Print (L"DARWINBOOT: replaced loader in RAM; loader v2, EL%u\n", (UINT32)(DarwinCurrentEl () >> 2));
++    }
++    FreePool (Handles);
++    return Status;
++  }
++  if (Status != EFI_NOT_FOUND) { return Status; }
+   mImage = ImageHandle;
+   Status = gBS->InstallMultipleProtocolInterfaces (&ImageHandle, &gUniXNULoaderProtocolGuid, &mLoader, NULL);
+   if (!EFI_ERROR (Status)) {
+diff --git a/DarwinBootPkg/Driver/Entry.S b/DarwinBootPkg/Driver/Entry.S
+--- a/DarwinBootPkg/Driver/Entry.S
++++ b/DarwinBootPkg/Driver/Entry.S
+@@ -5,23 +5,37 @@
+   mrs x0, CurrentEL
+   ret
+ 
+-// x0=boot_args PA, x1=entry PA, x2=owned PA, x3=owned size, x4=frame buffer
++// x0=boot_args PA, x1=entry PA, x2=owned PA, x3=populated bytes, x4=frame buffer
+ // PA (0 for none), x5=its size in bytes. EL1 only.
+-ASM_FUNC(DarwinEnter)
++ASM_FUNC_ALIGN(DarwinEnter, 4)
+   msr daifset, #15
+-  // Paint the top 1/16 of the framebuffer green (BGRA 0xFF00FF00)
+-  // before cache maintenance, MMU shutdown and the branch to the kernel.
++  // Breadcrumb 1: cyan bar over top 1/8 proves trampoline entered.
+   cbz x4, 2f
+-  lsr x9, x5, #4
++  mov x14, x4
++  mov x15, x5
++  lsr x9, x15, #3
+   bic x9, x9, #7
+-  mov w10, #0xFF00
++  mov w10, #0xFFFF
+   movk w10, #0xFF00, lsl #16
+-  mov x11, x4
++  mov x11, x14
+ 3:
+   stp w10, w10, [x11], #8
+   subs x9, x9, #8
+   b.hi 3b
+   dsb sy
++  mov x11, x14
++  lsr x9, x15, #3
++  add x9, x9, x14
++  mrs x10, ctr_el0
++  ubfx x10, x10, #16, #4
++  mov x6, #4
++  lsl x10, x6, x10
++4:
++  dc civac, x11
++  add x11, x11, x10
++  cmp x11, x9
++  b.lo 4b
++  dsb sy
+ 2:
+   add x5, x2, x3
+   mrs x6, ctr_el0
+@@ -49,4 +63,20 @@
+   tlbi vmalle1
+   dsb sy
+   isb
++  // Breadcrumb 2: green bar over second 1/8 proves MMU-off reached br x1.
++  cbz x14, 5f
++  lsr x9, x15, #3
++  bic x9, x9, #7
++  add x11, x14, x9
++  mov w10, #0xFF00
++  movk w10, #0xFF00, lsl #16
++6:
++  stp w10, w10, [x11], #8
++  subs x9, x9, #8
++  b.hi 6b
++  dsb sy
++5:
+   br x1
++
++.global ASM_PFX(DarwinEnterEnd)
++ASM_PFX(DarwinEnterEnd):

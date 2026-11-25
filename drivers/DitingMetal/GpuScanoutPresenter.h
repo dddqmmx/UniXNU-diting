@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
+#if DITING_GUEST_24B156
+#include "NativeGOPWire.h"
+#include "NativeHalfCodes.h"
+#endif
 extern "C" const void *nmb_scanout_convert_air(size_t *);
 extern "C" id native_bridge_metal_library_with_air(const void *,size_t);
 
@@ -26,6 +30,9 @@ struct Frame {
     size_t stride;
     uint32_t width, height;
     uint32_t source_id=0; // kernel generation, not a recyclable virtual address
+#if DITING_GUEST_24B156
+    uint32_t format=NGP_BGRX8888;
+#endif
 };
 
 enum Result { kOk = 0, kBadFrame, kBadScanout, kNoResource, kGpuFailed };
@@ -43,6 +50,10 @@ public:
     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
     Result present(const Frame &frame) {
         if (!ready()) return kBadScanout;
+#if DITING_GUEST_24B156
+        if (frame.format == NGP_RGBA16F_LINEAR || frame.format == NGP_RGBA16F_ENCODED) return convertHalf(frame);
+        if (frame.format != NGP_BGRX8888) return kBadFrame;
+#endif
         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
             frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row ||
@@ -125,6 +136,52 @@ private:
         if(opaque_ && opaque_.maxTotalThreadsPerThreadgroup<128)opaque_=nil;
         return opaque_!=nil;
     }
+#if DITING_GUEST_24B156
+    bool convertPipeline() {
+        if(convert_ || convertTried_)return convert_!=nil;
+        convertTried_=true;
+        size_t length=0;const void *air=nmb_scanout_convert_air(&length);
+        id<MTLLibrary> lib=air&&length?native_bridge_metal_library_with_air(air,length):nil;
+        id<MTLFunction> function=[lib newFunctionWithName:@"scanout_convert"];
+        NSError *error=nil;
+        convert_=function?[device_ newComputePipelineStateWithFunction:function error:&error]:nil;
+        if(convert_ && convert_.maxTotalThreadsPerThreadgroup<128)convert_=nil;
+        return convert_!=nil;
+    }
+    id<MTLBuffer> halfTable(bool encoded) {
+        if(tables_[encoded])return tables_[encoded];
+        id<MTLBuffer> buffer=[device_ newBufferWithLength:65536*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+        if(!buffer)return nil;
+        uint32_t *codes=(uint32_t *)buffer.contents;
+        for(uint32_t bits=0;bits<65536;++bits)codes[bits]=native_half::code((uint16_t)bits,encoded);
+        tables_[encoded]=buffer;
+        return buffer;
+    }
+    Result convertHalf(const Frame &frame) {
+        const size_t page=(size_t)getpagesize(), row=(size_t)frame.width*8;
+        if(!frame.base || ((uintptr_t)frame.base&(page-1)) || !frame.bytes || (frame.bytes&(page-1)) ||
+           frame.width!=scanout_.width || frame.height!=scanout_.height || frame.stride<row || (frame.stride&3) ||
+           (scanout_.stride&3) || (size_t)frame.height>frame.bytes/frame.stride ||
+           frame.stride*(frame.height-1)+row>frame.bytes) return kBadFrame;
+        const bool encoded=(frame.format==NGP_RGBA16F_ENCODED);
+        if(!convertPipeline() || !halfTable(encoded))return kNoResource;
+        id<MTLBuffer> source=[device_ newBufferWithBytesNoCopy:(void *)frame.base length:frame.bytes options:MTLResourceStorageModeShared deallocator:nil];
+        if(!source)return kNoResource;
+        id<MTLCommandBuffer> commands=[queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> encoder=commands?[commands computeCommandEncoder]:nil;
+        if(!encoder)return kNoResource;
+        const uint32_t params[4]={frame.width,frame.height,(uint32_t)(frame.stride/4),(uint32_t)(scanout_.stride/4)};
+        [encoder setComputePipelineState:convert_];
+        [encoder setBuffer:source offset:0 atIndex:0];
+        [encoder setBuffer:target_ offset:0 atIndex:1];
+        [encoder setBuffer:tables_[encoded] offset:0 atIndex:2];
+        [encoder setBytes:params length:sizeof params atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake((frame.width+15)/16,(frame.height+7)/8,1)
+               threadsPerThreadgroup:MTLSizeMake(16,8,1)];
+        [encoder endEncoding];[commands commit];[commands waitUntilCompleted];
+        return commands.status==MTLCommandBufferStatusCompleted?kOk:kGpuFailed;
+    }
+#endif
     struct Source {uint32_t key=0;const void *base=nullptr;size_t bytes=0;uint64_t used=0;id<MTLBuffer> buffer=nil;id<MTLTexture> texture=nil;size_t stride=0;};
     // Bound imported scanout BOs to the compositor's triple buffer.
     // Every retained import participates in the non-coherent DMA handoff.
@@ -141,6 +198,11 @@ private:
     id<MTLBuffer> target_;
     id<MTLComputePipelineState> opaque_=nil;
     bool opaqueTried_=false;
+#if DITING_GUEST_24B156
+    id<MTLComputePipelineState> convert_=nil;
+    bool convertTried_=false;
+    id<MTLBuffer> tables_[2]={nil,nil};
+#endif
 };
 
 }  // namespace gpupresent

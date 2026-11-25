@@ -92,6 +92,11 @@ DitingGpuStatus DitingAdrenoGmuStartPower(DitingGpuGmuDevice *,const DitingPower
 /* Vendor gen7_gpu_boot: fresh OOB_GPU acknowledgement followed by START10.
  * Keep OOB held while this port has no idle/slumber/resume owner. */
 DitingGpuStatus DitingAdrenoGmuHoldGpu(DitingGpuGmuDevice *,DitingGpuPowerResult *);
+/* Runtime DCVS GX/BW performance vote (HFI cmd 30) after power_started.
+ * gpu_index is 1..13 (1=220MHz .. 13=900MHz), bus_index is 0..11.
+ * Callers must serialize HFI access externally with a lock. */
+DitingGpuStatus DitingAdrenoGmuSetPowerLevel(DitingGpuGmuDevice *,unsigned gpu_index,
+    unsigned bus_index,DitingGpuPowerResult *);
 #ifdef __cplusplus
 }
 #endif

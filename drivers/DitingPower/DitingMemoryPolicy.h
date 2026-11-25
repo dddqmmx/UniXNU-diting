@@ -9,6 +9,28 @@
 
 namespace DitingMemory {
 constexpr uint32_t DdrMaxKhz = 3196000, LlccMaxKhz = 1066000;
+/* Verified diting live.dtb /soc/ddr-freq-table and /soc/llcc-freq-table tiers:
+ * Idle    = 547 MHz DDR / 300 MHz LLCC (screen off / deep idle)
+ * Display = 768 MHz DDR / 466 MHz LLCC (screen on, idle UI)
+ * Active  = 1708 MHz DDR / 806 MHz LLCC (normal UI / touch / light GPU)
+ * Max     = 3196 MHz DDR / 1066 MHz LLCC (heavy GPU / 120fps / burst) */
+enum Profile : unsigned {
+    ProfileIdle = 0,
+    ProfileDisplay = 1,
+    ProfileActive = 2,
+    ProfileMax = 3,
+    ProfileCount = 4
+};
+struct BandwidthProfile {
+    uint32_t ddrKhz;
+    uint32_t llccKhz;
+};
+constexpr BandwidthProfile Profiles[ProfileCount] = {
+    {547000, 300000},
+    {768000, 466000},
+    {1708000, 806000},
+    {3196000, 1066000},
+};
 constexpr unsigned Banks = 4, GpuHtwScid = 11, GpuScid = 12;
 constexpr unsigned BankOffsets[Banks] = {0, 0x400000, 0x100000, 0x500000};
 constexpr unsigned CommonStatus = 0x3400c, WriteScid = 0x21f20;
@@ -64,6 +86,14 @@ inline bool frequencyVote(const Bcm &bcm, uint32_t khz, uint32_t ceiling, uint32
     if (!peak || peak > 0x3fff) return false;
     word = 0x60000000 | uint32_t(peak); // valid, commit, average=0
     return true;
+}
+inline bool profileVotes(const Bcm &ddrBcm, const Bcm &llccBcm, unsigned profile,
+                         uint32_t &ddrKhz, uint32_t &llccKhz, uint32_t &ddrWord, uint32_t &llccWord) {
+    if (profile >= ProfileCount) return false;
+    ddrKhz = Profiles[profile].ddrKhz;
+    llccKhz = Profiles[profile].llccKhz;
+    return frequencyVote(ddrBcm, ddrKhz, DdrMaxKhz, ddrWord) &&
+           frequencyVote(llccBcm, llccKhz, LlccMaxKhz, llccWord);
 }
 constexpr unsigned statusReg(unsigned id) { return id * 0x1000 + 4; }
 constexpr unsigned attr0Reg(unsigned id) { return 0x21000 + id * 8; }

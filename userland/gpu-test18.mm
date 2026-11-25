@@ -13,16 +13,23 @@
 #include <mach/mach_time.h>
 #include <mach/mach.h>
 #include <mach/thread_policy.h>
+#include <mach/arm/thread_status.h>
+#include <mach-o/dyld_images.h>
+#include <mach-o/loader.h>
 #include <pthread.h>
 #include <signal.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
+#include <sys/proc.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <zlib.h>
 #include <functional>
 #include <memory>
 #include <string>
@@ -1397,6 +1404,7 @@ static void ui_qualification(UI &ui) {
         return ui_result(ui,hashes,accepted,refused,2);
     });
 }
+#include "keyboard-test18.h"
 } // namespace
 
 extern "C" int diting_gpu_test_worker(int argc,char **argv) {
@@ -1408,7 +1416,8 @@ extern "C" int diting_gpu_test_worker(int argc,char **argv) {
     }
     const uint32_t profile=values[0],policy=values[1],job=values[2],width=values[3],height=values[4],
         frames=values[5],warmup=values[6],timeout=values[7];
-    if(profile<1||profile>4||policy>2||!job||width!=1220||height!=2712||frames!=240||warmup!=24||timeout!=120000)return 64;
+    if(profile<1||profile>DitingGpuTestKeyboard||policy>2||!job||width!=1220||height!=2712||frames!=240||warmup!=24||timeout!=120000)return 64;
+    if(profile==DitingGpuTestKeyboard && policy!=DitingGpuTestAuto)return 64;
     // Keep diagnostics NDJSON separate from stdout emitted by native loaders.
     int output=dup(STDOUT_FILENO);if(output<0)return 74;
     results=fdopen(output,"w");if(!results)return 74;dup2(STDERR_FILENO,STDOUT_FILENO);
@@ -1426,7 +1435,7 @@ extern "C" int diting_gpu_test_worker(int argc,char **argv) {
             @"start_ns":@(start),@"pid":@(getpid()),@"host_supplied_shader":@NO});
         @try {
             try {
-                if(profile!=DitingGpuTestUI) {
+                if(profile!=DitingGpuTestUI && profile!=DitingGpuTestKeyboard) {
                     {
                         std::unique_ptr<Vulkan> vk;
                         testcase(14,"vk-native-device","prerequisite",[&]{vk=std::make_unique<Vulkan>();return @{@"pass":@YES};});
@@ -1440,14 +1449,17 @@ extern "C" int diting_gpu_test_worker(int argc,char **argv) {
                             if(profile!=DitingGpuTestQualification)metal_performance(*metal,width,height,frames,warmup);}
                     }
                 }
-                if(profile==DitingGpuTestUI || (profile==DitingGpuTestAll && policy==DitingGpuTestAuto)) {
+                if(profile==DitingGpuTestUI || profile==DitingGpuTestKeyboard || (profile==DitingGpuTestAll && policy==DitingGpuTestAuto)) {
                     std::unique_ptr<UI> ui;
                     testcase(63,"ui-automation-ready","prerequisite",[&]{
                         ui=std::make_unique<UI>(width,height);
                         return @{@"pass":@YES,@"width":@(ui->width),@"height":@(ui->height),
                             @"stride":@(ui->stride),@"framebuffer_bytes":@(ui->framebuffer_bytes),@"readonly":@YES};
                     });
-                    if(ui)ui_qualification(*ui);
+                    if(ui) {
+                        if(profile==DitingGpuTestKeyboard)keyboard_diagnosis(*ui);
+                        else ui_qualification(*ui);
+                    }
                 }
             } catch(const Failure &error) {
                 ++failures;emit(@{@"kind":@"fatal",@"stage":@(error.stage.c_str()),@"code":@(error.code),@"job":@(job)});

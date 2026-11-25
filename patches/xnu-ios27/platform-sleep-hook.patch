@@ -1,0 +1,41 @@
+# Adapted from UniXNU-sheng c8f92b208068eeaa4cd2b0f592671f04ee70076e.
+# Only the architectural hook and its real wake/CPU_OFF call sites are included.
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -99,6 +99,14 @@
+ #else
+ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep);
+ #endif
++
++/*
++ * The architectural platform sleep hook. The CPU driver of a board without Apple's sleep hardware (ArmCpu, boot-arg
++ * platform-sleep=1) installs it; ml_arm_sleep then calls it instead of arm64_prepare_for_sleep, whose non-Apple version is a WFI
++ * loop with no way back. A core other than the boot core does not return (PSCI CPU_OFF); the boot core returns once a wake source
++ * fires and resumes through arm_init_cpu's wake path, as the virtual platform's test_sleep_in_vm does.
++ */
++void (*arm64_platform_sleep_hook)(boolean_t boot_cpu) = NULL;
+ extern void arm64_force_wfi_clock_gate(void);
+ #if defined(APPLETYPHOON)
+ // <rdar://problem/15827409>
+@@ -1141,6 +1149,10 @@
+ #if CONFIG_CPU_COUNTERS
+ 		mt_sleep();
+ #endif /* CONFIG_CPU_COUNTERS */
++		if (arm64_platform_sleep_hook != NULL) {
++			arm64_platform_sleep_hook(TRUE);
++			arm_init_cpu(cpu_data_ptr, 0);
++		}
+ 		/* ARM64-specific preparation */
+ #if APPLEVIRTUALPLATFORM
+ 		extern bool test_sleep_in_vm;
+@@ -1183,6 +1195,9 @@
+ 			*(volatile uint32_t *)(cpu_data_ptr->coresight_base[CORESIGHT_ED] + ARM_DEBUG_OFFSET_DBGPRCR) = 0;
+ 		}
+ 
++		if (arm64_platform_sleep_hook != NULL) {
++			arm64_platform_sleep_hook(FALSE);
++		}
+ 		/* ARM64-specific preparation */
+ #if APPLEVIRTUALPLATFORM
+ 		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));

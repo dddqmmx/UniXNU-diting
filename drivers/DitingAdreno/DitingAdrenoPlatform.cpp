@@ -27,6 +27,7 @@
 extern "C" const uint8_t DitingAdrenoGmuFirmware[];
 extern "C" const size_t DitingAdrenoGmuFirmwareBytes;
 extern "C" void diting_ramoops_diagnostic_write(const char *,int);
+extern "C" volatile uint32_t native_adreno_ib_log_count;
 namespace {
 struct Mapping {OSSharedPtr<IOMemoryMap> keep;uintptr_t cpu=0;size_t bytes=0;};
 struct Memory {IOBufferMemoryDescriptor *keep=nullptr;uint8_t *cpu=nullptr;uint64_t pa=0;size_t bytes=0;};
@@ -46,6 +47,10 @@ static ArmSmmu4KIo smmu_io;
 static uint64_t bank_offset;
 static unsigned parents_ready,attempted;
 static unsigned diagnostics_ready,diagnostics_power_level;
+static IOLock *gmu_hfi_lock;
+static uint32_t parent_mx_addr,parent_cx_addr;
+static unsigned dcvs_enabled,dcvs_lock_max,dcvs_busy_pct,dcvs_transitions,dcvs_errors;
+static uint32_t dcvs_last_submits;
 static DitingAdrenoStartup::Log startup_log{};
 static DitingGpuPowerResult startup_power{};
 static unsigned startup_power_status,startup_finished;
@@ -103,10 +108,6 @@ static bool poll(const Mapping &m,size_t at,uint32_t mask,uint32_t wanted,unsign
 }
 static unsigned retained_corner(const DitingPowerResource &rail)
 {
-    // APSS DRV2 previously served all boot-firmware consumers. Until XNU
-    // has a shared RPMh aggregator, do not lower an unknown retained vote.
-    // Hold the highest ACTUAL allowed AUX corner, without changing CPU/GPU
-    // frequency. Never invent a corner or exceed the firmware's own table.
     unsigned index=16,highest=0;
     for(unsigned i=0;i<rail.bytes/2 && i<16;i++) {
         unsigned v=rail.aux[2*i]|unsigned(rail.aux[2*i+1])<<8;
@@ -114,18 +115,49 @@ static unsigned retained_corner(const DitingPowerResource &rail)
     }
     return index;
 }
-static bool vote_parents(const DitingPowerInputs &in)
+static unsigned corner_for_vlvl(const DitingPowerResource &rail,unsigned target)
 {
-    uint32_t cx=retained_corner(in.cx);
-    uint32_t mx=retained_corner(in.mx);
-    if(cx==16 || mx==16){record("SKIP ARC AUX levels",1,cx,mx);return false;}
-    const uint32_t addresses[]={in.mx.address,in.cx.address},values[]={mx,cx};
-    // ARC commands remain actual AUX indices. The same lock now covers GPU,
-    // WLAN and ADSP through response/reclaim; no check-then-trigger race and
-    // no reuse of the DT's sleep TCS3/4 as active command slots.
-    if(!diting_rpmh_vote_many(addresses,values,2)){record("FAIL parent RPMh request",1,mx,cx);return false;}
-    record("parent ARC votes acknowledged",0,mx,cx);
+    unsigned last=16;
+    for(unsigned i=0;i<rail.bytes/2 && i<16;i++) {
+        unsigned v=rail.aux[2*i]|unsigned(rail.aux[2*i+1])<<8;
+        if(i && !v)break;
+        last=i;
+        if(v>=target)return i;
+    }
+    return last;
+}
+static bool vote_parents(const DitingPowerInputs &in,bool lock_max)
+{
+    const uint32_t cx_floor=corner_for_vlvl(in.cx,0x80u); // SVS baseline floor
+    const uint32_t mx_floor=corner_for_vlvl(in.mx,0x80u);
+    const uint32_t cx_req=lock_max?retained_corner(in.cx):corner_for_vlvl(in.cx,0x100u); // NOM for bringup
+    const uint32_t mx_req=lock_max?retained_corner(in.mx):corner_for_vlvl(in.mx,0x100u);
+    if(cx_floor==16 || mx_floor==16 || cx_req==16 || mx_req==16) {
+        record("SKIP ARC AUX levels",1,mx_req,cx_req);return false;
+    }
+    parent_mx_addr=in.mx.address;parent_cx_addr=in.cx.address;
+    const uint32_t addresses[]={in.mx.address,in.cx.address};
+    const uint32_t floor_values[]={mx_floor,cx_floor};
+    const uint32_t req_values[]={mx_req,cx_req};
+    // Establish an SVS floor first, then submit GPU's bringup corner through
+    // the shared RPMh consumer aggregator. Once GMU owns dynamic gfx/mx/cx
+    // scaling, GPU's APSS bringup vote is lowered to 0 unless lock_max=1.
+    if(!diting_rpmh_consumer_vote_many(DitingRpmhFloor,addresses,floor_values,2) ||
+       !diting_rpmh_consumer_vote_many(DitingRpmhGpu,addresses,req_values,2)) {
+        record("FAIL parent RPMh request",1,mx_req,cx_req);return false;
+    }
+    record("parent ARC votes acknowledged",0,mx_req,cx_req);
     return true;
+}
+static void release_gpu_parent_vote()
+{
+    if(!parent_mx_addr || !parent_cx_addr)return;
+    const uint32_t addresses[]={parent_mx_addr,parent_cx_addr};
+    const uint32_t zeros[]={0u,0u};
+    if(diting_rpmh_consumer_vote_many(DitingRpmhGpu,addresses,zeros,2)) {
+        record("APSS GPU parent corner released to GMU",0,
+            diting_rpmh_consumer_active(parent_mx_addr),diting_rpmh_consumer_active(parent_cx_addr));
+    }
 }
 static int clock_read(void *,DitingClockWindow w,size_t at,uint32_t *v)
 {const Mapping &m=w==DitingClockGcc?gcc:windows[DitingGpuClock];if(at>m.bytes-4)return 1;*v=rd(m,at);return 0;}
@@ -287,16 +319,136 @@ static int cp_write(void *,uint32_t reg,uint32_t value)
         return gpu_write(nullptr,w,size_t(pa-DitingAdrenoWindows[w].physical),value);
     return 1;
 }
+static bool read_gmu_xo_busy(uint64_t &out)
+{
+    for(unsigned i=0;i<3;++i) {
+        uint32_t hi1=0,lo=0,hi2=0;
+        if(cp_read(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_H,&hi1) ||
+           cp_read(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_L,&lo) ||
+           cp_read(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_H,&hi2))return false;
+        if(hi1==hi2){out=(uint64_t(hi1)<<32)|lo;return true;}
+    }
+    return false;
+}
+static void enable_gmu_busy_counter()
+{
+    uint32_t sel=0;
+    if(!cp_read(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_0,&sel)) {
+        (void)cp_write(nullptr,GEN7_GPU_GMU_AO_GPU_CX_BUSY_MASK,0xff000000u);
+        (void)cp_write(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_0,(sel&~0xffu)|0x20u);
+        (void)cp_write(nullptr,GEN7_GMU_CX_GMU_POWER_COUNTER_ENABLE,1u);
+    }
+}
+static void dcvs_worker(void *,wait_result_t)
+{
+    enable_gmu_busy_counter();
+    unsigned current=__atomic_load_n(&diagnostics_power_level,__ATOMIC_ACQUIRE);
+    unsigned idle_ticks=0;
+    uint64_t prev_xo=0,prev_us=microseconds();
+    bool xo_valid=read_gmu_xo_busy(prev_xo);
+    uint32_t prev_submits=__atomic_load_n(&native_adreno_ib_log_count,__ATOMIC_RELAXED);
+    IOLog("DITING ADRENO: DCVS worker started level=%u (%uHz) xo_ok=%u\n",
+          current,DitingAdrenoPowerLevels[current].hz,unsigned(xo_valid));
+    for(;;) {
+        const bool disp_on=diting_power_display_on()!=0;
+        IOSleep(disp_on?50:250);
+        if(gmu.poisoned || gmu.hfi.poisoned)break;
+        const uint64_t now_us=microseconds();
+        const uint64_t elapsed_us=now_us>prev_us?now_us-prev_us:50000;
+        prev_us=now_us;
+        uint32_t submits=__atomic_load_n(&native_adreno_ib_log_count,__ATOMIC_RELAXED);
+        const uint32_t submit_delta=submits-prev_submits;
+        prev_submits=submits;
+        __atomic_store_n(&dcvs_last_submits,submits,__ATOMIC_RELAXED);
+        unsigned busy_pct=0;
+        uint64_t cur_xo=0;
+        if(read_gmu_xo_busy(cur_xo)) {
+            if(xo_valid && cur_xo>=prev_xo) {
+                const uint64_t delta_xo=cur_xo-prev_xo;
+                const uint64_t max_xo=(elapsed_us*192ULL)/10ULL; // 19.2 MHz XO clock
+                if(max_xo>0) {
+                    const uint64_t pct=(delta_xo*100ULL)/max_xo;
+                    busy_pct=pct>100?100u:unsigned(pct);
+                }
+            }
+            prev_xo=cur_xo;xo_valid=true;
+        }
+        __atomic_store_n(&dcvs_busy_pct,busy_pct,__ATOMIC_RELAXED);
+        const bool now_disp_on=diting_power_display_on()!=0;
+        const bool touch_boost=now_disp_on && diting_power_touch_recent(300000ULL);
+        unsigned target=current;
+        if(!now_disp_on) {
+            target=DitingAdrenoPowerLevelCount-1; // 220 MHz minimum DT level
+            idle_ticks=0;
+        } else if(busy_pct>=80 || submit_delta>=8) {
+            target=current>=3?current-3:0;
+            idle_ticks=0;
+        } else if(busy_pct>=50 || submit_delta>=4) {
+            target=current>=2?current-2:0;
+            idle_ticks=0;
+        } else if(touch_boost && current>7) {
+            target=7; // 515 MHz interactive UI floor during active touch
+            idle_ticks=0;
+        } else if(submit_delta>=1 && current>10) {
+            target=10; // 324 MHz light rendering
+            idle_ticks=0;
+        } else if(busy_pct<20 && submit_delta==0 && !touch_boost) {
+            if(++idle_ticks>=4) {
+                idle_ticks=0;
+                if(current+2<DitingAdrenoPowerLevelCount)target=current+2;
+                else target=DitingAdrenoPowerLevelCount-1;
+            }
+        } else {
+            idle_ticks=0;
+        }
+        if(target!=current) {
+            const unsigned gpu_index=DitingAdrenoPowerLevelCount-target;
+            const unsigned bus_index=DitingAdrenoPowerLevels[target].bus;
+            DitingGpuPowerResult dr={};
+            IOLockLock(gmu_hfi_lock);
+            const DitingGpuStatus st=DitingAdrenoGmuSetPowerLevel(&gmu,gpu_index,bus_index,&dr);
+            IOLockUnlock(gmu_hfi_lock);
+            if(st==DitingGpuSuccess) {
+                current=target;
+                __atomic_store_n(&diagnostics_power_level,current,__ATOMIC_RELEASE);
+                __atomic_add_fetch(&dcvs_transitions,1,__ATOMIC_RELAXED);
+            } else {
+                __atomic_add_fetch(&dcvs_errors,1,__ATOMIC_RELAXED);
+                IOLog("DITING ADRENO: DCVS HFI vote failed status=%u target=%u err=%x; stopping DCVS\n",
+                      unsigned(st),target,dr.firmware_error);
+                break;
+            }
+        }
+        // Coordinate DDR/LLCC bandwidth profile with display state and GPU level.
+        unsigned mem_profile=0; // ProfileIdle (547/300 MHz)
+        if(now_disp_on) {
+            if(current<=3)mem_profile=3;       // ProfileMax (3196/1066 MHz)
+            else if(current<=10 || touch_boost || submit_delta>0)mem_profile=2; // ProfileActive (1708/806 MHz)
+            else mem_profile=1;                // ProfileDisplay (768/466 MHz)
+        }
+        (void)diting_memory_bandwidth_set_profile(mem_profile);
+    }
+    thread_terminate(current_thread());
+    thread_block(THREAD_CONTINUE_NULL);
+}
 static void run(void *,wait_result_t)
 {
-#if defined(DITING_GUEST_22H374)
+#if defined(DITING_GUEST_24B156)
+    unsigned power_level=10; // 324 MHz DT level; DCVS scales 220..900 MHz on demand.
+    unsigned lock_max=0;
+#elif defined(DITING_GUEST_22H374)
     unsigned power_level=0; // Diting DT maximum: 900 MHz, paired DDR level11.
+    unsigned lock_max=1;
 #else
     unsigned power_level=DitingAdrenoBootPowerLevel;
+    unsigned lock_max=1;
 #endif
     PE_parse_boot_argn("diting_gpu_pwrlevel",&power_level,sizeof power_level);
-    unsigned lock_max=1;PE_parse_boot_argn("diting_gpu_lock_max",&lock_max,sizeof lock_max);
-    if(lock_max)power_level=0; // actual Diting DT900MHz and matching maximum BW
+    PE_parse_boot_argn("diting_gpu_lock_max",&lock_max,sizeof lock_max);
+    unsigned want_dcvs=lock_max?0u:1u;
+    PE_parse_boot_argn("diting_gpu_dcvs",&want_dcvs,sizeof want_dcvs);
+    if(lock_max){power_level=0;want_dcvs=0;} // actual Diting DT 900MHz and matching maximum BW
+    dcvs_lock_max=lock_max?1u:0u;
     if(power_level>=DitingAdrenoPowerLevelCount){record("SKIP invalid GPU power level",power_level);return;}
     record("startup requested; no accelerator published",0);
     if(!map(gcc,0x100000,0x1f4200)||!map(db,0x80860000,0x20000))
@@ -304,7 +456,7 @@ static void run(void *,wait_result_t)
     DitingPowerInputs inputs={};auto input_status=DitingAdrenoReadPowerInputs(
         reinterpret_cast<const uint8_t *>(db.cpu),db.bytes,DitingAdrenoChipId,&inputs);
     if(input_status){record("SKIP command-db",input_status);return;}
-    if(!vote_parents(inputs)){record("FAIL parent votes",1);return;}
+    if(!vote_parents(inputs,lock_max!=0)){record("FAIL parent votes",1);return;}
     parents_ready=1;
     // GPUCC register interface must be clocked before even reading GPUCC.
     wr(gcc,0x81004,rd(gcc,0x81004)|1);IODelay(10);
@@ -349,8 +501,19 @@ static void run(void *,wait_result_t)
     auto cp_status=DitingAdrenoCpStart(&gmu);
     record("CP/user-client startup",cp_status,gr.core_version,gr.hfi_version);
     if(!cp_status) {
-        diagnostics_power_level=power_level;
+        __atomic_store_n(&diagnostics_power_level,power_level,__ATOMIC_RELEASE);
         __atomic_store_n(&diagnostics_ready,1,__ATOMIC_RELEASE);
+        if(!lock_max)release_gpu_parent_vote();
+        if(want_dcvs) {
+            gmu_hfi_lock=IOLockAlloc();
+            if(gmu_hfi_lock) {
+                thread_t dt=THREAD_NULL;
+                if(kernel_thread_start(dcvs_worker,nullptr,&dt)==KERN_SUCCESS) {
+                    __atomic_store_n(&dcvs_enabled,1,__ATOMIC_RELEASE);
+                    thread_deallocate(dt);
+                }
+            }
+        }
     }
     if(cp_status)record("GX clock state after CP failure",rd(windows[DitingGpuClock],0x90a8),
         (uint64_t(rd(windows[DitingGpuClock],0))<<32)|rd(windows[DitingGpuClock],0x1000),
@@ -392,10 +555,15 @@ extern "C" unsigned diting_gpu_snapshot_text(char *out,unsigned capacity)
         int n=snprintf(out+used,capacity-used,format,words...);
         if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
     };
-    const unsigned level=ready?diagnostics_power_level:DitingAdrenoPowerLevelCount;
+    const unsigned level=ready?__atomic_load_n(&diagnostics_power_level,__ATOMIC_ACQUIRE):DitingAdrenoPowerLevelCount;
     append("GPU clock v1 status=%s uptime_us=%llu reads=%u requested_hz=%u requested_DDR=%u\n",
         status,microseconds(),sample.reads,level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].hz:0,
         level<DitingAdrenoPowerLevelCount?DitingAdrenoPowerLevels[level].bus:0);
+    append("GPU_DCVS enabled=%u lock_max=%u level=%u busy_pct=%u submits=%u disp=%d trans=%u err=%u\n",
+        __atomic_load_n(&dcvs_enabled,__ATOMIC_RELAXED),dcvs_lock_max,level,
+        __atomic_load_n(&dcvs_busy_pct,__ATOMIC_RELAXED),__atomic_load_n(&dcvs_last_submits,__ATOMIC_RELAXED),
+        diting_power_display_on(),__atomic_load_n(&dcvs_transitions,__ATOMIC_RELAXED),
+        __atomic_load_n(&dcvs_errors,__ATOMIC_RELAXED));
     unsigned retained=0;DitingAdrenoStartup::Entry last{};
     for(unsigned i=0;i<DitingAdrenoStartup::Capacity;++i) {
         DitingAdrenoStartup::Entry entry{};

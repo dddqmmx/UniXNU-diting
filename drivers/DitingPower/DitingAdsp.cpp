@@ -220,14 +220,12 @@ bool readCmdDb(uint8_t *copy) {
 QcomRpmhResource gLcx, gLmx;
 int gTcs = -1;
 
-// Submit both actual ARC indices through the shared APSS active-only owner.
+// Submit both actual ARC indices through the shared APSS consumer aggregator.
+// On handover (vote(0, 0)), only DitingRpmhAdsp's proxy vote is dropped.
 int vote(uint32_t lcx, uint32_t lmx) {
-    // These are shared rails on SM8475. Retain startup minima; never send
-    // Sheng's handover zero vote into the GPU/WLAN parents. One board lock
-    // serializes the whole request with GPU/WLAN, leaving sleep/wake intact.
-    if(!lcx && !lmx)return 0;
+    if (!gLcx.address || !gLmx.address) return 0;
     const uint32_t addresses[]={gLcx.address,gLmx.address},values[]={lcx,lmx};
-    return diting_rpmh_vote_many(addresses,values,2)?0:-60;
+    return diting_rpmh_consumer_vote_many(DitingRpmhAdsp,addresses,values,2)?0:-60;
 }
 
 // ---- secure world calls ----

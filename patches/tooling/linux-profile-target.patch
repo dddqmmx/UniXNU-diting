@@ -1,0 +1,153 @@
+# UniXNU 519d80242a5028ee123447b01bc3b809baed565f; BSD-2-Clause-Patent.
+# Select Linux target inputs and host tools for native and RELEASE-LTO builds.
+diff --git a/scripts/build-fileset-release-reference.py b/scripts/build-fileset-release-reference.py
+index 2e87000..41b7991 100644
+--- a/scripts/build-fileset-release-reference.py
++++ b/scripts/build-fileset-release-reference.py
+@@ -9,6 +9,8 @@ import argparse
+ import fnmatch
+ from pathlib import Path
+ import subprocess
++import sys
++import shlex
+ 
+ 
+ def file_hash(path):
+@@ -61,6 +63,11 @@ def require_link_phase(directory, lto, returncode, build_log, log_path):
+     if errors or not filelist.is_file():
+         detail = '\n'.join(errors[:5]) or f'Link input list was not generated: {filelist}'
+         raise SystemExit(f'RELEASE reference compilation failed ({returncode}); log {log_path}\n{detail}')
++    if lto:
++        generated = directory / 'justlto.o'
++        if not (generated.is_file() or (generated.is_dir() and any(generated.glob('*.o')))):
++            raise SystemExit(f'RELEASE LTO code generation failed ({returncode}); log {log_path}\n'
++                             f'No generated Mach-O object: {generated}')
+ 
+ 
+ def target_define(target):
+@@ -85,6 +92,10 @@ def main():
+     archives = [root/'build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a']
+     forced = [root/f'build/{folder}/{name}' for folder,name in (
+         ('libpthread-kernel','libpthread_kernel.a'),('armdt-platform','libArmDTPlatform.a'),('armcpu','libArmCpu.a'))]
++    lto_linker = os.environ.get('UNIXNU_LTO_LD')
++    if sys.platform == 'linux' and options.lto and (not lto_linker or not Path(lto_linker).is_file()):
++        raise SystemExit('Linux RELEASE-LTO requires UNIXNU_LTO_LD pointing to an LTO-enabled '
++                         'cctools kernel linker; build it with build-diting-ios27-linker.py')
+     inputs = {
+         'mode': mode,
+         'target': target,
+@@ -96,6 +107,8 @@ def main():
+             ('UNIXNU_IOS_VERSION', '26.0'), ('UNIXNU_XNU_DARWIN', '25.5.0'),
+             ('UNIXNU_XNU_VERSION', '12377.121.6'))},
+         'compiler': subprocess.check_output(['xcrun', 'clang', '--version'], text=True),
++        'lto_linker': {'path': lto_linker, 'sha256': file_hash(Path(lto_linker))} if lto_linker else None,
++        'liblto': {name: os.environ.get(name) for name in ('LIBLTO', 'LIBLTO_PATH')},
+         'environment': {name: value for name, value in os.environ.items()
+                         if name.startswith(('XNU_', 'RC_', 'CCC_')) or name in ('CC', 'CXX', 'LD')},
+     }
+@@ -124,6 +137,19 @@ def main():
+         (output/'source-sha256.json').write_text(json.dumps(manifest,indent=2)+'\n')
+     env = dict(os.environ, KERNEL_SDKROOT=str(sdk),
+                XNU_AVAILABILITY_PL=str(sdk/'usr/local/libexec/availability.pl'))
++    host_args = []
++    if sys.platform == 'linux':
++        clt = Path(env['CLT_PREFIX'])
++        env.update(PLATFORM='iPhoneOS', HOST_CC=str(clt / 'bin/xnu-host-cc'),
++                   MIGCOM=str(clt / 'libexec/migcom'))
++        cpus = len(os.sched_getaffinity(0))
++        memory = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
++        host_args = ['TIGHTBEAMC=tightbeamc-not-supported', 'BUILD_DSYM=0',
++                     f'MEMORY_SIZE={memory}', f'SYSCTL_HW_PHYSICALCPU={cpus}',
++                     f'SYSCTL_HW_LOGICALCPU={cpus}',
++                     f'LD_KERNEL_LIBS={sdk}/usr/local/lib/kernel/libcc_kext.a']
++        if options.lto:
++            host_args.append('LD=' + shlex.join([str(clt / 'bin/clang'), '-fuse-ld=' + lto_linker]))
+     flags = '-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=1 -DXNU_BOOT_PROGRESS=0'
+     args = ['make','-C',str(source),'build','SDKROOT=iphoneos',
+         'ARCH_CONFIGS=ARM64','MACHINE_CONFIGS=BCM2837','KERNEL_CONFIGS=RELEASE',
+@@ -133,14 +159,16 @@ def main():
+         f'DEPLOYMENT_LINKER_FLAGS=-Wl,-ios_version_min,{os.environ.get("UNIXNU_IOS_VERSION", "26.0")}',
+         f'RC_DARWIN_KERNEL_VERSION={os.environ.get("UNIXNU_XNU_DARWIN", "25.5.0")}',
+         f'RC_ProjectSourceVersion={os.environ.get("UNIXNU_XNU_VERSION", "12377.121.6")}',
+-        f'BUILD_LTO={int(options.lto)}','BOUND_CHECKS=0','BUILD_WERROR=0','MAKEJOBS=-j8',
+-        f'LDFLAGS_KERNEL_LTO=-miphoneos-version-min={inputs["versions"]["UNIXNU_IOS_VERSION"]} -Wl,-mllvm,-inline-threshold=100',
++        f'BUILD_LTO={int(options.lto)}','BOUND_CHECKS=0','BUILD_WERROR=0',
++        f'MAKEJOBS=-j{os.environ.get("JOBS", "8")}',
++        f'LDFLAGS_KERNEL_LTO=-nostdlib -miphoneos-version-min={inputs["versions"]["UNIXNU_IOS_VERSION"]} -Wl,-mllvm,-inline-threshold=100',
+         f'CFLAGS_EXTRA={flags}',
+         'copyio.o_CFLAGS_ADD=-march=armv8.1-a','pcb.o_CFLAGS_ADD=-march=armv8.1-a',
+         'LD_KERNEL_ARCHIVES='+' '.join([f'-L{sdk}/usr/local/lib/kernel','-lfirehose_kernel',
+                                         *map(str,archives),*(f'-Wl,-force_load,{p}' for p in forced)]),
+         'XNU_EXTERNAL_KERNEL_ARCHIVES='+' '.join(map(str,archives+forced)),
+-        f'OBJROOT={output}/{mode}-obj',f'SYMROOT={output}/{mode}-sym',f'DSTROOT={output}/{mode}-dst']
++        f'OBJROOT={output}/{mode}-obj',f'SYMROOT={output}/{mode}-sym',f'DSTROOT={output}/{mode}-dst',
++        *host_args]
+     (output/f'{mode}-command.json').write_text(json.dumps(args,indent=2)+'\n')
+     with (output/f'{mode}-build.log').open('w') as log:
+         result = subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT)
+diff --git a/scripts/linux/prepare-xnu.py b/scripts/linux/prepare-xnu.py
+index efef7a6..2e8a893 100755
+--- a/scripts/linux/prepare-xnu.py
++++ b/scripts/linux/prepare-xnu.py
+@@ -9,6 +9,8 @@
+ Each rewrite checks whether it is still needed, so both modes can run on every build.
+ """
+ from pathlib import Path
++import json
++import os
+ import shutil
+ import subprocess
+ import sys
+@@ -109,7 +111,12 @@ def build_cc_kext():
+     # kernel headers (Kernel.framework); inttypes.h, stdio.h and gethostuuid.h come from Libc and Libsyscall, as they
+     # do from an SDK's usr/include.
+     out = FAKEROOT / 'usr/local/lib/kernel/libcc_kext.a'
+-    if out.is_file():
++    arch = os.environ.get('UNIXNU_XNU_ARCH', 'arm64')
++    ios_version = os.environ.get('UNIXNU_IOS_VERSION', '17.0')
++    inputs = {'arch': arch, 'ios_version': ios_version, 'llvm_commit': LLVM_COMMIT,
++              'compiler': os.environ.get('CROSS_CLANG', 'xcrun clang')}
++    stamp = out.with_suffix('.inputs.json')
++    if out.is_file() and stamp.is_file() and json.loads(stamp.read_text()) == inputs:
+         return
+     src = ROOT / '.cache/linux'
+     fetch(src / 'llvm-project', 'https://github.com/llvm/llvm-project', LLVM_COMMIT,
+@@ -120,7 +127,7 @@ def build_cc_kext():
+     objects.mkdir(parents=True, exist_ok=True)
+     out.parent.mkdir(parents=True, exist_ok=True)
+     for name in PROFILE_SOURCES:
+-        subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-arch', 'arm64', '-isysroot', FAKEROOT,
++        subprocess.run(['xcrun', 'clang', '-target', f'{arch}-apple-ios{ios_version}', '-arch', arch, '-isysroot', FAKEROOT,
+                         '-mkernel', '-DKERNEL_USE', '-O3', '-fPIC', '-w',
+                         '-I', rt / 'include', '-I', FAKEROOT / 'System/Library/Frameworks/Kernel.framework/Headers',
+                         '-idirafter', src / 'Libc/include', '-idirafter', XNU / 'libsyscall/wrappers',
+@@ -128,6 +135,7 @@ def build_cc_kext():
+     subprocess.run(['xcrun', 'libtool', '-static', '-o', out, *(objects / f'{n}.o' for n in PROFILE_SOURCES)],
+                    check=True)
+     info(f'libcc_kext.a: {out}')
++    stamp.write_text(json.dumps(inputs, indent=2) + '\n')
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/scripts/unixnu/kernel.py b/scripts/unixnu/kernel.py
+index 7858f42..ea5d4c0 100644
+--- a/scripts/unixnu/kernel.py
++++ b/scripts/unixnu/kernel.py
+@@ -99,12 +99,15 @@ def linux_env(ctx):
+         if not path.exists():
+             raise Error(f'{path} missing; run "sudo scripts/linux/setup-toolchain.py {toolchain}"')
+     fakeroot = ctx.tree / '.cache/fakeroot'
++    profile = ctx.board.get('os', {})
++    arch = profile.get('arch', 'arm64')
++    ios_version = profile.get('ios_version', '17.0')
+     return {'PATH': os.pathsep.join([str(clt / 'bin'), str(toolchain / 'bin'), os.environ.get('PATH', '')]),
+             'LC_ALL': 'C', 'CLT_PREFIX': str(clt), 'XCTOOLCHAIN_PREFIX': str(xctoolchain),
+             'XNU_TOOLCHAIN_BIN': f'{clt / "bin"} {xctoolchain / "bin"}',
+-            'UNIXNU_SDKROOT': str(fakeroot), 'UNIXNU_SDK_VERSION': '17.0',
++            'UNIXNU_SDKROOT': str(fakeroot), 'UNIXNU_SDK_VERSION': ios_version,
+             'UNIXNU_PLATFORM_PATH': str(fakeroot / 'Platforms/iPhoneOS.platform'),
+-            'CROSS_CLANG': str(toolchain / 'llvm/bin/clang'), 'DARWIN_TRIPLE': 'arm64-apple-ios17.0',
++            'CROSS_CLANG': str(toolchain / 'llvm/bin/clang'), 'DARWIN_TRIPLE': f'{arch}-apple-ios{ios_version}',
+             'CROSS_EXTRA_FLAGS': '-mllvm -disable-atexit-based-global-dtor-lowering',
+             'CCC_OVERRIDE_OPTIONS': '# +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global'}
+ 

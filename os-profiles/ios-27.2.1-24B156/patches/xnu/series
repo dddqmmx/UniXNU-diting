@@ -1,0 +1,4 @@
+# Public xnu-12377 compatibility baseline. 24B156 ABI qualification is separate.
+arch:../../../patches/xnu-12377/darwin26-syscalls.patch
+arch:../../../patches/xnu-12377/darwin26-kpi.patch
+arch:../../../patches/xnu-12377/darwin26-shared-region.patch

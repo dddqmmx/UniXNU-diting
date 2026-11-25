@@ -11,6 +11,12 @@
  */
 static bool DitingMetalDeviceAbiAvailable(Class base)
 {
+#if DITING_GUEST_24B156
+    if (!base || class_getInstanceSize(base)<528) return false;
+    Method initPort=class_getInstanceMethod(base,sel_registerName("initWithAcceleratorPort:"));
+    if (!initPort || method_getNumberOfArguments(initPort)!=3u) return false;
+    return true;
+#else
 #if DITING_GUEST_22H374
     constexpr size_t extent=600; // actual 22H374 _MTLDevice metadata
 #else
@@ -33,4 +39,5 @@ static bool DitingMetalDeviceAbiAvailable(Class base)
         if (!good) return false;
     }
     return true;
+#endif
 }

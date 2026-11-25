@@ -43,8 +43,8 @@ public:
     }
     Error start(uint32_t profile, uint32_t policy, uint64_t now) {
         expire(now);
-        if (profile < DitingGpuTestQualification || profile > DitingGpuTestUI || policy > DitingGpuTestGmem ||
-            (profile == DitingGpuTestUI && policy != DitingGpuTestAuto))
+        if (profile < DitingGpuTestQualification || profile > DitingGpuTestKeyboard || policy > DitingGpuTestGmem ||
+            (profile >= DitingGpuTestUI && policy != DitingGpuTestAuto))
             return Argument;
         if (active() || quiescing) return Busy;
         if (!daemon || age(now, heartbeat_us) >= 5000000) return Unavailable;

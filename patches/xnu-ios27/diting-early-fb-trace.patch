@@ -1,0 +1,604 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -478,6 +478,24 @@
+ 	mov		x20, x0
+ 	mov		x21, #0
+
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	ldr	x0, [x20, #40]
++	cbz	x0, 9f
++	ldr	x1, [x20, #56]
++	ldr	x2, [x20, #72]
++	mul	x1, x1, x2
++	lsr	x2, x1, #4
++	bic	x2, x2, #3
++	add	x0, x0, x1, lsr #2
++	mov	w3, #0x00FF
++	movk	w3, #0xFFFF, lsl #16
++8:
++	str	w3, [x0], #4
++	subs	x2, x2, #4
++	b.hi	8b
++	dsb	sy
++9:
++#endif
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+@@ -759,6 +777,26 @@
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	cbnz	x21, 9f
++	ldr	x0, [x20, #40]
++	cbz	x0, 9f
++	ldr	x1, [x20, #56]
++	ldr	x2, [x20, #72]
++	mul	x1, x1, x2
++	lsr	x2, x1, #4
++	bic	x2, x2, #3
++	add	x0, x0, x1, lsr #2
++	add	x0, x0, x2
++	mov	w3, #0xFF00
++	movk	w3, #0xFFFF, lsl #16
++8:
++	str	w3, [x0], #4
++	subs	x2, x2, #4
++	b.hi	8b
++	dsb	sy
++9:
++#endif
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -627,6 +627,371 @@
+ }
+ #endif
+
++#if defined(__arm64__)
++#include <pexpert/pexpert.h>
++extern unsigned char iso_font[256 * 16];
++extern vm_offset_t virtual_space_start;
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++static vm_offset_t diting_early_fb_va;
++static uint32_t diting_step_x = 16;
++static uint32_t diting_step_y = 0;
++
++static volatile uint32_t *diting_spmi_observer;
++static volatile uint32_t *diting_spmi_channel;
++static volatile uint32_t *diting_imem_reason;
++static unsigned diting_spmi_apid;
++static int diting_panic_fastboot_armed;
++static int diting_panic_fastboot_started;
++static uint64_t diting_early_deadline_ticks;
++static int diting_early_deadline_fired;
++static char diting_panic_capture_id[64];
++
++static inline uint32_t
++diting_mmio_r32(volatile uint32_t *base, unsigned off)
++{
++	uint32_t v = base[off / 4];
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++diting_mmio_w32(volatile uint32_t *base, unsigned off, uint32_t v)
++{
++	base[off / 4] = v;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static int
++diting_spmi_wait(volatile uint32_t *base, unsigned off)
++{
++	for (unsigned n = 0; n < 100000; n++) {
++		uint32_t s = diting_mmio_r32(base, off + 8);
++		if (s & 1u) {
++			return (s & 15u) == 1u;
++		}
++	}
++	return 0;
++}
++
++void
++diting_early_panic_fastboot_init(void)
++{
++	uint32_t enable = 0;
++	if (!PE_parse_boot_argn("diting_panic_fastboot", &enable, sizeof(enable)) || !enable) {
++		return;
++	}
++	if (!PE_parse_boot_argn("diting_capture_id", diting_panic_capture_id, sizeof(diting_panic_capture_id))) {
++		strlcpy(diting_panic_capture_id, "early-panic", sizeof(diting_panic_capture_id));
++	}
++	diting_panic_capture_id[sizeof(diting_panic_capture_id) - 1] = '\0';
++	volatile uint32_t *core = (volatile uint32_t *)(uintptr_t)ml_io_map(0x0c400000ULL, 0x3000);
++	volatile uint32_t *cfg = (volatile uint32_t *)(uintptr_t)ml_io_map(0x0c42d000ULL, 0x4000);
++	if (!core || !cfg) {
++		return;
++	}
++	uint32_t version = diting_mmio_r32(core, 0);
++	uint32_t count = diting_mmio_r32(core, 4) & 0x7ffu;
++	if (version < 0x70000000u || version >= 0x80000000u || !count || count > 1024u) {
++		return;
++	}
++	int found = 0;
++	for (unsigned n = 0; n < count; n++) {
++		if (((diting_mmio_r32(core, 0x2000u + 4u * n) >> 8) & 0xfffu) == 0x71u &&
++		    (diting_mmio_r32(cfg, 4u * n) & 7u) == 0u) {
++			diting_spmi_apid = n;
++			found = 1;
++			break;
++		}
++	}
++	if (!found) {
++		return;
++	}
++	vm_size_t obs_bytes = (vm_size_t)((diting_spmi_apid * 0x20u + 0x20u + 4095u) & ~4095u);
++	diting_spmi_observer = (volatile uint32_t *)(uintptr_t)ml_io_map(0x0c440000ULL, obs_bytes);
++	diting_spmi_channel = (volatile uint32_t *)(uintptr_t)ml_io_map(0x0c500000ULL + (uint64_t)diting_spmi_apid * 4096ULL, 4096);
++	diting_imem_reason = (volatile uint32_t *)(uintptr_t)ml_io_map(0x146aa65cULL, 4);
++	if (!diting_spmi_observer || !diting_spmi_channel || !diting_imem_reason) {
++		return;
++	}
++	diting_panic_fastboot_armed = 1;
++	uint32_t deadline_secs = 0;
++	if (PE_parse_boot_argn("diting_early_deadline", &deadline_secs, sizeof(deadline_secs)) && deadline_secs > 0) {
++		uint64_t freq = 19200000ULL, now = 0;
++		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
++		if (!freq || freq > 1000000000ULL) {
++			freq = 19200000ULL;
++		}
++		__asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(now));
++		diting_early_deadline_ticks = now + freq * (uint64_t)deadline_secs;
++	}
++	static const char msg[] = "DITING EARLY-PANIC-FASTBOOT: armed\n";
++	diting_ramoops_diagnostic_write(msg, (int)sizeof(msg) - 1);
++}
++
++void diting_early_fb_panic(const char *msg);
++void diting_early_panic_fastboot_reset(void);
++
++void
++diting_early_deadline_check(uint64_t pc, uint64_t lr)
++{
++	uint64_t deadline = diting_early_deadline_ticks;
++	if (!deadline || !diting_panic_fastboot_armed) {
++		return;
++	}
++	uint64_t now = 0;
++	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
++	if (now < deadline) {
++		return;
++	}
++	if (__atomic_exchange_n(&diting_early_deadline_fired, 1, __ATOMIC_ACQ_REL)) {
++		return;
++	}
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	{
++		extern volatile uint32_t armcpu_smp_running;
++		extern volatile uint32_t armcpu_smp_step[8];
++		extern volatile uint32_t armcpu_smp_fail[8];
++		extern volatile int32_t armcpu_smp_psci_rc[8];
++		char smp_msg[256];
++		int sn = snprintf(smp_msg, sizeof(smp_msg),
++		    "SMP_STATE: run=%u step=%u,%u,%u,%u,%u,%u,%u,%u fail=%u,%u,%u,%u,%u,%u,%u,%u rc=%d,%d,%d,%d,%d,%d,%d,%d\n",
++		    armcpu_smp_running,
++		    armcpu_smp_step[0], armcpu_smp_step[1], armcpu_smp_step[2], armcpu_smp_step[3],
++		    armcpu_smp_step[4], armcpu_smp_step[5], armcpu_smp_step[6], armcpu_smp_step[7],
++		    armcpu_smp_fail[0], armcpu_smp_fail[1], armcpu_smp_fail[2], armcpu_smp_fail[3],
++		    armcpu_smp_fail[4], armcpu_smp_fail[5], armcpu_smp_fail[6], armcpu_smp_fail[7],
++		    armcpu_smp_psci_rc[0], armcpu_smp_psci_rc[1], armcpu_smp_psci_rc[2], armcpu_smp_psci_rc[3],
++		    armcpu_smp_psci_rc[4], armcpu_smp_psci_rc[5], armcpu_smp_psci_rc[6], armcpu_smp_psci_rc[7]);
++		if (sn > 0) {
++			if (sn >= (int)sizeof(smp_msg)) sn = (int)sizeof(smp_msg) - 1;
++			diting_ramoops_diagnostic_write(smp_msg, sn);
++		}
++	}
++#endif
++	char msg[160];
++	int n = snprintf(msg, sizeof(msg), "EARLY_DEADLINE: pc=0x%llx lr=0x%llx cntvct=0x%llx",
++	    (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)now);
++	if (n > 0) {
++		diting_early_fb_panic(msg);
++	}
++	diting_early_panic_fastboot_reset();
++}
++
++void
++diting_early_panic_fastboot_reset(void)
++{
++	if (!diting_panic_fastboot_armed) {
++		return;
++	}
++	if (__atomic_exchange_n(&diting_panic_fastboot_started, 1, __ATOMIC_ACQ_REL)) {
++		return;
++	}
++	char marker[192];
++	int n = snprintf(marker, sizeof(marker),
++	    "\nDITING CAPTURE: id=%s phase=timed-return-sync result=0\n"
++	    "DITING CAPTURE: id=%s phase=logs-committed-reset result=0\n",
++	    diting_panic_capture_id, diting_panic_capture_id);
++	if (n > 0) {
++		if (n >= (int)sizeof(marker)) {
++			n = (int)sizeof(marker) - 1;
++		}
++		diting_ramoops_diagnostic_write(marker, n);
++	}
++	diting_ufs_log_flush_panic();
++	uint64_t freq = 19200000ULL, now = 0, cur = 0;
++	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
++	if (!freq || freq > 1000000000ULL) {
++		freq = 19200000ULL;
++	}
++	__asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(now));
++	uint64_t deadline = now + freq * 1ULL;
++	do {
++		__asm__ volatile("mrs %0, cntvct_el0" : "=r"(cur));
++	} while (cur < deadline);
++	unsigned obs_off = diting_spmi_apid * 0x20u;
++	diting_mmio_w32(diting_spmi_observer, obs_off, (1u << 27) | (0x48u << 4));
++	if (diting_spmi_wait(diting_spmi_observer, obs_off)) {
++		uint8_t before = (uint8_t)(diting_mmio_r32(diting_spmi_observer, obs_off + 0x18u) & 0xffu);
++		uint8_t value = (uint8_t)((before & 1u) | (2u << 1));
++		diting_mmio_w32(diting_spmi_channel, 0x10u, value);
++		diting_mmio_w32(diting_spmi_channel, 0u, (0x48u << 4));
++		(void)diting_spmi_wait(diting_spmi_channel, 0u);
++	}
++	diting_mmio_w32(diting_imem_reason, 0u, 0x77665500u);
++	__asm__ volatile("dsb sy" ::: "memory");
++	register uint64_t x0 __asm__("x0") = 0x84000009ULL;
++	register uint64_t x1 __asm__("x1") = 0;
++	register uint64_t x2 __asm__("x2") = 0;
++	register uint64_t x3 __asm__("x3") = 0;
++	__asm__ volatile("smc #0"
++	    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
++	    :
++	    : "memory", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17");
++}
++
++static int
++diting_early_fb_ensure(void)
++{
++	if (!PE_state.video.v_baseAddr || !PE_state.video.v_rowBytes || !PE_state.video.v_height) {
++		return 0;
++	}
++	if (!diting_early_fb_va) {
++		if (!virtual_space_start) {
++			return 0;
++		}
++		diting_early_fb_va = ml_io_map_wcomb((vm_offset_t)PE_state.video.v_baseAddr,
++		    (vm_size_t)(PE_state.video.v_rowBytes * PE_state.video.v_height));
++	}
++	return diting_early_fb_va != 0;
++}
++
++void
++diting_early_fb_band(uint32_t bgra, unsigned band)
++{
++	if (band >= 8 || !diting_early_fb_ensure()) {
++		return;
++	}
++	uint32_t y0 = (uint32_t)((PE_state.video.v_height * band) / 8);
++	uint32_t y1 = (uint32_t)((PE_state.video.v_height * (band + 1)) / 8);
++	uint32_t stride = (uint32_t)(PE_state.video.v_rowBytes / 4);
++	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)diting_early_fb_va;
++	for (uint32_t y = y0; y < y1; y++) {
++		for (uint32_t x = 0; x < (uint32_t)PE_state.video.v_width; x++) {
++			fb[y * stride + x] = bgra;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(diting_early_fb_va + (vm_offset_t)y0 * PE_state.video.v_rowBytes,
++	    (unsigned)((y1 - y0) * PE_state.video.v_rowBytes));
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static void
++diting_early_fb_draw_glyph(uint32_t x, uint32_t y, uint32_t scale, unsigned char ch, uint32_t fg, uint32_t bg)
++{
++	uint32_t stride = (uint32_t)(PE_state.video.v_rowBytes / 4);
++	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)diting_early_fb_va;
++	const unsigned char *glyph = &iso_font[ch * 16];
++	for (uint32_t gy = 0; gy < 16; gy++) {
++		unsigned char row = glyph[gy];
++		for (uint32_t gx = 0; gx < 8; gx++) {
++			uint32_t col = (row & (1u << gx)) ? fg : bg;
++			for (uint32_t dy = 0; dy < scale; dy++) {
++				for (uint32_t dx = 0; dx < scale; dx++) {
++					fb[(y + gy * scale + dy) * stride + x + gx * scale + dx] = col;
++				}
++			}
++		}
++	}
++}
++
++void
++diting_early_fb_step(const char *tag)
++{
++	if (!tag || !diting_early_fb_ensure()) {
++		return;
++	}
++	uint32_t scale = 3;
++	uint32_t y0 = (uint32_t)((PE_state.video.v_height * 5) / 8);
++	uint32_t y1 = (uint32_t)((PE_state.video.v_height * 6) / 8);
++	if (diting_step_y < y0 + 12 || diting_step_y + 16 * scale >= y1) {
++		diting_step_x = 16;
++		diting_step_y = y0 + 12;
++	}
++	int len = 0;
++	while (tag[len]) {
++		len++;
++	}
++	diting_ramoops_diagnostic_write(tag, len);
++	diting_ramoops_diagnostic_write("\n", 1);
++	for (int i = 0; i <= len; i++) {
++		unsigned char ch = (i == len) ? ' ' : (unsigned char)tag[i];
++		if (diting_step_x + 8 * scale >= (uint32_t)PE_state.video.v_width) {
++			diting_step_x = 16;
++			diting_step_y += 18 * scale;
++			if (diting_step_y + 16 * scale >= y1) {
++				break;
++			}
++		}
++		diting_early_fb_draw_glyph(diting_step_x, diting_step_y, scale, ch, 0xFF000000U, 0xFFFFFFFFU);
++		diting_step_x += 8 * scale;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(diting_early_fb_va + (vm_offset_t)y0 * PE_state.video.v_rowBytes,
++	    (unsigned)((y1 - y0) * PE_state.video.v_rowBytes));
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++void
++diting_early_fb_panic(const char *msg)
++{
++	if (!diting_early_fb_ensure()) {
++		return;
++	}
++	diting_early_fb_band(0xFF000000U, 1);
++	diting_early_fb_band(0xFF000000U, 2);
++	diting_early_fb_band(0xFF000000U, 3);
++	diting_early_fb_band(0xFF000000U, 4);
++	if (diting_ramoops_base && diting_ramoops_size > 0) {
++		const uint32_t capacity = DITING_RAMOOPS_CONSOLE_BYTES - DITING_RAMOOPS_HEADER_BYTES;
++		const uint8_t *ring = (const uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_RAMOOPS_HEADER_BYTES);
++		uint32_t show = diting_ramoops_size > 1600u ? 1600u : diting_ramoops_size;
++		uint32_t start_pos = (diting_ramoops_start + diting_ramoops_size - show) % capacity;
++		uint32_t scale_log = 2;
++		uint32_t lx = 16;
++		uint32_t ly = (uint32_t)((PE_state.video.v_height * 1) / 8) + 8;
++		uint32_t ly_max = (uint32_t)((PE_state.video.v_height * 5) / 8) - 8;
++		for (uint32_t i = 0; i < show && ly + 16 * scale_log < ly_max; i++) {
++			unsigned char ch = ring[(start_pos + i) % capacity];
++			if (ch == '\r') continue;
++			if (ch == '\n' || lx + 8 * scale_log >= (uint32_t)PE_state.video.v_width) {
++				lx = 16;
++				ly += 18 * scale_log;
++				if (ch == '\n') continue;
++				if (ly + 16 * scale_log >= ly_max) break;
++			}
++			if (ch < 32 || ch > 126) ch = ' ';
++			diting_early_fb_draw_glyph(lx, ly, scale_log, ch, 0xFF00FF80U, 0xFF000000U);
++			lx += 8 * scale_log;
++		}
++		__asm__ volatile("dsb sy" ::: "memory");
++		CleanPoC_DcacheRegion_Force(diting_early_fb_va + (vm_offset_t)((PE_state.video.v_height * 1) / 8) * PE_state.video.v_rowBytes,
++		    (unsigned)(((PE_state.video.v_height * 4) / 8) * PE_state.video.v_rowBytes));
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++	diting_early_fb_band(0xFFFF0000U, 5);
++	diting_early_fb_band(0xFFFF0000U, 6);
++	diting_early_fb_band(0xFFFF0000U, 7);
++	if (!msg) {
++		return;
++	}
++	int len = 0;
++	while (msg[len]) {
++		len++;
++	}
++	diting_ramoops_diagnostic_write("EARLY_PANIC: ", 13);
++	diting_ramoops_diagnostic_write(msg, len);
++	diting_ramoops_diagnostic_write("\n", 1);
++	uint32_t scale = 3;
++	uint32_t x = 16;
++	uint32_t y = (uint32_t)((PE_state.video.v_height * 5) / 8) + 12;
++	for (const char *p = msg; *p && y + 16 * scale < (uint32_t)PE_state.video.v_height; p++) {
++		unsigned char ch = (unsigned char)*p;
++		if (ch == '\n' || x + 8 * scale >= (uint32_t)PE_state.video.v_width) {
++			x = 16;
++			y += 18 * scale;
++			if (ch == '\n') continue;
++		}
++		diting_early_fb_draw_glyph(x, y, scale, ch, 0xFFFFFFFFU, 0xFF800000U);
++		x += 8 * scale;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(diting_early_fb_va + (vm_offset_t)((PE_state.video.v_height * 5) / 8) * PE_state.video.v_rowBytes,
++	    (unsigned)((PE_state.video.v_height - (PE_state.video.v_height * 5) / 8) * PE_state.video.v_rowBytes));
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++#endif
++
+ void
+ console_write(char *str, int size)
+ {
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -580,6 +580,11 @@
+ 	pmap_first_pnum = (ppnum_t)atop(gDramBase);
+
+ 	arm_vm_init(xmaxmem, args);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	extern void diting_early_fb_band(uint32_t bgra, unsigned band);
++	extern void diting_early_fb_step(const char *tag);
++	diting_early_fb_band(0xFFFF8000U, 3);
++#endif
+
+ 	if (debug_boot_arg) {
+ 		patch_low_glo();
+@@ -593,6 +598,11 @@
+
+ 	extern int diting_ramoops_console_init(void);
+ 	(void)diting_ramoops_console_init();
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	extern void diting_early_panic_fastboot_init(void);
++	diting_early_panic_fastboot_init();
++	diting_early_fb_band(0xFF0000FFU, 4);
++#endif
+
+ 	/* Setup debugging output. */
+ 	const unsigned int serial_exists = serial_init();
+@@ -638,22 +648,38 @@
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_band(0xFFFFFFFFU, 5);
++	diting_early_fb_step("S1:printf");
++#endif
+
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S2:idle");
++#endif
+
+ #if __arm64__
+ #if DEBUG
+ 	dump_kva_space();
+ #endif
+ #endif
+
+ 	cpu_machine_idle_init(TRUE);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S3:plat");
++#endif
+
+ 	PE_init_platform(TRUE, &BootCpuData);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S4:dbg");
++#endif
+
+ 	/* Initialize the debug infrastructure system-wide and on the local core. */
+ 	pe_arm_debug_init_early(&BootCpuData);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S5:pio");
++#endif
+
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -671,18 +702,30 @@
+ #endif
+
+ 	cpu_timebase_init(TRUE);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S7:kpt");
++#endif
+
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+ 	kptimer_curcpu_up();
+ #endif /* KPERF */
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S8:cpu");
++#endif
+
+ 	PE_init_cpu();
+ #if __arm64__
+ 	apt_msg_init();
+ 	apt_msg_init_cpu();
+ #endif
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S9:fiq");
++#endif
+ 	fiq_context_init(TRUE);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S10:rnd");
++#endif
+
+
+ #if HIBERNATION
+@@ -700,6 +746,10 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	diting_early_fb_step("S11:mstart");
++	diting_early_fb_band(0xFF00FF80U, 6);
++#endif
+ 	machine_startup(args);
+ }
+
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1260,6 +1260,17 @@
+ 	read_lbr();
+ #endif
+
++#if defined(__arm64__) && (!defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE)
++	{
++		extern void diting_early_fb_panic(const char *msg);
++		char early_buf[EARLY_PANIC_BUFLEN];
++		va_list copy_args;
++		va_copy(copy_args, *panic_args);
++		vsnprintf(early_buf, EARLY_PANIC_BUFLEN, panic_format_str, copy_args);
++		va_end(copy_args);
++		diting_early_fb_panic(early_buf);
++	}
++#endif
+ 	/* For very early panics before XNU serial initialization. */
+ 	if (PE_kputc == NULL) {
+ 		char buf[EARLY_PANIC_BUFLEN];
+@@ -1380,6 +1390,10 @@
+ void __attribute__((noinline, optnone))
+ panic_spin_forever(void)
+ {
++#if defined(__arm64__) && (!defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE)
++	extern void diting_early_panic_fastboot_reset(void);
++	diting_early_panic_fastboot_reset();
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+@@ -1400,6 +1414,10 @@
+ static void
+ kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
+ {
++#if defined(__arm64__) && (!defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE)
++	extern void diting_early_panic_fastboot_reset(void);
++	diting_early_panic_fastboot_reset();
++#endif
+ 	if ((type == kPEPanicRestartCPU) && (debugger_flags & DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS)) {
+ 		PEHaltRestart(kPEPanicRestartCPUNoCallouts);
+ 	} else {
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -3003,5 +3003,9 @@
+ sleh_irq(arm_saved_state_t *state)
+ {
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	extern void diting_early_deadline_check(uint64_t pc, uint64_t lr);
++	diting_early_deadline_check(get_saved_state_pc(state), get_saved_state_lr(state));
++#endif
+ 	cpu_data_t * cdp __unused             = getCpuDatap();
+ #if MACH_ASSERT
+ 	int preemption_level = sleh_get_preemption_level();
+@@ -3035,5 +3039,9 @@
+ sleh_fiq(arm_saved_state_t *state)
+ {
++#if !defined(XNU_FILESET_REFERENCE) || !XNU_FILESET_REFERENCE
++	extern void diting_early_deadline_check(uint64_t pc, uint64_t lr);
++	diting_early_deadline_check(get_saved_state_pc(state), get_saved_state_lr(state));
++#endif
+ 	unsigned int type   = DBG_INTR_TYPE_UNKNOWN;
+ #if MACH_ASSERT
+ 	int preemption_level = sleh_get_preemption_level();

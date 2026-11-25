@@ -1,0 +1,73 @@
+diff --git a/libkern/libclosure/runtime.cpp b/libkern/libclosure/runtime.cpp
+index 9fe6e7e..a804c0b 100644
+--- a/libkern/libclosure/runtime.cpp
++++ b/libkern/libclosure/runtime.cpp
+@@ -315,6 +315,18 @@ _Block_copy(const void *arg)
+ 		result->descriptor =
+ 		    ptrauth_auth_and_resign(aBlock->descriptor, ptrauth_key_asda, oldDesc,
+ 		    ptrauth_key_asda, newDesc);
++#else
++		if (_Block_ptr_is_pac_signed(aBlock->descriptor)) {
++			uintptr_t oldDesc =
++			    ptrauth_blend_discriminator(
++				&aBlock->descriptor, _Block_descriptor_ptrauth_discriminator);
++			uintptr_t newDesc =
++			    ptrauth_blend_discriminator(
++				&result->descriptor, _Block_descriptor_ptrauth_discriminator);
++			result->descriptor =
++			    ptrauth_auth_and_resign(aBlock->descriptor, ptrauth_key_asda, oldDesc,
++			    ptrauth_key_asda, newDesc);
++		}
+ #endif
+ #endif
+ 
+@@ -323,7 +335,17 @@ _Block_copy(const void *arg)
+ 		result->flags |= BLOCK_NEEDS_FREE | 2; // logical refcount 1
+ 		_Block_call_copy_helper(result, aBlock);
+ 		// Set isa last so memory analysis tools see a fully-initialized object.
++#if __has_feature(ptrauth_calls)
++		if (_Block_ptr_is_pac_signed(aBlock->isa)) {
++			uintptr_t isaDisc = ptrauth_blend_discriminator(&result->isa, 0x6ae1U);
++			result->isa = ptrauth_sign_unauthenticated((void *)_NSConcreteMallocBlock,
++			    ptrauth_key_asda, isaDisc);
++		} else {
++			result->isa = _NSConcreteMallocBlock;
++		}
++#else
+ 		result->isa = _NSConcreteMallocBlock;
++#endif
+ 		return result;
+ 	}
+ }
+diff --git a/libkern/libkern/Block_private.h b/libkern/libkern/Block_private.h
+index d1f1a36..e8fc610 100644
+--- a/libkern/libkern/Block_private.h
++++ b/libkern/libkern/Block_private.h
+@@ -433,6 +433,13 @@ _Block_set_invoke_fn(struct Block_layout *block, void (*fn)(void *, ...))
+ 	_Block_set_function_pointer(block->invoke, fn);
+ }
+ 
++static inline bool
++_Block_ptr_is_pac_signed(const void *ptr)
++{
++	uintptr_t v = (uintptr_t)ptr;
++	return v != 0 && (v >> 48) != 0xffffU;
++}
++
+ static inline void *
+ _Block_get_descriptor(struct Block_layout *aBlock)
+ {
+@@ -440,6 +447,13 @@ _Block_get_descriptor(struct Block_layout *aBlock)
+ 	uintptr_t disc = ptrauth_blend_discriminator(
+ 		&aBlock->descriptor, _Block_descriptor_ptrauth_discriminator);
+ 	return ptrauth_auth_data(aBlock->descriptor, ptrauth_key_asda, disc);
++#elif __has_feature(ptrauth_calls)
++	if (_Block_ptr_is_pac_signed(aBlock->descriptor)) {
++		uintptr_t disc = ptrauth_blend_discriminator(
++			&aBlock->descriptor, _Block_descriptor_ptrauth_discriminator);
++		return ptrauth_auth_data(aBlock->descriptor, ptrauth_key_asda, disc);
++	}
++	return aBlock->descriptor;
+ #else
+ 	return aBlock->descriptor;
+ #endif

@@ -1,0 +1,26 @@
+# Board changes against the arm64e/xnu-12377 baseline.
+sm8475-secondary-affinity.patch
+sm8475-no-cntp-ctl.patch
+platform-sleep-hook.patch
+source-storage-runtime.patch
+diting-ramoops-console.patch
+csblob-identity-validity.patch
+iig-ptrauth-member-cast.patch
+diting-early-fb-trace.patch
+sm8475-no-iortc-wait.patch
+sm8475-secondary-cpu-bringup.patch
+ios27-4k-arm64e-userland.patch
+ios27-vmwait-dyld-pager-source-release.patch
+diting-ios27-ufs-systemos-data-mount.patch
+ios27-shared-region-size.patch
+ios27-sigp-reinit-assert.patch
+ios27-launchd-watchdog-policy.patch
+ios27-fast-cs-debug.patch
+ios27-data-init-from-os.patch
+ios27-mfb-uc-trace.patch
+ios27-gpu-addon-enable.patch
+ios27-block-descriptor-pac.patch
+ios27-diting-diagnostic-sysctl.patch
+ios27-ioworkloop-arm64e-active-eventsource.patch
+ios27-wifi-association-event.patch
+ios27-diting-cpu-idle.patch

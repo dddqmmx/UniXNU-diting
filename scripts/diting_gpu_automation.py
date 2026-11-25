@@ -17,7 +17,7 @@ PROFILES = dict(qualification=1, performance=2, all=3, ui=4)
 POLICIES = dict(auto=0, sysmem=1, gmem=2)
 STATES = {0: 'IDLE', 1: 'PENDING', 2: 'RUNNING', 3: 'PASSED', 4: 'FAILED',
           5: 'CANCELLED', 6: 'TIMED_OUT', 7: 'OVERFLOW'}
-RESULT_LIMIT = 131072
+RESULT_LIMIT = 1048576
 TRACE_HEADER = struct.Struct('<4I2Q')
 TRACE_RECORD = struct.Struct('<2Q2I12Q')
 UI_FRAME = struct.Struct('<IIQ')

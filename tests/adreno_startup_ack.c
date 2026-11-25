@@ -66,6 +66,7 @@ static int notify(void *cookie)
         if(s->mode==11) {s->time=99;return 0;}
         if(s->mode==14) {s->shared[4]=4;return 0;}
     }
+    if(s->mode==16 && s->commands==5) {reply(s,0x77,0);return 0;}
     if(s->mode==12)return 0;
     reply(s,0,0);return 0;
 }
@@ -95,7 +96,7 @@ int main(int argc,char **argv)
     d->attempted=d->fw_ready=d->hfi_ready=1;
     DitingPowerInputs input={0};DitingGpuPowerResult r;
     DitingGpuStatus result=DitingAdrenoGmuStartPower(d,&input,0,&r);
-    if(f.mode==1 || f.mode==2 || f.mode==10 || f.mode==13) {
+    if(f.mode==1 || f.mode==2 || f.mode==10 || f.mode==13 || f.mode==15 || f.mode==16) {
         assert(result==DitingGpuSuccess && d->power_started && !d->poisoned);
         assert(r.phase==5 && r.published==4 && r.acknowledged==4 && r.interrupt_clears==4);
         assert(!d->hfi.pending_header && (f.interrupt&0x80));
@@ -104,6 +105,20 @@ int main(int argc,char **argv)
             assert(DitingAdrenoGmuHoldGpu(d,&r)==DitingGpuSuccess && d->gpu_held);
             assert(r.command==10 && r.acknowledged==1 && r.interrupt_clears==1);
             assert(!(f.interrupt&(1u<<31)) && (f.interrupt&0x80));
+        }
+        if(f.mode==15) {
+            /* Invalid bounds rejected without poisoning. */
+            assert(DitingAdrenoGmuSetPowerLevel(d,0,2,&r)==DitingGpuArgument && !d->poisoned);
+            assert(DitingAdrenoGmuSetPowerLevel(d,14,2,&r)==DitingGpuArgument && !d->poisoned);
+            assert(DitingAdrenoGmuSetPowerLevel(d,3,12,&r)==DitingGpuArgument && !d->poisoned);
+            /* Valid runtime DCVS transitions (cmd 30): 324MHz (idx=3, bus=2) -> 900MHz (idx=13, bus=11). */
+            assert(DitingAdrenoGmuSetPowerLevel(d,3,2,&r)==DitingGpuSuccess && r.command==30 && r.acknowledged==1 && !d->poisoned);
+            assert(DitingAdrenoGmuSetPowerLevel(d,13,11,&r)==DitingGpuSuccess && r.command==30 && r.acknowledged==1 && !d->poisoned);
+        }
+        if(f.mode==16) {
+            /* Firmware error on runtime DCVS vote poisons device and rejects further votes. */
+            assert(DitingAdrenoGmuSetPowerLevel(d,1,2,&r)==DitingGpuIo && r.firmware_error==0x77 && d->poisoned);
+            assert(DitingAdrenoGmuSetPowerLevel(d,3,2,&r)==DitingGpuPoisoned);
         }
     } else {
         assert(result!=DitingGpuSuccess && d->poisoned && d->hfi.poisoned && !d->power_started);

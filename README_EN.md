@@ -4,6 +4,9 @@
 
 Format 2 device support for Redmi K50 Ultra, codename **diting**, Qualcomm **SM8475**. Main targets **iPadOS 18.7.10 (22H374)** from iPad7,11 / J171AP, Darwin 24.6.0 / XNU 11417.140.69. The board remains Diting. The earlier iOS16 implementation remains in Git history.
 
+An independent **iOS 27.2.1 (24B156)** arm64e target now has exact restore selection and isolated source/toolchain preparation.
+See the [27.2.1 port record](migration/ios27/README.zh.md) for build commands and outstanding binary ABI and hardware qualification.
+
 - [UniXNU tools](https://github.com/UniXNU/UniXNU), [Diting UEFI](https://github.com/Chengdong-Yu/uefi-pong)
 - Official [migration](https://unixnu.com/en/porting/migration) and [device repository](https://unixnu.com/en/porting/device-repository) guides
 - [Format 2 integration](migration/format2/README.zh.md), [OS migration](migration/ipados18/README.zh.md), [porting record](porting.toml)

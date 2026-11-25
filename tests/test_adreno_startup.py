@@ -49,6 +49,8 @@ class Startup(unittest.TestCase):
     def test_wait_failure_is_not_success(self):self.scenario(12)
     def test_oob_and_start_ack_use_separate_bits(self):self.scenario(13)
     def test_corrupt_queue_is_not_success(self):self.scenario(14)
+    def test_runtime_dcvs_power_level_vote_and_bounds(self):self.scenario(15)
+    def test_runtime_dcvs_firmware_error_poisons(self):self.scenario(16)
     def test_immutable_bounded_history(self):
         result=subprocess.run([str(self.out/'history')],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)

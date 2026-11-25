@@ -19,6 +19,36 @@ sys.path.insert(0,str(ROOT/'scripts'))
 import diting_paths
 
 
+def adapt_nw_sta(sta):
+    # WPA station nonces use Darwin's entropy source, not a timer/counter.
+    begin = sta.index('static void make_nonce(u8 *out) {')
+    end = sta.index('static void derive_ptk(void)', begin)
+    sta = sta[:begin] + 'extern void DitingWifiRandom(void *, size_t);\nstatic void make_nonce(u8 *out) { DitingWifiRandom(out, 32); }\n' + sta[end:]
+    # Linux ath11k is a non-MLO driver: ath11k_ops provides .bss_info_changed
+    # and leaves .link_info_changed/.vif_cfg_changed NULL. Match mac80211's
+    # drv_link_info_changed()/drv_vif_cfg_changed() fallback instead of
+    # branching through a NULL PAC-signed function pointer during connect.
+    ops_decl = 'static struct ieee80211_hw *g_hw; static const struct ieee80211_ops *g_ops; static struct ieee80211_vif *g_vif;'
+    if sta.count(ops_decl) != 1:
+        raise RuntimeError('nw_sta.c g_ops declaration changed')
+    if 'g_ops->link_info_changed(' not in sta or 'g_ops->vif_cfg_changed(' not in sta:
+        raise RuntimeError('nw_sta.c link_info_changed/vif_cfg_changed calls missing')
+    sta = sta.replace('g_ops->link_info_changed(', 'drv_link_info_changed(')
+    sta = sta.replace('g_ops->vif_cfg_changed(', 'drv_vif_cfg_changed(')
+    helpers = ops_decl + """
+static void drv_link_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+                                  struct ieee80211_bss_conf *info, u64 changed) {
+  if (g_ops->link_info_changed) g_ops->link_info_changed(hw, vif, info, changed);
+  else if (g_ops->bss_info_changed) g_ops->bss_info_changed(hw, vif, info, changed);
+}
+static void drv_vif_cfg_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u64 changed) {
+  if (g_ops->vif_cfg_changed) g_ops->vif_cfg_changed(hw, vif, changed);
+  else if (g_ops->bss_info_changed) g_ops->bss_info_changed(hw, vif, &vif->bss_conf, changed);
+}"""
+    sta = sta.replace(ops_decl, helpers, 1)
+    return sta
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--linux', type=Path, required=True)
@@ -129,11 +159,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     ath = 'core hal hal_tx hal_rx wmi mac reg htc qmi dp dp_tx dp_rx ce peer dbring hw pcic fw p2p mhi pci'.split()
     jobs = [(gen / (n + '.c'), out / ('ath11k_' + n + '.o'), []) for n in ath]
     jobs += [(mhi / (n + '.c'), out / ('mhi_' + n + '.o'), ['-I', str(mhi)]) for n in ('init', 'main', 'pm', 'boot')]
-    # WPA station nonces use Darwin's entropy source, not a timer/counter.
-    sta = (shared / 'src/nw_sta.c').read_text()
-    begin = sta.index('static void make_nonce(u8 *out) {')
-    end = sta.index('static void derive_ptk(void)', begin)
-    sta = sta[:begin] + 'extern void DitingWifiRandom(void *, size_t);\nstatic void make_nonce(u8 *out) { DitingWifiRandom(out, 32); }\n' + sta[end:]
+    sta = adapt_nw_sta((shared / 'src/nw_sta.c').read_text())
     (out / 'nw_sta_diting.c').write_text(sta)
     common_sources = ['src/nw_crypto.c', 'src/nw_mac80211.c', 'src/nw_net.c', 'src/nw_pci.c',
         'src/nw_qrtr.c', 'src/nw_qrtr_mhi.c', 'src/nw_sta.c', 'shim/src/lx_rt.c', 'shim/src/mhi_hook.c']

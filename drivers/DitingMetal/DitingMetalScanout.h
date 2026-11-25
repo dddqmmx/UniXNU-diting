@@ -3,7 +3,11 @@
  * No readback checks, test draws, physical-address API or fabricated fence. */
 #pragma once
 #include <pthread.h>
+#if DITING_GUEST_24B156
+#include "NativeGOPWire.h"
+#else
 #include "../DitingAdreno/DitingScanoutWire.h"
+#endif
 #include "GpuScanoutPresenter.h"
 extern "C" void native_bridge_metal_release_idle_imports(void);
 namespace ditingscanout {
@@ -15,6 +19,34 @@ static void *serve(void *opaque)
 {
     auto *context=static_cast<Context *>(opaque);unsigned copies=0,refusals=0;
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+#if DITING_GUEST_24B156
+    for(;;) {
+        @autoreleasepool {
+            NGPWait wait{500};NGPSwap swap{};size_t bytes=sizeof(swap);
+            auto status=context->call(context->connection,0x7000u+NGP_METHOD_WAIT_SWAP,&wait,sizeof(wait),&swap,&bytes);
+            if(unsigned(status)==0xe00002d6u)continue;
+            if(status || bytes!=sizeof(swap)) {
+                report("scanout frame wait stopped",status?:-1);return nullptr;
+            }
+            const size_t page=(size_t)getpagesize();
+            const size_t aligned=(size_t)((swap.bytes+page-1)&~(page-1));
+            auto result=(swap.format==NGP_BGRX8888 || swap.format==NGP_RGBA16F_LINEAR || swap.format==NGP_RGBA16F_ENCODED)
+                ? context->presenter->present({reinterpret_cast<void *>(swap.address),aligned,size_t(swap.stride),swap.width,swap.height,swap.reserved,swap.format})
+                : gpupresent::kBadFrame;
+            NGPComplete done{swap.sequence,result==gpupresent::kOk?0u:0xe00002bcu,0};bytes=0;
+            status=context->call(context->connection,0x7000u+NGP_METHOD_COMPLETE_SWAP,&done,sizeof(done),nullptr,&bytes);
+            if(status){report("GPU scanout complete failed",status);return nullptr;}
+            if(result!=gpupresent::kOk) {
+                if(++refusals<=3 || !(refusals&(refusals-1)))
+                    report("scanout copy refused; fallback to CPU",int(result));
+                context->presenter->resetSources();
+            } else {
+                refusals=0;
+                if(copies++<3)report("actual GPU scanout copy completed",0);
+            }
+        }
+    }
+#else
     for(;;) {
         bool resetImports=false;
         @autoreleasepool {
@@ -69,6 +101,7 @@ static void *serve(void *opaque)
             usleep(refusals?20000:1000);
         }
     }
+#endif
 }
 static void start(void *iokit,unsigned service,id<MTLDevice> device)
 {
@@ -92,6 +125,22 @@ static void start(void *iokit,unsigned service,id<MTLDevice> device)
     if(!open || !call || !map || !close)return;
     unsigned connection=0;auto status=open(service,mach_task_self(),0x4148,&connection);
     if(status){report("scanout connection unavailable; CPU display remains available",status);return;}
+#if DITING_GUEST_24B156
+    NGPMode mode{};size_t size=sizeof(mode);
+    status=call(connection,0x7000u+NGP_METHOD_MODE,nullptr,0,&mode,&size);
+    if(status || size!=sizeof(mode) || mode.version!=NGP_VERSION || mode.format!=NGP_BGRX8888 ||
+       !mode.width || !mode.height || mode.width>16384 || mode.height>16384 ||
+       mode.stride<mode.width*4 || mode.bytes<mode.stride*mode.height) {
+        close(connection);report("scanout mode refused",status?:-1);return;
+    }
+    uint64_t address=0,length=0;
+    status=map(connection,0x5343u,mach_task_self(),&address,&length,0x101);
+    if(status || !address || length<mode.bytes){close(connection);report("scanout mapping refused",status?:-1);return;}
+    const size_t page=(size_t)getpagesize();
+    const size_t aligned=(size_t)((mode.bytes+page-1)&~(page-1));
+    auto *presenter=new gpupresent::Presenter(device,{reinterpret_cast<void *>(address),aligned,
+        size_t(mode.stride),uint32_t(mode.width),uint32_t(mode.height)});
+#else
     DitingScanoutModeInfo mode{};size_t size=sizeof(mode);
     status=call(connection,DitingScanoutMode,nullptr,0,&mode,&size);
     if(status || size!=sizeof(mode) || (mode.version!=1 && mode.version!=2) || mode.format!=DitingScanoutBgra ||
@@ -104,6 +153,7 @@ static void start(void *iokit,unsigned service,id<MTLDevice> device)
     if(status || !address || length<mode.bytes){close(connection);report("scanout mapping refused",status?:-1);return;}
     auto *presenter=new gpupresent::Presenter(device,{reinterpret_cast<void *>(address),size_t(mode.bytes),
         size_t(mode.stride),uint32_t(mode.width),uint32_t(mode.height)});
+#endif
     if(!presenter->ready()) {
         // The import can own pinned memory even when creation fails. Keep its
         // connection/backing for teardown rather than silently recycle it.

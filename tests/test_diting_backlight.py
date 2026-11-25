@@ -54,6 +54,15 @@ class BacklightTests(unittest.TestCase):
     def test_retired_ack_errors_preserve_unrelated_display_faults(self):
         self.run_case('errors')
 
+    def test_latched_ack_error_requires_zero_write_clear(self):
+        self.run_case('latched-ack')
+
+    def test_wake_policy_restores_cached_brightness_and_honors_enable(self):
+        self.run_case('wake-policy')
+
+    def test_dsi_command_error_retries_once_when_published(self):
+        self.run_case('retry-error')
+
     def test_display_power_and_timing_changes_survive_command(self):
         self.run_case('display-owner')
 

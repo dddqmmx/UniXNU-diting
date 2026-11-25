@@ -3,6 +3,9 @@
 Redmi K50 至尊版（`diting` / Qualcomm SM8475）的 UniXNU 格式 2 设备仓库。目标系统为
 **iPadOS 18.7.10（22H374）/ Darwin 24.6.0**，系统输入为 iPad7,11 / J171AP。
 
+新增 **iOS 27.2.1（24B156）** 独立 arm64e 适配目标。精确还原包选择、公开源码基线、
+隔离工具链与构建入口见 [iOS 27.2.1 适配记录](migration/ios27/README.zh.md)；整机运行尚未验收。
+
 - 核心构建工具：[UniXNU](https://github.com/UniXNU/UniXNU)
 - 固件：仓库内 `platform-firmware/ditingPkg` 的 FDF 内嵌 `sm8475-xiaomi-diting.dtb`；外部 `uefi-diting` 开发树只作参考，其旧 FDF 可能仍内嵌 Nothing Phone (2) 的 DTB
 - 官方说明：[仓库迁移](https://unixnu.com/zh/porting/migration)、[设备仓库](https://unixnu.com/zh/porting/device-repository)、

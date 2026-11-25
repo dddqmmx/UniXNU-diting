@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <notify.h>
 #include "touch.h"
+#include "DitingKeyboardHost.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -1985,8 +1987,35 @@ static void keyboard_defaults(void)
     fprintf(stderr,"Diting keyboard: native Pinyin/English/emoji defaults saved=%u\n",saved);
 }
 
+#include "keyboard_compat18.h"
+
 static bool keyboard_native_scheduled;
 static bool keyboard_phone_installed;
+static bool keyboard_traits_installed;
+static unsigned keyboard_factory_mask;
+static id keyboard_phone_layout_file(id self,SEL selector)
+{(void)self;(void)selector;return (id)CFSTR("KBLayouts_iPhone.dat");}
+static void keyboard_phone_factories(void)
+{
+    if(keyboard_factory_mask==3)return;
+    struct stat st={0};
+    if(lstat("/System/Library/PrivateFrameworks/TextInputUI.framework/KBLayouts_iPhone.dat",&st) ||
+       !S_ISREG(st.st_mode) || st.st_uid || st.st_size<32 || st.st_size>(8<<20))return;
+    // The stock 22H374 factory queries MobileGestalt DeviceClass and falls
+    // back to KBLayouts_iPad.dat. UIDevice's phone idiom does not select
+    // this resource. Use the matching phone layouts installed by the port.
+    const char *classes[]={"TUIKeyboardLayoutFactory","TIKeyboardLayoutFactory"};
+    const char *selectors[]={"layoutsFileNameForDeviceClass","layoutsFileName"};
+    for(unsigned i=0;i<2;++i) {
+        if(keyboard_factory_mask&(1u<<i))continue;
+        Class cls=objc_lookUpClass(classes[i]);SEL selector=sel_registerName(selectors[i]);
+        Method method=class_getClassMethod(cls,selector);
+        if(!method_abi(method,"@",0,""))continue;
+        class_replaceMethod(object_getClass((id)cls),selector,(IMP)keyboard_phone_layout_file,method_getTypeEncoding(method));
+        keyboard_factory_mask|=1u<<i;
+        fprintf(stderr,"Diting keyboard: %s %s native phone layout file selected\n",getprogname(),classes[i]);
+    }
+}
 static void keyboard_retire_old_images(void)
 {
     const char *marker="/private/var/mobile/Library/Caches/.diting-keyboard-phone152";
@@ -2013,17 +2042,27 @@ static long long keyboard_phone_idiom(id self,SEL selector)
 {(void)self;(void)selector;return 0; /* UIUserInterfaceIdiomPhone */}
 static void keyboard_phone_image(const struct mach_header *header,intptr_t slide)
 {
-    (void)header;(void)slide;
+    keyboard_compat_image(header,slide);
+    keyboard_phone_factories();
+    if(!keyboard_traits_installed) {
+        Class traits=objc_lookUpClass("UIKBScreenTraits");
+        SEL idiom=sel_registerName("idiom");
+        Method method=class_getInstanceMethod(traits,idiom);
+        if(method_abi(method,"q",0,"")) {
+            class_replaceMethod(traits,idiom,(IMP)keyboard_phone_idiom,method_getTypeEncoding(method));
+            keyboard_traits_installed=true;
+            fprintf(stderr,"Diting keyboard: %s native phone screen traits selected\n",getprogname());
+        }
+    }
     if(keyboard_phone_installed)return;
     Class cls=objc_lookUpClass("UIDevice");
     Method method=cls?class_getInstanceMethod(cls,sel_registerName("userInterfaceIdiom")):NULL;
     if(!method_abi(method,"q",0,""))return;
-    // InputUI is a separate native process: the SpringBoard-only phone
-    // adapter never reached its keyboard/number keyplane layout decisions.
-    // Use UIKit's phone layout/resources, not a coordinate/123-key emulation.
+    // Text field hosts render keys too. Keep their idiom consistent with
+    // InputUI and the installed native phone layout and image cache.
     method_setImplementation(method,(IMP)keyboard_phone_idiom);
     keyboard_phone_installed=true;
-    fprintf(stderr,"Diting keyboard: InputUI native phone idiom selected\n");
+    fprintf(stderr,"Diting keyboard: %s native phone idiom selected\n",getprogname());
 }
 static void keyboard_native_refresh(void *unused)
 {
@@ -2061,16 +2100,20 @@ static void keyboard_native_image(const struct mach_header *header,intptr_t slid
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,keyboard_native_refresh);
 }
 
+#include "keyboard_latency18.h"
+
 __attribute__((constructor)) static void diting_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
-    if(!strcmp(name,"InputUI")) {
+    keyboard_timing_start();
+    if(diting_keyboard_host(name)) {
         char product[32]={};size_t length=sizeof(product);
         if(!sysctlbyname("hw.product",product,&length,NULL,0) && !strcmp(product,"iPhone17,1"))
             _dyld_register_func_for_add_image(keyboard_phone_image);
-        return; // Do not import SpringBoard/status-bar/container hooks here.
     }
+    if(!strcmp(name,"InputUI") || !strcmp(name,"Spotlight"))
+        return; // These hosts only need keyboard compatibility.
     if(!strcmp(name,"Sileo")){sileo_directories();return;}
     if(!strcmp(name,"SpringBoard")) {
         brightness18_initial_preference();

@@ -3,6 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>platform-application</key><true/>
+    <key>com.apple.system-task-ports</key><true/>
     <key>com.apple.private.hid.client.event-dispatch</key><true/>
     <key>com.apple.private.hid.client.admin</key><true/>
     <key>com.apple.springboard.launchapplications</key><true/>

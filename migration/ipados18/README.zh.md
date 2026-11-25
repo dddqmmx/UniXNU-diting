@@ -1,12 +1,12 @@
 # Diting → iPadOS 18 迁移
 
-> 当前 Diting 交接状态（2026-11-17）：用户认为性能“已经很不错”，要求暂停GPU优化并提交、推送。
-> 手机保留临时services213，八核、匹配运行库与GMU/CP启动PASS，持久boot_b仍198。
-> 212颜色矩阵142项PASS，用户确认正常界面“闪烁已消失”；213自动UI功能3/4 PASS，物理120fps仍UNQUALIFIED。
-> 无活动测试或后台构建/采集。GPU优化与Wi-Fi工作暂停，用户恢复前不运行后续候选。
-> 最新入口：[services213暂停交接](交接-2026-11-17-services213-GPU优化暂停.md)。
-> services186基本触控和亮屏恢复的用户PASS保留于 [services186修复与验收](services186-st61y-touch.md)。
-> 下方 Pong 路径、设备身份与运行记录属于继承的迁移历史，不作为当前 Diting 的实机证据。
+> 当前 Diting 交接状态（2026-11-18）：用户要求停止键盘修复并整理交接，GPU优化与Wi-Fi开发继续暂停。
+> 最后匹配临时services226，八核、UI/GPU/Wi-Fi均stage6/error0，持久boot_b仍198；未刷boot_b或完整userdata。
+> 右侧全宽与左下globe截图已改善，输入仍积压，实际FAIL_INPUT_LATENCY；21583条trace、43样本、30动作无missing/skipped/drops，采集窗无MPS SIGABRT。
+> 末次worker job1/state3/quiescing0，无遗留构建/打包/采集。停止复核时CDC/Fastboot均未枚举，当前设备模式无法确认。
+> 用户恢复修复前不启动新候选或测试；完整布局/命中和物理120fps仍未验收。
+> 最新入口：[交接-2026-11-18-services226-键盘布局改善-延迟未解决.md](交接-2026-11-18-services226-键盘布局改善-延迟未解决.md)、[services214–226键盘记录](services214-216-keyboard-latency.md)。
+> services186基本触控及亮屏恢复PASS和213 GPU暂停记录保留为历史证据，下方Pong路径与设备身份不代表当前Diting状态。
 
 触控器已由本机 Recovery 确认为 ST61Y。[services186](services186-st61y-touch.md)
 修正协议、资源和共享投票，主机测试、内核链接和八核打包通过，基本触控及亮屏恢复已实机验收。

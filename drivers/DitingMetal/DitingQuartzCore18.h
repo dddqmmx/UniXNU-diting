@@ -5,7 +5,14 @@
 #include <mach-o/loader.h>
 static void ditingQuartzCore18DisplayPolicy()
 {
-#if DITING_GUEST_22H374
+#if DITING_GUEST_24B156
+    if(strcmp(getprogname(),"backboardd"))return;
+    setenv("CA_ALLOW_EDR_MIRRORING","0",1);
+    setenv("CA_FORCE_FP16_FRAMEBUFFER","0",1);
+    setenv("CA_DISPLAY_EDR_HEADROOM","1",1);
+    setenv("CA_FP16_MIN_HEADROOM","1e30",1);
+    report("24B156 8-bit compositor env installed",0);
+#elif DITING_GUEST_22H374
     if(strcmp(getprogname(),"backboardd"))return;
     setenv("CA_ALLOW_EDR_MIRRORING","0",1);
     setenv("CA_FORCE_FP16_FRAMEBUFFER","0",1);

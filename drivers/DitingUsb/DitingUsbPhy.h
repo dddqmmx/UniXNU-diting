@@ -31,6 +31,63 @@ static bool repeaterTransfer(bool read,uint8_t reg,uint8_t value=0,uint8_t *out=
  }
  return false;
 }
+static bool repeaterProbe(uint8_t &revision,uint8_t id[3]) {
+ return repeaterTransfer(true,0x13,0,&revision)&&repeaterTransfer(true,0x14,0,&id[0])&&
+        repeaterTransfer(true,0x15,0,&id[1])&&repeaterTransfer(true,0x16,0,&id[2])&&
+        !((!id[0]&&!id[1]&&!id[2])||(id[0]==255&&id[1]==255&&id[2]==255));
+}
+static bool spmiWait(Map &m,unsigned off) {
+ const uint64_t end=phyNow()+5;
+ do{uint32_t s=m.r(off+8);if(s&1u)return (s&0xfu)==1u;}while(phyNow()<end);
+ return false;
+}
+static bool releaseRepeaterResetGpio(uint8_t &revision,uint8_t id[3]) {
+ // Diting live DT: eusb2_repeater@4f reset-gpio = <pm8350c_gpios 7 0>,
+ // pm8350c is SPMI SID 2 pinctrl@8800 -> GPIO7 is peripheral 0x8e (PPID 0x28e).
+ // On cold boot without fastboot, ABL does not release PM8350c GPIO7.
+ Map spmiCore,spmiCfg,spmiObs,spmiCh;
+ bool ok=false;
+ do {
+  if(!spmiCore.open(0xc400000,0x3000)||!spmiCfg.open(0xc42d000,0x4000))break;
+  const unsigned ver=spmiCore.r(0),cnt=spmiCore.r(4)&0x7ffu;
+  if(ver<0x70000000u||ver>=0x80000000u||!cnt||cnt>1024)break;
+  unsigned apid=0xffffu,owner=0xffu;
+  for(unsigned n=0;n<cnt;++n) {
+   if(((spmiCore.r(0x2000+4*n)>>8)&0xfffu)==0x28eu) {
+    apid=n;owner=spmiCfg.r(4*n)&7u;break;
+   }
+  }
+  if(apid==0xffffu){IOLog("DitingUSB: PM8350c GPIO7 (0x28e) APID not found\n");break;}
+  if(owner!=0){IOLog("DitingUSB: PM8350c GPIO7 apid=%u owned by EE%u (not APPS)\n",apid,owner);break;}
+  if(!spmiObs.open(0xc440000,(apid*0x20+0x20+4095)&~size_t(4095))||
+     !spmiCh.open(0xc500000+uint64_t(apid)*0x1000,0x1000))break;
+  spmiObs.w(apid*0x20,(1u<<27)|(0x04u<<4));
+  uint8_t ptype=0;
+  if(spmiWait(spmiObs,apid*0x20))ptype=uint8_t(spmiObs.r(apid*0x20+0x18)&0xffu);
+  if(ptype!=0x10u){IOLog("DitingUSB: PM8350c GPIO7 unexpected type=0x%x\n",ptype);break;}
+  auto wr=[&](uint8_t reg,uint8_t val)->bool {
+   spmiCh.w(0x10,val);spmiCh.w(0,uint32_t(reg)<<4);return spmiWait(spmiCh,0);
+  };
+  // Configure per live DT eusb2_reset_ctrl_default (PMIC5 LV/MV GPIO):
+  // 0x41=VIN1, 0x42=NO_PULL(5), 0x45=CMOS|DRV2, 0x40=DIGITAL_INOUT(2), 0x46=EN(0x80).
+  if(!wr(0x41,0x01)||!wr(0x42,0x05)||!wr(0x45,0x02)||!wr(0x40,0x02)||!wr(0x46,0x80))break;
+  // Try HIGH first (RESET_N deasserted), then LOW; verify by real NXP I2C ID readback.
+  const uint8_t vals[2]={0x80u,0x00u};
+  for(unsigned i=0;i<2;++i) {
+   if(!wr(0x44,vals[i]))continue;
+   IOSleep(5);
+   if(repeaterProbe(revision,id)) {
+    IOLog("DitingUSB: cold-boot released PM8350c GPIO7 (apid=%u out=0x%x)\n",apid,vals[i]);
+    ok=true;break;
+   }
+  }
+ } while(false);
+ if(spmiCh.map)spmiCh.map->release();
+ if(spmiObs.map)spmiObs.map->release();
+ if(spmiCfg.map)spmiCfg.map->release();
+ if(spmiCore.map)spmiCore.map->release();
+ return ok;
+}
 static bool prepareBoardPhy() {
  if(!gcc.open(0x100000,0xa0000)||!usbDb.open(0x80860000,0x20000))return phyFail("GCC/cmd-db mapping");
  auto *copy=(uint8_t *)IOMallocData(0x20000);if(!copy)return phyFail("cmd-db copy");
@@ -51,7 +108,7 @@ static bool prepareBoardPhy() {
      !diting_rpmh_vote(resource.address+4,1)){ok=false;break;}
  }
  QcomRpmhResource xo={};
- if(ok)ok=!qcom_cmd_db_find(copy,0x20000,"xo.lvl",&xo)&&diting_rpmh_vote(xo.address,3);
+ if(ok)ok=!qcom_cmd_db_find(copy,0x20000,"xo.lvl",&xo)&&diting_rpmh_consumer_vote(DitingRpmhUsb,xo.address,3);
  IOFreeData(copy,0x20000);if(!ok)return phyFail("real USB regulator/XO request rejected");
  IOSleep(2);
  // No DWC3 read before its power domain and every required bus/UTMI clock.
@@ -103,12 +160,11 @@ static bool prepareBoardPhy() {
  if(geni_i2c_prepare(&repeater,&io,0x4f,&configuration)) {
   IOLog("DitingUSB: QUP5 inherited protocol/timing=%x\n",configuration);return phyFail("repeater I2C firmware/timing unavailable");
  }
- // An actual NXP response proves its inherited PM8350c GPIO7 reset has
- // released. Do not use guessed SPMI writes to force somebody else's GPIO.
+ // An actual NXP response proves its PM8350c GPIO7 reset has released.
+ // On cold boot without fastboot, explicitly release PM8350c GPIO7 (PPID 0x28e)
+ // if owned by APPS EE0 and re-verify via real NXP I2C revision/ID readback.
  uint8_t revision=0,id[3]={};
- if(!repeaterTransfer(true,0x13,0,&revision)||!repeaterTransfer(true,0x14,0,&id[0])||
-    !repeaterTransfer(true,0x15,0,&id[1])||!repeaterTransfer(true,0x16,0,&id[2])||
-    ((!id[0]&&!id[1]&&!id[2])||(id[0]==255&&id[1]==255&&id[2]==255)))
+ if(!repeaterProbe(revision,id) && !releaseRepeaterResetGpio(revision,id))
   return phyFail("NXP repeater not responding; reset remains unowned");
  // DT override cells are value,register. Select the device sequence; the
  // host-only TX overrides must not be applied to this CDC device endpoint.
@@ -119,7 +175,10 @@ static bool prepareBoardPhy() {
    return phyFail("NXP DT parameter rejected");
  }
  // The eUSB2 PHY is 0x088e3000, not the older FEMTO PHY at 0x088e2000.
- // Require released PHY/AHB resets before accessing this separate block.
+ // On cold boot without fastboot, deassert PHY/AHB resets if still asserted.
+ if(gcc.r(0x22000)&1u)gcc.w(0x22000,gcc.r(0x22000)&~1u);
+ if(gcc.r(0x7a000)&1u)gcc.w(0x7a000,gcc.r(0x7a000)&~1u);
+ IOSleep(2);
  if((gcc.r(0x22000)&1u)||(gcc.r(0x7a000)&1u))return phyFail("eUSB2/AHB reset still asserted");
  if(!usbPhy.open(0x88e3000,0x1000))return phyFail("eUSB2 mapping");
  // Nothing's 19.2 MHz XO program. Every write is masked and read back;

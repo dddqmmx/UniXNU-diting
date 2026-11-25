@@ -5,6 +5,18 @@
 #include "NativeGpuTestCommand.h"
 #include "../../DitingUsb/DitingUsbCommand.h"
 #include "../../DitingUsb/DitingUsbReply.h"
+#ifdef DITING_GUEST_24B156
+/* On iOS 27 MH_FILESET, avoid putting a 1 MiB static BSS buffer in native __DATA. */
+static IOLock *gpuTestLock;
+static IOLock *gpuTestLockAcquire() { return nullptr; }
+static IOReturn gpuTestMethod(uint32_t, const void *, size_t, void *, size_t) { return kIOReturnUnsupported; }
+extern "C" unsigned diting_gpu_test_text(const char *command, char *out, unsigned capacity) {
+    unsigned used = 0;
+    if (!command || !out || !capacity) return 0;
+    diting_usb_reply_add(out, capacity, &used, "GPUTEST schema=1 available=0 reason=ios27-minimal\n");
+    return used;
+}
+#else
 static DitingGpuTestState gpuTestState{};
 static IOLock *gpuTestLock;
 static IOLock *gpuTestLockAcquire() { return __atomic_load_n(&gpuTestLock, __ATOMIC_ACQUIRE); }
@@ -78,3 +90,4 @@ extern "C" unsigned diting_gpu_test_text(const char *command, char *out, unsigne
     }
     IOLockUnlock(lock); return used;
 }
+#endif

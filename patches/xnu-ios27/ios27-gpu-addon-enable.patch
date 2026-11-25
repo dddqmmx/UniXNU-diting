@@ -1,0 +1,44 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8164,6 +8164,9 @@
+ uint8_t native_owner_data_seed_sha256[32];
+ char native_owner_data_device_path[64];
+ 
++#endif
++
++#if 1
+ /* Boot-time read-only union views of owner-provided GPU addon content over sealed system directories, mounted after the Data mount and
+  * before launchd starts: the Adreno Metal plugin bundle over /System/Library/Extensions (the original Metal discovery loads
+  * /System/Library/Extensions/<MetalPluginName>.bundle) and an owner launchd job over /System/Library/LaunchDaemons (a process outside
+@@ -8618,7 +8621,7 @@
+ 	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
+ 	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
+ 	native_gpu_addon_mount(p, scratch, 0x400, extensions_source, sizeof(extensions_source), extensions_point,
+-	    sizeof(extensions_point), "/System/Library/Extensions/AGXMetalA10.bundle",
++	    sizeof(extensions_point), "/System/Library/Extensions",
+ 	    "/System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist", &native_gpu_addon_stage,
+ 	    &native_gpu_addon_status);
+ 	native_gpu_addon_mount(p, scratch, 0x600, daemons_source, sizeof(daemons_source), daemons_point, sizeof(daemons_point),
+@@ -8639,6 +8642,9 @@
+ 	native_ls_store_drop(p, scratch);
+ }
+ 
++#endif
++
++#if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+ /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
+  * them into the Data volume, where SystemAppMigrator installs them during the first-boot data migration; until then only the
+  * placeholders in /System/Library/AppPlaceholders exist and the widgets of those apps stay blank. The owner Data mount hides the OS
+@@ -9623,7 +9629,12 @@
+ 					printf("DITING_INIT: launchd disabled.plist len=%zu rc=%d\n", plen, perr);
+ 				}
+ 			}
+ 			diting_ios27_init_data_from_os(p, scratch);
++			native_gpu_addon_prepare(p, scratch);
++			printf("DITING_INIT: gpu-addon files=%d written=%d same=%d fail=%d err=%d ext=%d/%d\n",
++			    native_gpu_addon_files, native_gpu_addon_written, native_gpu_addon_same,
++			    native_gpu_addon_failed, native_gpu_addon_error,
++			    native_gpu_addon_stage, native_gpu_addon_status);
+ 		}
+ 	} else {
+ 		printf("DITING_INIT: Data UUID %s not found\n", data_uuid);

@@ -1,0 +1,47 @@
+schema_version = 1
+
+[target]
+profile = "ios-27.2.1-24B156"
+version = "27.2.1"
+build = "24B156"
+product = "iPhone18,2"
+device_class = "v54ap"
+variant = "Customer Erase Install (IPSW)"
+chip_id = 0x8150
+board_id = 0x0e
+kernel_darwin = "27.2.0"
+kernel_xnu = "13432.42.3"
+kernel_format = "MH_FILESET"
+kernel_arch = "arm64e"
+native_pac_device_qualified = false
+kernel_collection_device_qualified = false
+
+[upstream]
+repository = "https://github.com/UniXNU/UniXNU.git"
+revision = "519d80242a5028ee123447b01bc3b809baed565f"
+
+[[component]]
+name = "ArmCpu"
+kind = "driver"
+repository = "https://github.com/UniXNU/ArmCpu.git"
+revision = "5f3702697ed80fd2e98594de1af7e32b4b77b08b"
+
+[[component]]
+name = "ArmDTPlatform"
+kind = "driver"
+repository = "https://github.com/UniXNU/ArmDTPlatform.git"
+revision = "417ff95d6a6e8607ddea9309ec45c3bfd4a67c60"
+
+[[component]]
+name = "XnuPrelink"
+kind = "kit"
+repository = "https://github.com/UniXNU/XnuPrelink.git"
+revision = "440589b0c31625f17edf363e24b3c82c51c70bb9"
+patches = ["patches/components-ios27/xnuprelink-conservative-reference.patch"]
+
+[[component]]
+name = "DarwinBoot"
+kind = "driver"
+repository = "https://github.com/UniXNU/DarwinBoot.git"
+revision = "3c75734014cdab0acd9541e88057b7606ee7ae08"
+patches = ["patches/components-ios27/darwinboot-replace-in-ram.patch"]

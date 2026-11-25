@@ -25,9 +25,12 @@ IOMemoryMap *aopMap, *aopDoorbellMap;
 volatile uint8_t *rsc;
 volatile uint8_t *aop, *aopDoorbell;
 DitingRpmh::Controller controller;
+DitingRpmhAggregator rpmhAggregator;
 DitingQmp::Controller qmpController;
 unsigned traceCount;
 unsigned qmpTraceCount;
+volatile int32_t gDisplayOn = 1;
+volatile uint64_t gLastTouchUs = 0;
 
 void initLock(IOLock **slot) {
     if (__atomic_load_n(slot, __ATOMIC_ACQUIRE)) return;
@@ -152,6 +155,46 @@ extern "C" bool diting_rpmh_vote_many(const uint32_t *addresses, const uint32_t 
     }
     return result == DitingRpmh::Result::Ok;
 }
+extern "C" bool diting_rpmh_consumer_vote(DitingRpmhConsumer consumer, uint32_t address, uint32_t value) {
+    return diting_rpmh_consumer_vote_many(consumer, &address, &value, 1);
+}
+extern "C" bool diting_rpmh_consumer_vote_many(DitingRpmhConsumer consumer, const uint32_t *addresses,
+                                               const uint32_t *values, unsigned count) {
+    diting_rpmh_init();
+    if (!powerLock) return false;
+    IOLockLock(powerLock);
+    DitingRpmhAggPlan plan = {};
+    if (!diting_rpmh_agg_prepare(&rpmhAggregator, consumer, addresses, values, count, &plan)) {
+        IOLockUnlock(powerLock);
+        return false;
+    }
+    DitingRpmh::Result result = DitingRpmh::Result::Ok;
+    if (plan.hw_count > 0) {
+        result = DitingRpmh::Result::Layout;
+        if (mapped()) {
+            const DitingRpmh::Io io = {nullptr, readRaw, writeRaw, nowRaw, delayRaw, recordRaw};
+            result = controller.vote(io, plan.hw_addresses, plan.hw_values, plan.hw_count);
+        }
+    }
+    if (result == DitingRpmh::Result::Ok) {
+        diting_rpmh_agg_commit(&rpmhAggregator, &plan);
+    }
+    IOLockUnlock(powerLock);
+    if (result != DitingRpmh::Result::Ok) {
+        char line[192]; int n = snprintf(line, sizeof(line), "DITING RPMH: FAIL consumer=%u %s address=%x count=%u\n",
+            unsigned(consumer), DitingRpmh::reason(result), plan.hw_count ? plan.hw_addresses[0] : 0, plan.hw_count);
+        if (n > 0) { diting_ramoops_diagnostic_write(line, n < int(sizeof(line)) ? n : int(sizeof(line)) - 1); IOLog("%s", line); }
+    }
+    return result == DitingRpmh::Result::Ok;
+}
+extern "C" uint32_t diting_rpmh_consumer_active(uint32_t address) {
+    diting_rpmh_init();
+    if (!powerLock) return 0;
+    IOLockLock(powerLock);
+    const uint32_t active = diting_rpmh_agg_active(&rpmhAggregator, address);
+    IOLockUnlock(powerLock);
+    return active;
+}
 extern "C" bool diting_gcc_vote_update(uint32_t setMask, uint32_t clearMask) {
     if (setMask & clearMask) return false;
     initLock(&gccVoteLock);
@@ -199,4 +242,19 @@ extern "C" bool diting_scm_call_lock(void) {
 }
 extern "C" void diting_scm_call_unlock(void) {
     if(scmCallLock)IOLockUnlock(scmCallLock);
+}
+extern "C" void diting_power_set_display_on(int on) {
+    __atomic_store_n(&gDisplayOn, on ? 1 : 0, __ATOMIC_RELEASE);
+}
+extern "C" int diting_power_display_on(void) {
+    return __atomic_load_n(&gDisplayOn, __ATOMIC_ACQUIRE);
+}
+extern "C" void diting_power_note_touch(void) {
+    __atomic_store_n(&gLastTouchUs, now(), __ATOMIC_RELEASE);
+}
+extern "C" bool diting_power_touch_recent(uint64_t window_us) {
+    const uint64_t last = __atomic_load_n(&gLastTouchUs, __ATOMIC_ACQUIRE);
+    if (!last) return false;
+    const uint64_t cur = now();
+    return cur >= last && (cur - last) <= window_us;
 }

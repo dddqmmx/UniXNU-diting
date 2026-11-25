@@ -11,7 +11,14 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
+#include "DitingCpuFrequency.h"
+#ifdef DITING_GUEST_24B156
+#include "../DitingPower/DitingPlatformResources.h"
+#endif
 extern "C" uint64_t diting_cpu_idle_mach(unsigned int);
+extern "C" {
+volatile DitingCpuFrequencySnapshot diting_cpu_frequency_diagnostic={1,sizeof(DitingCpuFrequencySnapshot)};
+}
 namespace DitingCpuPolicy {
 struct Domain {
     unsigned first,count,cap_khz;
@@ -22,7 +29,12 @@ struct Domain {
 };
 static Domain domains[]={{0,4,1804800},{4,3,2496000},{7,1,2995200}};
 static IOMemoryMap *pdmem_map;
+#ifdef DITING_GUEST_24B156
+static unsigned mode=1,started;
+#else
 static unsigned mode=2,started;
+#endif
+static volatile uint32_t last_busy[3];
 static void stop() __attribute__((noreturn));
 static void stop()
 {thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
@@ -78,19 +90,44 @@ static unsigned highest(const Domain &d)
     for(unsigned i=0;i<d.levels;++i)if(d.khz[i])selected=i;
     return selected;
 }
+static void publish_frequency()
+{
+    auto &out=diting_cpu_frequency_diagnostic;
+    __atomic_fetch_add(&out.sequence,1,__ATOMIC_ACQ_REL);
+    uint64_t stamp=0;absolutetime_to_nanoseconds(mach_absolute_time(),&stamp);
+    out.timestamp_ns=stamp;out.mode=mode;
+    for(unsigned i=0;i<3;++i) {
+        const Domain &d=domains[i];auto &row=out.domains[i];
+        row.first=d.first;row.count=d.count;row.live=d.live;row.levels=d.levels;
+        row.enabled=d.live?d.regs[0]:0;
+        const bool readable=d.live && (row.enabled&1);
+        row.per_core=readable?d.regs[0xb0/4]&1:0;
+        row.domain_state=readable?d.regs[0x20/4]:0;
+        row.limit_status=readable?d.regs[0x30c/4]:0;
+        row.pdmem_index=readable?*d.pdmem:UINT32_MAX;
+        const unsigned top=highest(d);
+        row.highest_khz=top<40?d.khz[top]:0;
+        for(unsigned c=0;c<4;++c) {
+            const unsigned index=readable && c<(row.per_core?d.count:1)?d.regs[0x320/4+c]:UINT32_MAX;
+            row.request[c]=index;
+            row.request_khz[c]=index<d.levels?d.khz[index]:0;
+        }
+    }
+    __atomic_fetch_add(&out.sequence,1,__ATOMIC_RELEASE);
+}
 static void worker(void *,wait_result_t)
 {
     IOSleep(3000);
     auto memory=IODeviceMemory::withRange(0x17d09000,4096);
     if(memory){pdmem_map=memory->map(kIOMapAnywhere|kIOMapInhibitCache);memory->release();}
-    if(!pdmem_map){IOLog("Diting CPU: EPSS skipped: PDMEM unavailable\n");stop();}
+    if(!pdmem_map){IOLog("Diting CPU: EPSS skipped: PDMEM unavailable\n");publish_frequency();stop();}
     unsigned live=0;
     for(unsigned i=0;i<3;++i) {
         Domain &d=domains[i];
         if(prepare(d,i))++live;
         else if(d.map){d.map->release();d.map=nullptr;d.regs=nullptr;}
     }
-    if(!live){IOLog("Diting CPU: EPSS skipped: no valid native LUT\n");stop();}
+    if(!live){IOLog("Diting CPU: EPSS skipped: no valid native LUT\n");publish_frequency();stop();}
     if(mode==2) {
         for(auto &d:domains)if(d.live) {
             const unsigned selected=highest(d);
@@ -98,6 +135,7 @@ static void worker(void *,wait_result_t)
             IOLog("Diting CPU: CPU%u-%u fixed request %u kHz (LUT%u), hardware limits retained\n",
                 d.first,d.first+d.count-1,d.khz[selected],selected);
         }
+        publish_frequency();
         for(;;) {
             // No idle accounting or 32 ms governor in fixed mode. Only
             // restore a lost request; do not clear LMh status or interpret
@@ -107,13 +145,18 @@ static void worker(void *,wait_result_t)
                 if(!(d.regs[0]&1)){d.live=false;continue;}
                 request(d,highest(d));++live;
             }
+            publish_frequency();
             if(!live)stop();
         }
     }
     uint64_t idle[8];for(unsigned c=0;c<8;++c)idle[c]=diting_cpu_idle_mach(c);
     uint64_t stamp=mach_absolute_time();
     for(;;) {
+#ifdef DITING_GUEST_24B156
+        IOSleep(diting_power_display_on()?32:128);
+#else
         IOSleep(32);
+#endif
         const uint64_t now=mach_absolute_time(),elapsed=now-stamp;stamp=now;
         if(!elapsed)continue;
         unsigned busy[8]{};bool valid[8]{};
@@ -125,12 +168,14 @@ static void worker(void *,wait_result_t)
             }
             idle[c]=value;
         }
-        for(auto &d:domains)if(d.live) {
+        for(unsigned di=0;di<3;++di)if(domains[di].live) {
+            Domain &d=domains[di];
             unsigned load=0;bool sampled=false;
             for(unsigned c=d.first;c<d.first+d.count;++c)if(valid[c]) {
                 sampled=true;if(busy[c]>load)load=busy[c];
             }
             if(!sampled)continue;
+            __atomic_store_n(&last_busy[di],load,__ATOMIC_RELAXED);
             const unsigned current=d.regs[0x320/4];
             if(current>=d.levels){d.live=false;continue;}
             unsigned freq=d.khz[current];if(!freq)freq=d.cap_khz;
@@ -152,6 +197,7 @@ static void worker(void *,wait_result_t)
             d.down=0;
             request(d,selected);
         }
+        publish_frequency();
     }
 }
 static void start()
@@ -165,4 +211,38 @@ static void start()
     if(result==KERN_SUCCESS)thread_deallocate(thread);
     else IOLog("Diting CPU: optional EPSS worker unavailable %d\n",result);
 }
+}
+extern "C" unsigned diting_cpu_snapshot_text(char *out,unsigned capacity)
+{
+    if(!out || !capacity)return 0;
+    DitingCpuFrequencySnapshot snap={};
+    for(unsigned attempt=0;attempt<4;++attempt) {
+        const uint32_t seq1=__atomic_load_n(&diting_cpu_frequency_diagnostic.sequence,__ATOMIC_ACQUIRE);
+        if(seq1&1u)continue;
+        memcpy(&snap,const_cast<const DitingCpuFrequencySnapshot *>(&diting_cpu_frequency_diagnostic),sizeof(snap));
+        const uint32_t seq2=__atomic_load_n(&diting_cpu_frequency_diagnostic.sequence,__ATOMIC_ACQUIRE);
+        if(seq1==seq2)break;
+    }
+    unsigned used=0;
+    auto add=[&](const char *fmt,auto... args) {
+        if(used>=capacity-1)return;
+        const int n=snprintf(out+used,capacity-used,fmt,args...);
+        if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
+    };
+#ifdef DITING_GUEST_24B156
+    const int disp=diting_power_display_on();
+#else
+    const int disp=1;
+#endif
+    add("CPU policy mode=%u disp=%d seq=%u ts_ns=%llu\n",
+        snap.mode?snap.mode:DitingCpuPolicy::mode,disp,snap.sequence,(unsigned long long)snap.timestamp_ns);
+    for(unsigned i=0;i<3;++i) {
+        const auto &r=snap.domains[i];
+        const unsigned busy=__atomic_load_n(&DitingCpuPolicy::last_busy[i],__ATOMIC_RELAXED);
+        const unsigned hw_khz=(r.domain_state&255u)*19200u;
+        add("domain%u CPU%u-%u live=%u req=%ukHz(idx=%u) hw=%ukHz max=%ukHz busy=%u%% limit=0x%x\n",
+            i,r.first,r.count?r.first+r.count-1:r.first,r.live,
+            r.request_khz[0],r.request[0],hw_khz,r.highest_khz,busy,r.limit_status);
+    }
+    return used;
 }

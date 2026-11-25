@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "candidate": "services226-keyboard-dock-20261118-01",
+  "source_head": "2939b63c4ad4de7ab059d26bfca86557a4a314b6",
+  "source_state": "uncommitted keyboard changes and independent existing modifications preserved",
+  "status": "FAIL_INPUT_LATENCY",
+  "repair_stopped_by_user": true,
+  "recorded_utc": "2026-11-18T09:34:56.432148+00:00",
+  "diagnostic_status_original": "PASS_DIAGNOSTIC",
+  "acquisition": {
+    "started_utc": "2026-11-18T09:14:18.819454+00:00",
+    "finished_utc": "2026-11-18T09:16:18.385384+00:00",
+    "records": 21583,
+    "missing": 0,
+    "skipped": 0,
+    "kernel_drops": 0,
+    "sample_count": 43,
+    "action_count": 30
+  },
+  "result_bytes": 970147,
+  "runtime_installations": {
+    "gpu": {
+      "stage": 6,
+      "error": 0,
+      "written": 0,
+      "id": "f13c9a10-7f41-4810-903a-79711684be18"
+    },
+    "ui": {
+      "stage": 6,
+      "error": 0,
+      "written": 3,
+      "id": "48111809-3281-464a-b6d9-e7107fbb8ee2"
+    },
+    "wifi": {
+      "stage": 6,
+      "error": 0,
+      "written": 0,
+      "id": "58c90ec7-2665-43e6-8bda-722256e03a04"
+    }
+  },
+  "native_screen_points_per_mm": 0.0,
+  "panel_points_per_mm": 5.809523809523809,
+  "panel_physical_mm": [
+    70,
+    155
+  ],
+  "layout": "Full-width right-side keys and bottom globe visible in saved frames; full layout/hit testing unqualified",
+  "keyboard_latency": "FAIL_INPUT_BACKLOG",
+  "input_count_scope": "Last coherent process samples; not final delivery or proof of lost keys",
+  "main_threads": [
+    {
+      "name": "Spotlight",
+      "pid": 302,
+      "samples": 43,
+      "wall_seconds": 17.061845989,
+      "user_seconds": 15.136881,
+      "system_seconds": 1.130158,
+      "running_samples": 41,
+      "planned_key_touches": 16,
+      "last_sample_native_touch_down": 6,
+      "last_sample_native_touch_up": 6
+    },
+    {
+      "name": "Preferences",
+      "pid": 398,
+      "samples": 20,
+      "wall_seconds": 7.745088229,
+      "user_seconds": 6.276154,
+      "system_seconds": 0.857267,
+      "running_samples": 19,
+      "planned_key_touches": 8,
+      "last_sample_native_touch_down": 2,
+      "last_sample_native_touch_up": 2
+    }
+  ],
+  "application_crash_observed": false,
+  "application_crash_scope": "No MPS failure or SIGABRT recorded in the acquisition window; long-term stability unqualified",
+  "hardware_performance_pass": false,
+  "physical_present": "UNQUALIFIED",
+  "last_worker": {
+    "error": 0,
+    "daemon": 16,
+    "heartbeat_age_us": 29228,
+    "job": 1,
+    "state": 3,
+    "profile": 5,
+    "policy": 0,
+    "bytes": 970147,
+    "case": 64,
+    "stage": 9,
+    "worker_error": 0,
+    "created_us": 171831112,
+    "completed_us": 189719625,
+    "timeout_ms": 120000,
+    "quiescing": 0
+  },
+  "stop_check": {
+    "result": "FAIL",
+    "started_utc": "2026-11-18T09:28:09.589596+00:00",
+    "finished_utc": "2026-11-18T09:28:09.590235+00:00",
+    "error": "Expected one Diting CDC interface",
+    "connection_status": "NO_CDC_OR_FASTBOOT_VISIBLE",
+    "device_mode": "UNCONFIRMED",
+    "read_only": true
+  },
+  "boot_b_written": false,
+  "userdata_image_written": false,
+  "gpu_optimization": "PAUSED_BY_USER",
+  "build_running": false,
+  "package_running": false,
+  "host_collection_running": false,
+  "local_evidence": "diting-work/logs/diting/services226/keyboard-dock-20261118-01/keyboard-diagnosis-01",
+  "handoff": "交接-2026-11-18-services226-键盘布局改善-延迟未解决.md"
+}

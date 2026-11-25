@@ -8,6 +8,18 @@
 #include <dlfcn.h>
 #include <unistd.h>
 namespace ditingsurface {
+#if defined(DITING_GUEST_24B156)
+static void complete(std::vector<mach_port_t> &rights,bool failed) {
+    (void)rights;(void)failed;
+}
+static bool begin(NSMutableSet *textures,std::vector<mach_port_t> &rights) {
+    // 24B156 does not carry the Darwin24 IOCoreSurfaceRoot 0x504f4701 handoff
+    // selector; imported IOSurface coherency is handled by syncActiveImports
+    // (NativeAdrenoMethodSyncHostBatch/SyncHostRange) and GPU scanout completion.
+    (void)textures;(void)rights;
+    return true;
+}
+#else
 using Call=kern_return_t(*)(unsigned,unsigned,const uint64_t *,unsigned,uint64_t *,unsigned *);
 static unsigned connection;
 static Call call;
@@ -60,4 +72,5 @@ static bool begin(NSMutableSet *textures,std::vector<mach_port_t> &rights) {
     }
     return false;
 }
+#endif
 }

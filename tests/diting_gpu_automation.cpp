@@ -33,12 +33,21 @@ static void protocol(){
         char line[64];snprintf(line,sizeof(line),"gputest run %s %s",profile,policy);assert(Command::parse(line).op==Command::Run);
     }
     assert(Command::parse("gputest run ui auto").op==Command::Run);
+    assert(Command::parse("gputest run keyboard auto").op==Command::Run);
+    assert(Command::parse("gputest run keyboard auto").profile==DitingGpuTestKeyboard);
     assert(Command::parse("gputest cancel 4294967295").job==UINT32_MAX);
-    assert(Command::parse("gputest result 1 131072 1024").op==Command::Result);
+    char boundary[64];
+    snprintf(boundary,sizeof(boundary),"gputest result 1 %u %u",unsigned(DitingGpuTestResultBytes),unsigned(DitingGpuTestChunkBytes));
+    assert(Command::parse(boundary).op==Command::Result);
+    snprintf(boundary,sizeof(boundary),"gputest result 1 %u 1",unsigned(DitingGpuTestResultBytes)+1);
+    assert(Command::parse(boundary).op==Command::Invalid);
+    snprintf(boundary,sizeof(boundary),"gputest result 1 0 %u",unsigned(DitingGpuTestChunkBytes)+1);
+    assert(Command::parse(boundary).op==Command::Invalid);
     const char *bad[]={nullptr,""," gputest status","gputest status ","gputest  status","gputest\tstatus",
-        "gputest run ui sysmem","gputest run ui gmem","gputest run all shell","gputest run shell auto",
+        "gputest run ui sysmem","gputest run ui gmem","gputest run keyboard sysmem","gputest run keyboard gmem",
+        "gputest run all shell","gputest run shell auto",
         "gputest cancel 0","gputest cancel -1","gputest cancel +1","gputest cancel 4294967296",
-        "gputest result 1 131073 1","gputest result 1 0 1025","gputest result 1 0 0",
+        "gputest result 1 0 0",
         "gputest result 1 0x1 1","gputest status;reboot","gputest status\nreboot", "gputest run all auto extra"};
     for(const auto *line:bad)assert(Command::parse(line).op==Command::Invalid);
     char too_long[65];memset(too_long,'1',64);too_long[64]=0;assert(Command::parse(too_long).op==Command::Invalid);
@@ -48,6 +57,9 @@ static void lifecycle(){
     assert(state.start(3,0,1000000)==State::Unavailable);
     assert(state.poll(0,1000000,job)==State::Argument);ready(state);
     assert(state.start(4,1,1000000)==State::Argument);
+    assert(state.start(DitingGpuTestKeyboard,DitingGpuTestGmem,1000000)==State::Argument);
+    assert(state.start(DitingGpuTestKeyboard,DitingGpuTestSysmem,1000000)==State::Argument);
+    assert(state.start(DitingGpuTestKeyboard+1,DitingGpuTestAuto,1000000)==State::Argument);
     assert(state.start(3,0,1000001)==State::Ok);const auto id=state.request.job;
     assert(state.start(1,1,1000002)==State::Busy);
     assert(state.poll(32,1000002,job)==State::Busy);
@@ -64,6 +76,9 @@ static void lifecycle(){
     assert(state.read(id,0,1,&data,&got)==State::Stale);
     state.request.job=UINT32_MAX;state.state=DitingGpuTestPassed;
     assert(state.start(1,0,1000007)==State::Ok&&state.request.job==1);
+    state.state=DitingGpuTestPassed;
+    assert(state.start(DitingGpuTestKeyboard,DitingGpuTestAuto,1000008)==State::Ok);
+    assert(state.request.profile==DitingGpuTestKeyboard&&state.request.policy==DitingGpuTestAuto);
 }
 static void quiescence(){
     State state{};ready(state);assert(state.start(3,0,1000000)==State::Ok);ready(state);
@@ -84,11 +99,18 @@ static void quiescence(){
 }
 static void overflow(){
     State state{};ready(state);assert(state.start(3,0,1000000)==State::Ok);ready(state);
-    for(unsigned i=0;i<128;++i){auto chunk=update(state,1024);assert(state.append(31,chunk,1000001+i)==State::Ok);}
-    auto extra=update(state,1);assert(state.append(31,extra,1000200)==State::Full);
-    assert(state.state==DitingGpuTestOverflow&&state.quiescing&&state.used==131072);
-    assert(state.start(1,0,1000201)==State::Busy);
-    auto finished=update(state,0,DitingGpuTestFailed);assert(state.append(31,finished,1000202)==State::Ok);
+    static_assert(DitingGpuTestResultBytes%DitingGpuTestChunkBytes==0,"whole result chunks");
+    const unsigned chunks=DitingGpuTestResultBytes/DitingGpuTestChunkBytes;
+    for(unsigned i=0;i<chunks;++i){auto chunk=update(state,DitingGpuTestChunkBytes);assert(state.append(31,chunk,1000001+i)==State::Ok);}
+    const uint64_t full_time=1000001+chunks;
+    auto extra=update(state,1);assert(state.append(31,extra,full_time)==State::Full);
+    assert(state.state==DitingGpuTestOverflow&&state.quiescing&&state.used==DitingGpuTestResultBytes);
+    const uint8_t *data=nullptr;uint32_t got=0;
+    assert(state.read(state.request.job,DitingGpuTestResultBytes-1,1,&data,&got)==State::Ok&&got==1&&data[0]==255);
+    assert(state.read(state.request.job,DitingGpuTestResultBytes,1,&data,&got)==State::Ok&&got==0);
+    assert(state.read(state.request.job,DitingGpuTestResultBytes+1,1,&data,&got)==State::Argument);
+    assert(state.start(1,0,full_time+1)==State::Busy);
+    auto finished=update(state,0,DitingGpuTestFailed);assert(state.append(31,finished,full_time+2)==State::Ok);
     assert(!state.quiescing&&state.state==DitingGpuTestOverflow);
 }
 static void replacement(){

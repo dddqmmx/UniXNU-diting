@@ -1,0 +1,18 @@
+diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
+--- a/scripts/build-xnu-4k-baseline.sh
++++ b/scripts/build-xnu-4k-baseline.sh
+@@ -76,5 +76,14 @@
+     SYSCTL_HW_PHYSICALCPU="$(nproc)" SYSCTL_HW_LOGICALCPU="$(nproc)"
+     LD_KERNEL_LIBS="$ROOT/.cache/fakeroot/usr/local/lib/kernel/libcc_kext.a")
++  if [ -n "${UNIXNU_KERNEL_LD:-}" ]; then
++    test -x "$UNIXNU_KERNEL_LD"
++    PRIVATE_KERNEL_LD=$(python3 - "$CLT_PREFIX/bin/clang" "$UNIXNU_KERNEL_LD" <<'PY_LD'
++import shlex, sys
++print(shlex.join([sys.argv[1], '-fuse-ld=' + sys.argv[2]]))
++PY_LD
++    )
++    XNU_HOST_MAKE_ARGS+=("LD=$PRIVATE_KERNEL_LD")
++  fi
+ fi
+ # The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
+ # link.filelist for the archive builders that run after it, so it links without their archives.

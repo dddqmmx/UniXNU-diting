@@ -15,6 +15,7 @@ Redmi K50 Ultra（diting / Qualcomm SM8475）的 ARM CPU provider：GICv3 中断
 ## 说明
 
 - 启动参数 `diting_cpu_policy`：0 关闭投票，1 负载调频，2（默认）每域保持最高的非 boost 请求。EPSS/LMh 仍负责实际电压、频率与热限。
+- `diting_cpu_frequency_diagnostic` 提供三个域的有序 RAM 快照：原生 LUT 上限、每核 PERF_STATE 请求、PDMEM、DOMAIN_STATE 与限频状态。USB 可读此快照，无需直接访问 MMIO；请求和 DOMAIN_STATE 不能代替实际时钟测量。
 - 编译：`scripts/build-diting-armcpu*.py` 以 `DITING_DARWIN_MAJOR` 选择 Darwin 22 或 24 接口。
 
 构建、接口与组件目录见 [UniXNU 组件目录](https://unixnu.com/reference/components)，板级输入与编译入口在 [UniXNU-diting](https://github.com/Chengdong-Yu/UniXNU-pong)。

@@ -7,9 +7,9 @@
 enum {
     DitingGpuTestVersion = 1, DitingGpuTestPoll = 0x7110,
     DitingGpuTestReport = 0x7111, DitingGpuTestMark = 0x7112, DitingGpuTestReadMode = 0x7113,
-    DitingGpuTestChunkBytes = 1024, DitingGpuTestResultBytes = 131072,
+    DitingGpuTestChunkBytes = 1024, DitingGpuTestResultBytes = 1048576,
     DitingGpuTestQualification = 1, DitingGpuTestPerformance = 2, DitingGpuTestAll = 3,
-    DitingGpuTestUI = 4, DitingGpuTestOpenType = 0x4756,
+    DitingGpuTestUI = 4, DitingGpuTestKeyboard = 5, DitingGpuTestOpenType = 0x4756,
     DitingGpuTestAuto = 0, DitingGpuTestSysmem = 1, DitingGpuTestGmem = 2,
     DitingGpuTestIdle = 0, DitingGpuTestPending = 1, DitingGpuTestRunning = 2,
     DitingGpuTestPassed = 3, DitingGpuTestFailed = 4, DitingGpuTestCancelled = 5,

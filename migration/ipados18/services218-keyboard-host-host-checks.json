@@ -1,0 +1,155 @@
+{
+  "status": "PASS",
+  "checks": [
+    {
+      "argv": [
+        "bash",
+        "-n",
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/build-local.sh"
+      ],
+      "exit": 0,
+      "output": ""
+    },
+    {
+      "argv": [
+        "bash",
+        "-n",
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/package-local.sh"
+      ],
+      "exit": 0,
+      "output": ""
+    },
+    {
+      "argv": [
+        "c++",
+        "-std=c++17",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "tests/diting_gpu_automation.cpp",
+        "-o",
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test"
+      ],
+      "exit": 0,
+      "output": ""
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "protocol"
+      ],
+      "exit": 0,
+      "output": "PASS protocol\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "lifecycle"
+      ],
+      "exit": 0,
+      "output": "PASS lifecycle\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "quiescence"
+      ],
+      "exit": 0,
+      "output": "PASS quiescence\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "overflow"
+      ],
+      "exit": 0,
+      "output": "PASS overflow\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "replacement"
+      ],
+      "exit": 0,
+      "output": "PASS replacement\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "broker"
+      ],
+      "exit": 0,
+      "output": "PASS broker\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "oracle"
+      ],
+      "exit": 0,
+      "output": "PASS oracle\n"
+    },
+    {
+      "argv": [
+        "/home/dddqmmx/UniXNU/diting-work/tmp/services218/keyboard-host-20261117-01/keyboard-broker-host-test",
+        "cadence"
+      ],
+      "exit": 0,
+      "output": "PASS cadence\n"
+    },
+    {
+      "argv": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_gpu_automation.py",
+        "-v"
+      ],
+      "exit": 0,
+      "output": "GPU automatic test: auto/qualification\n{\"assessment\": \"FAIL\", \"execution\": \"ERROR\", \"target_fps\": 120, \"hardware_performance_pass\": false}\nGPU automatic test: auto/qualification\nGPU automatic test: sysmem/qualification\n{\"assessment\": \"FAIL\", \"execution\": \"COMPLETE\", \"target_fps\": 120, \"hardware_performance_pass\": false}\ntest_backend_policy_shader_and_sample_identity_are_mandatory (test_gpu_automation.AutomationTests.test_backend_policy_shader_and_sample_identity_are_mandatory) ... ok\ntest_case_markers_join_worker_pid_and_keep_cp_and_cpu_clocks_separate (test_gpu_automation.AutomationTests.test_case_markers_join_worker_pid_and_keep_cp_and_cpu_clocks_separate) ... ok\ntest_changed_endpoints_and_60hz_motion_cannot_qualify_continuous_120hz_animation (test_gpu_automation.AutomationTests.test_changed_endpoints_and_60hz_motion_cannot_qualify_continuous_120hz_animation) ... ok\ntest_chunk_framing_job_offset_base64_and_size_are_checked (test_gpu_automation.AutomationTests.test_chunk_framing_job_offset_base64_and_size_are_checked) ... ok\ntest_ci_reports_count_infrastructure_errors_and_incomplete_evidence (test_gpu_automation.AutomationTests.test_ci_reports_count_infrastructure_errors_and_incomplete_evidence) ... ok\ntest_cli_rejects_shell_paths_unsupported_policy_and_large_chunks (test_gpu_automation.AutomationTests.test_cli_rejects_shell_paths_unsupported_policy_and_large_chunks) ... ok\ntest_default_matrix_contains_each_required_case (test_gpu_automation.AutomationTests.test_default_matrix_contains_each_required_case) ... ok\ntest_duplicate_json_bad_summary_and_forged_physical_claim_are_rejected (test_gpu_automation.AutomationTests.test_duplicate_json_bad_summary_and_forged_physical_claim_are_rejected) ... ok\ntest_event_only_linear_transfer_and_shadow_iosurface_are_qualified_separately (test_gpu_automation.AutomationTests.test_event_only_linear_transfer_and_shadow_iosurface_are_qualified_separately) ... ok\ntest_host_import_requires_original_storage_metadata_and_six_draw_loads (test_gpu_automation.AutomationTests.test_host_import_requires_original_storage_metadata_and_six_draw_loads) ... ok\ntest_host_p95_failure_preserves_original_device_summary (test_gpu_automation.AutomationTests.test_host_p95_failure_preserves_original_device_summary) ... ok\ntest_independent_input_stream_and_observer_identity_are_required (test_gpu_automation.AutomationTests.test_independent_input_stream_and_observer_identity_are_required) ... ok\ntest_late_observer_is_incomplete_instead_of_a_fps_measurement (test_gpu_automation.AutomationTests.test_late_observer_is_incomplete_instead_of_a_fps_measurement) ... ok\ntest_legacy_coupled_observer_cannot_qualify_animation (test_gpu_automation.AutomationTests.test_legacy_coupled_observer_cannot_qualify_animation) ... ok\ntest_linear_fetch_and_reuse_require_executed_paths_and_every_pixel_check (test_gpu_automation.AutomationTests.test_linear_fetch_and_reuse_require_executed_paths_and_every_pixel_check) ... ok\ntest_ordinary_partial_render_has_event_load_and_draw_store_coverage (test_gpu_automation.AutomationTests.test_ordinary_partial_render_has_event_load_and_draw_store_coverage) ... ok\ntest_orphan_worker_retains_lease_after_supervisor_exit (test_gpu_automation.AutomationTests.test_orphan_worker_retains_lease_after_supervisor_exit) ... ok\ntest_partial_crash_records_are_kept_but_never_pass (test_gpu_automation.AutomationTests.test_partial_crash_records_are_kept_but_never_pass) ... ok\ntest_partial_render_requires_raw_storage_cycles_and_executed_draw_transfers (test_gpu_automation.AutomationTests.test_partial_render_requires_raw_storage_cycles_and_executed_draw_transfers) ... ok\ntest_partial_usb_timeout_cancels_only_owned_work_and_keeps_the_failure_report (test_gpu_automation.AutomationTests.test_partial_usb_timeout_cancels_only_owned_work_and_keeps_the_failure_report) ... ok\ntest_percentile_uses_full_fixed_sample_count_and_120fps_budget (test_gpu_automation.AutomationTests.test_percentile_uses_full_fixed_sample_count_and_120fps_budget) ... ok\ntest_pixel_guards_sync_and_ui_cannot_pass_on_missing_or_unchanged_evidence (test_gpu_automation.AutomationTests.test_pixel_guards_sync_and_ui_cannot_pass_on_missing_or_unchanged_evidence) ... ok\ntest_pty_matrix_continues_after_quiesced_worker_crash (test_gpu_automation.AutomationTests.test_pty_matrix_continues_after_quiesced_worker_crash) ... ok\ntest_real_owned_shaders_and_metallib_frontend_bounds (test_gpu_automation.AutomationTests.test_real_owned_shaders_and_metallib_frontend_bounds) ... ok\ntest_real_process_success_crash_timeout_cancel_overflow_and_fd_cleanup (test_gpu_automation.AutomationTests.test_real_process_success_crash_timeout_cancel_overflow_and_fd_cleanup) ... ok\ntest_real_state_command_parser_broker_and_cpu_oracle (test_gpu_automation.AutomationTests.test_real_state_command_parser_broker_and_cpu_oracle) ... ok\ntest_resettable_read_pointer_counter_is_never_te_frequency (test_gpu_automation.AutomationTests.test_resettable_read_pointer_counter_is_never_te_frequency) ... ok\ntest_timely_observer_cannot_hide_burst_or_late_input (test_gpu_automation.AutomationTests.test_timely_observer_cannot_hide_burst_or_late_input) ... ok\ntest_timestamp_cadence_calibration_rejects_sparse_drift_and_incomplete_data (test_gpu_automation.AutomationTests.test_timestamp_cadence_calibration_rejects_sparse_drift_and_incomplete_data) ... ok\ntest_ui_frame_bytes_motion_ranges_and_clock_bounds_are_required (test_gpu_automation.AutomationTests.test_ui_frame_bytes_motion_ranges_and_clock_bounds_are_required) ... ok\n\n----------------------------------------------------------------------\nRan 30 tests in 6.625s\n\nOK\n"
+    },
+    {
+      "argv": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_diting_keyboard.py",
+        "-v"
+      ],
+      "exit": 0,
+      "output": "test_native_host_coverage_and_legacy_injection (test_diting_keyboard.KeyboardHostTests.test_native_host_coverage_and_legacy_injection) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.110s\n\nOK\n"
+    }
+  ],
+  "started_utc": "2026-11-17T02:38:09.918552+00:00",
+  "source_changes": [
+    "drivers/ArmCpu/DitingCpuFrequency.h",
+    "drivers/ArmCpu/DitingCpuPolicy.h",
+    "drivers/DitingAdreno/submit/NativeGpuTestProtocol.h",
+    "scripts/diting_gpu_automation.py",
+    "scripts/diting_gpu_test_build.py",
+    "patches/xnu-ipados18/series",
+    "patches/xnu-ipados18/zzzzzzzzzzzzzzzzzzzzzzzzz-diting-keyboard-host.patch",
+    "userland/DitingKeyboardHost.h",
+    "userland/gpu-test18.mm",
+    "userland/init.c",
+    "userland/keyboard-test18.h",
+    "userland/keyboard_latency18.h",
+    "userland/ui_compat18.c",
+    "tests/diting_gpu_automation.cpp",
+    "tests/diting_keyboard_host.c",
+    "tests/test_diting_keyboard.py"
+  ],
+  "rendering_sources_preserved": true,
+  "ui_library_updated": true,
+  "wifi_preserved": true,
+  "shared_cache_written": false
+}

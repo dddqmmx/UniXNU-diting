@@ -1,0 +1,116 @@
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -852,11 +852,7 @@
+ 	    vm_map_offset_t, s,
+ 	    vm_map_offset_t, e,
+ 	    vm_map_offset_t, lowest_unnestable_addr);
+-#if defined(__x86_64__)
+-	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint until the target exits.\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
+-#else
+-	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint almost permanently (until the shared region is re-slid).\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
+-#endif
++(void)m; (void)s; (void)e;
+ }
+ 
+ uint64_t
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -5986,11 +5986,6 @@
+ 	blob->csb_native4k_hash_count = count;
+ 	storage = 0;
+ 	os_atomic_inc(&cs_native4k_ready_blobs, relaxed);
+-	if (limit > CS_NATIVE4K_UNCACHED) {
+-		printf("DITING_CS: prepare limit=%lluMiB total_bytes=%lluMiB read_ticks=%llu hash_ticks=%llu\n",
+-		    (unsigned long long)(limit >> 20), (unsigned long long)(cs_native4k_bytes >> 20),
+-		    (unsigned long long)cs_native4k_read_ticks, (unsigned long long)cs_native4k_hash_ticks);
+-	}
+ 	error = 0;
+ out:
+ 	kfree_data(buffer, CS_NATIVE4K_CHUNK);
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9280,6 +9280,81 @@
+ 				int uerr = unlink(p, &ureq, &res);
+ 				printf("DITING_INIT: drop MobileGestalt cache rc=%d\n", uerr);
+ 			}
++			/* Write launchd disabled.plist when disable-watchdogd=1 / lite=1 is set. */
++			{
++				int dis_wd = 0, lite_mode = 0;
++				PE_parse_boot_argn("disable-watchdogd", &dis_wd, sizeof(dis_wd));
++				PE_parse_boot_argn("lite", &lite_mode, sizeof(lite_mode));
++				if (dis_wd == 1 || lite_mode == 1) {
++					static char plist[2048];
++					plist[0] = 0;
++					strlcat(plist, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>", sizeof(plist));
++					if (dis_wd == 1) {
++						strlcat(plist, "<key>com.apple.watchdogd</key><true/>", sizeof(plist));
++					}
++					if (lite_mode == 1) {
++						static const char *const jobs[] = {
++						    "com.apple.cameracaptured", "com.apple.identityservicesd",
++						    "com.apple.locationd", "com.apple.CommCenter",
++						    "com.apple.photoanalysisd", "com.apple.mediaanalysisd",
++						    "com.apple.mediastream.mstreamd", "com.apple.icloud.searchpartyd",
++						    "com.apple.findmy.findmybeaconingd", "com.apple.familycircled",
++						    "com.apple.financed", "com.apple.softwareupdateservicesd",
++						    "com.apple.ndoagent", "com.apple.biomesyncd",
++						    "com.apple.email.maild", "com.apple.amsengagementd",
++						    "com.apple.adid", "com.apple.eyereliefd",
++						    "com.apple.fairplayd.A2", "com.apple.passd",
++						    "com.apple.mobile.obliteration", "com.apple.coreduetd",
++						    "com.apple.PerfPowerServices", "com.apple.PerfPowerServicesExtended",
++						    "com.apple.perfpowermetricd", "com.apple.siriinferenced",
++						    "com.apple.siriknowledged", "com.apple.siriactionsd",
++						    "com.apple.duetexpertd", "com.apple.modelcatalogd"
++						};
++						for (unsigned ji = 0; ji < sizeof(jobs) / sizeof(jobs[0]); ++ji) {
++							strlcat(plist, "<key>", sizeof(plist));
++							strlcat(plist, jobs[ji], sizeof(plist));
++							strlcat(plist, "</key><true/>", sizeof(plist));
++						}
++					}
++					strlcat(plist, "</dict></plist>\n", sizeof(plist));
++					(void)diting_ios27_mkdir_parents(p, scratch, "/private/var/db/com.apple.xpc.launchd/");
++					int perr = copyout("/private/var/db/com.apple.xpc.launchd/disabled.plist", scratch + 0xc00, 53);
++					int pfd = -1;
++					if (!perr) {
++						struct open_args op = {.path = scratch + 0xc00, .flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, .mode = 0644};
++						perr = open(p, &op, &res);
++						if (!perr) pfd = res;
++					}
++					size_t plen = strlen(plist);
++					for (size_t sent = 0; !perr && pfd >= 0 && sent < plen; ) {
++						size_t piece = (plen - sent < 0x1f0) ? (plen - sent) : 0x1f0;
++						perr = copyout(plist + sent, scratch + 0x200, piece);
++						if (!perr) {
++							struct write_args wr = {.fd = pfd, .cbuf = scratch + 0x200, .nbyte = piece};
++							user_ssize_t written = 0;
++							perr = write(p, &wr, &written);
++							if (!perr && written != (user_ssize_t)piece) perr = EIO;
++						}
++						sent += piece;
++					}
++					if (pfd >= 0) {
++						struct fchown_args ow = {.fd = pfd, .uid = 0, .gid = 0};
++						struct fchmod_args cm = {.fd = pfd, .mode = 0644};
++						struct close_args cl = {.fd = pfd};
++						(void)fchown(p, &ow, &res);
++						(void)fchmod(p, &cm, &res);
++						(void)sys_close(p, &cl, &res);
++					}
++					if (!perr && copyout("/private/var/db/com.apple.xpc.launchd/disabled.migrated", scratch + 0xc00, 56) == 0) {
++						struct open_args mk = {.path = scratch + 0xc00, .flags = O_WRONLY | O_CREAT | O_NOFOLLOW, .mode = 0644};
++						if (open(p, &mk, &res) == 0) {
++							struct close_args cl = {.fd = res};
++							(void)sys_close(p, &cl, &res);
++						}
++					}
++					printf("DITING_INIT: launchd disabled.plist len=%zu rc=%d\n", plen, perr);
++				}
++			}
+ 		}
+ 	} else {
+ 		printf("DITING_INIT: Data UUID %s not found\n", data_uuid);

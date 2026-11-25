@@ -106,7 +106,7 @@ int diting_gpu_test_daemon(void) {
             usleep(200000); continue;
         }
         if (worker.job.flags & DitingGpuTestCancel) { usleep(200000); continue; }
-        if (worker.job.version != DitingGpuTestVersion || worker.job.profile < 1 || worker.job.profile > 4 ||
+        if (worker.job.version != DitingGpuTestVersion || worker.job.profile < 1 || worker.job.profile > DitingGpuTestKeyboard ||
             worker.job.policy > 2 || worker.job.width != 1220 || worker.job.height != 2712 ||
             worker.job.frames != 240 || worker.job.warmup != 24 || worker.job.timeout_ms != 120000) {
             worker.offset = 0; update(&worker, NULL, 0, DitingGpuTestFailed, EINVAL); usleep(200000); continue;

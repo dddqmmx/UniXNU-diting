@@ -1,0 +1,290 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -591,6 +591,9 @@
+
+ 	PE_consistent_debug_inherit();
+
++	extern int diting_ramoops_console_init(void);
++	(void)diting_ramoops_console_init();
++
+ 	/* Setup debugging output. */
+ 	const unsigned int serial_exists = serial_init();
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -521,8 +521,273 @@
+  * @param size The number of characters in `str` to print.
+  */
++#if defined(__arm64__)
++#define DITING_RAMOOPS_PHYS_BASE 0xa7000000ULL
++#define DITING_RAMOOPS_RESERVED_BYTES 0x400000U
++#define DITING_RAMOOPS_CONSOLE_BYTES 0x200000U
++#define DITING_RAMOOPS_HEADER_BYTES 12U
++#define DITING_RAMOOPS_MAGIC 0x43474244U
++
++struct diting_ramoops_header {
++	uint32_t sig;
++	uint32_t start;
++	uint32_t size;
++};
++
++static vm_offset_t diting_ramoops_base;
++static uint32_t diting_ramoops_start;
++static uint32_t diting_ramoops_size;
++static int diting_ramoops_busy;
++static uint32_t diting_d27l_size;
++static uint32_t diting_d27l_head;
++
++#define DITING_D27L_OFFSET 0x300000U
++#define DITING_D27L_STRIDE 0x8000U
++#define DITING_D27L_COPIES 12U
++#define DITING_D27L_CAPACITY 0x7800U
++#define DITING_D27L_MAGIC 0x4C373244U
++
++#define DITING_D27U_OFFSET 0x200000U
++#define DITING_D27U_SNAP_OFFSET 0x240000U
++#define DITING_D27U_BYTES 262144U
++#define DITING_D27U_CAPACITY (DITING_D27U_BYTES - 16U)
++#define DITING_D27U_MAGIC 0x55373244U
++
++struct diting_d27l_header {
++	uint32_t magic;
++	uint32_t size;
++	uint32_t seq;
++	uint32_t reserved;
++};
++
++static uint32_t diting_d27u_size;
++static uint32_t diting_d27u_head;
++static uint32_t diting_d27u_seq;
++
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++extern void CleanPoC_DcacheRegion_Force(vm_offset_t va, unsigned length);
++extern int diting_ufs_write_log_blocks(const void *buf, uint32_t bytes) __attribute__((weak_import));
++extern int diting_ufs_write_log_blocks_panic(const void *buf, uint32_t bytes) __attribute__((weak_import));
++
++static void
++diting_d27u_append_locked(const char *str, int length)
++{
++	if (!diting_ramoops_base || !str || length <= 0) {
++		return;
++	}
++	uint8_t *buf = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_D27U_OFFSET);
++	uint32_t count = (uint32_t)length;
++	if (count > DITING_D27U_CAPACITY) {
++		str += count - DITING_D27U_CAPACITY;
++		count = DITING_D27U_CAPACITY;
++	}
++	uint32_t write_pos = diting_d27u_head;
++	uint32_t first = DITING_D27U_CAPACITY - write_pos;
++	if (first > count) {
++		first = count;
++	}
++	uint32_t second = count - first;
++	uint8_t *dst = buf + 16U;
++	for (uint32_t i = 0; i < first; ++i) {
++		dst[write_pos + i] = (uint8_t)str[i];
++	}
++	for (uint32_t i = 0; i < second; ++i) {
++		dst[i] = (uint8_t)str[first + i];
++	}
++	uint64_t total = (uint64_t)diting_d27u_size + count;
++	diting_d27u_size = total >= DITING_D27U_CAPACITY ? DITING_D27U_CAPACITY : (uint32_t)total;
++	diting_d27u_head = (write_pos + count) % DITING_D27U_CAPACITY;
++	diting_d27u_seq++;
++	struct diting_d27l_header *hdr = (struct diting_d27l_header *)(void *)buf;
++	hdr->magic = DITING_D27U_MAGIC;
++	hdr->size = diting_d27u_size;
++	hdr->seq = diting_d27u_seq;
++	hdr->reserved = diting_d27u_head;
++}
++
++void
++diting_ufs_log_flush(void)
++{
++	if (!diting_ramoops_base || !&diting_ufs_write_log_blocks) {
++		return;
++	}
++	uint8_t *buf = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_D27U_OFFSET);
++	uint8_t *snap = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_D27U_SNAP_OFFSET);
++	while (__atomic_exchange_n(&diting_ramoops_busy, 1, __ATOMIC_ACQUIRE)) {
++	}
++	bcopy(buf, snap, DITING_D27U_BYTES);
++	__atomic_store_n(&diting_ramoops_busy, 0, __ATOMIC_RELEASE);
++	(void)diting_ufs_write_log_blocks(snap, DITING_D27U_BYTES);
++}
++
++void
++diting_ufs_log_flush_panic(void)
++{
++	if (!diting_ramoops_base || !&diting_ufs_write_log_blocks_panic) {
++		return;
++	}
++	uint8_t *buf = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_D27U_OFFSET);
++	uint8_t *snap = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_D27U_SNAP_OFFSET);
++	bcopy(buf, snap, DITING_D27U_BYTES);
++	(void)diting_ufs_write_log_blocks_panic(snap, DITING_D27U_BYTES);
++}
++
++static void
++diting_d27l_append_locked(const char *str, int length)
++{
++	if (!diting_ramoops_base || !str || length <= 0) {
++		return;
++	}
++	uint32_t count = (uint32_t)length;
++	if (count > DITING_D27L_CAPACITY) {
++		str += count - DITING_D27L_CAPACITY;
++		count = DITING_D27L_CAPACITY;
++	}
++	uint32_t write_pos = diting_d27l_head;
++	uint32_t first = DITING_D27L_CAPACITY - write_pos;
++	if (first > count) {
++		first = count;
++	}
++	uint32_t second = count - first;
++	uint64_t total = (uint64_t)diting_d27l_size + count;
++	uint32_t new_size = total >= DITING_D27L_CAPACITY ? DITING_D27L_CAPACITY : (uint32_t)total;
++	uint32_t new_head = (write_pos + count) % DITING_D27L_CAPACITY;
++	for (uint32_t c = 0; c < DITING_D27L_COPIES; ++c) {
++		vm_offset_t base = diting_ramoops_base + DITING_D27L_OFFSET + c * DITING_D27L_STRIDE + (c & 3U) * 0x100U;
++		struct diting_d27l_header *hdr = (struct diting_d27l_header *)(uintptr_t)base;
++		uint8_t *dst = (uint8_t *)(uintptr_t)(base + 16U);
++		for (uint32_t i = 0; i < first; ++i) {
++			dst[write_pos + i] = (uint8_t)str[i];
++		}
++		for (uint32_t i = 0; i < second; ++i) {
++			dst[i] = (uint8_t)str[first + i];
++		}
++		if (first) {
++			CleanPoC_DcacheRegion_Force((vm_offset_t)(uintptr_t)(dst + write_pos), first);
++		}
++		if (second) {
++			CleanPoC_DcacheRegion_Force((vm_offset_t)(uintptr_t)dst, second);
++		}
++		__asm__ volatile("dsb sy" ::: "memory");
++		hdr->magic = DITING_D27L_MAGIC;
++		hdr->size = new_size;
++		hdr->seq++;
++		hdr->reserved = new_head;
++		__asm__ volatile("dsb sy" ::: "memory");
++		CleanPoC_DcacheRegion_Force(base, 16U);
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++	diting_d27l_size = new_size;
++	diting_d27l_head = new_head;
++}
++
++void
++diting_ramoops_diagnostic_write(const char *str, int length)
++{
++	if (!diting_ramoops_base || !str || length <= 0) {
++		return;
++	}
++	if (__atomic_exchange_n(&diting_ramoops_busy, 1, __ATOMIC_ACQUIRE)) {
++		return;
++	}
++	diting_d27u_append_locked(str, length);
++	diting_d27l_append_locked(str, length);
++	const uint32_t capacity = DITING_RAMOOPS_CONSOLE_BYTES - DITING_RAMOOPS_HEADER_BYTES;
++	uint8_t *data = (uint8_t *)(uintptr_t)(diting_ramoops_base + DITING_RAMOOPS_HEADER_BYTES);
++	if ((uint32_t)length > capacity) {
++		str += (uint32_t)length - capacity;
++		length = (int)capacity;
++	}
++	uint32_t old_size = diting_ramoops_size;
++	uint32_t write_pos = (diting_ramoops_start + old_size) % capacity;
++	uint32_t first = capacity - write_pos;
++	if (first > (uint32_t)length) {
++		first = (uint32_t)length;
++	}
++	uint32_t second = (uint32_t)length - first;
++	for (uint32_t i = 0; i < first; ++i) {
++		data[write_pos + i] = (uint8_t)str[i];
++	}
++	for (uint32_t i = 0; i < second; ++i) {
++		data[i] = (uint8_t)str[first + i];
++	}
++	if (first) {
++		CleanPoC_DcacheRegion_Force((vm_offset_t)(uintptr_t)(data + write_pos), first);
++	}
++	if (second) {
++		CleanPoC_DcacheRegion_Force((vm_offset_t)(uintptr_t)data, second);
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	uint64_t total = (uint64_t)old_size + (uint32_t)length;
++	uint32_t new_size = total >= capacity ? capacity : (uint32_t)total;
++	uint32_t new_start = total > capacity ?
++	    (uint32_t)((diting_ramoops_start + total - capacity) % capacity) : diting_ramoops_start;
++	struct diting_ramoops_header *header =
++	    (struct diting_ramoops_header *)(uintptr_t)diting_ramoops_base;
++	header->start = new_start;
++	header->size = new_size;
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(diting_ramoops_base, DITING_RAMOOPS_HEADER_BYTES);
++	__asm__ volatile("dsb sy" ::: "memory");
++	diting_ramoops_start = new_start;
++	diting_ramoops_size = new_size;
++	__atomic_store_n(&diting_ramoops_busy, 0, __ATOMIC_RELEASE);
++}
++
++void
++diting_ramoops_console_write(const char *str, int length)
++{
++	diting_ramoops_diagnostic_write(str, length);
++}
++
++int
++diting_ramoops_console_init(void)
++{
++	if (diting_ramoops_base) {
++		return 1;
++	}
++	vm_offset_t mapped = ml_io_map_wcomb(DITING_RAMOOPS_PHYS_BASE, DITING_RAMOOPS_RESERVED_BYTES);
++	if (!mapped) {
++		return 0;
++	}
++	struct diting_ramoops_header *header = (struct diting_ramoops_header *)(uintptr_t)mapped;
++	header->sig = 0;
++	header->start = 0;
++	header->size = 0;
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(mapped, DITING_RAMOOPS_HEADER_BYTES);
++	header->sig = DITING_RAMOOPS_MAGIC;
++	__asm__ volatile("dsb sy" ::: "memory");
++	CleanPoC_DcacheRegion_Force(mapped, DITING_RAMOOPS_HEADER_BYTES);
++	__asm__ volatile("dsb sy" ::: "memory");
++	diting_ramoops_start = 0;
++	diting_ramoops_size = 0;
++	diting_d27l_size = 0;
++	diting_d27l_head = 0;
++	for (uint32_t c = 0; c < DITING_D27L_COPIES; ++c) {
++		vm_offset_t base = mapped + DITING_D27L_OFFSET + c * DITING_D27L_STRIDE + (c & 3U) * 0x100U;
++		struct diting_d27l_header *d27h = (struct diting_d27l_header *)(uintptr_t)base;
++		d27h->magic = DITING_D27L_MAGIC;
++		d27h->size = 0;
++		d27h->seq = 1;
++		d27h->reserved = 0;
++		((uint8_t *)(uintptr_t)(base + 16U))[0] = 0;
++		__asm__ volatile("dsb sy" ::: "memory");
++		CleanPoC_DcacheRegion_Force(base, 32U);
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++	diting_ramoops_base = mapped;
++	static const char ready[] = "DITING iOS27 RAMOOPS: DBGC console recorder ready\n";
++	diting_ramoops_diagnostic_write(ready, (int)sizeof(ready) - 1);
++	return 1;
++}
++#endif
++
+ void
+ console_write(char *str, int size)
+ {
++#if defined(__arm64__)
++	diting_ramoops_diagnostic_write(str, size);
++#endif
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}

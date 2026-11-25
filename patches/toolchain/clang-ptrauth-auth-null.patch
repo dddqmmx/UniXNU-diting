@@ -1,0 +1,141 @@
+# LLVM 58c46bae21181fb4240cf964461bea738d96d50e; Apache-2.0 WITH LLVM-exception.
+# Support XNU authenticated-null qualifiers without changing three-argument nullable fields.
+diff --git a/clang/include/clang/Basic/Attr.td b/clang/include/clang/Basic/Attr.td
+index 61ef3fb61..406534d28 100644
+--- a/clang/include/clang/Basic/Attr.td
++++ b/clang/include/clang/Basic/Attr.td
+@@ -3836,7 +3836,8 @@ def PointerAuth : TypeAttr {
+   let Spellings = [CustomKeyword<"__ptrauth">];
+   let Args = [IntArgument<"Key">,
+               BoolArgument<"AddressDiscriminated", 1>,
+-              IntArgument<"ExtraDiscriminator", 1>];
++              IntArgument<"ExtraDiscriminator", 1>,
++              StringArgument<"Options", 1>];
+   let Documentation = [PtrAuthDocs];
+ }
+ 
+diff --git a/clang/include/clang/Basic/DiagnosticParseKinds.td b/clang/include/clang/Basic/DiagnosticParseKinds.td
+index 4ca2ed383..79eb81221 100644
+--- a/clang/include/clang/Basic/DiagnosticParseKinds.td
++++ b/clang/include/clang/Basic/DiagnosticParseKinds.td
+@@ -1627,7 +1627,7 @@ def warn_pragma_unroll_cuda_value_in_parens : Warning<
+   InGroup<CudaCompat>;
+ 
+ def err_ptrauth_qualifier_bad_arg_count : Error<
+-  "'__ptrauth' qualifier must take between 1 and 3 arguments">;
++  "'__ptrauth' qualifier must take between 1 and 4 arguments">;
+ 
+ def warn_cuda_attr_lambda_position : Warning<
+   "nvcc does not allow '__%0__' to appear after the parameter list in lambdas">,
+diff --git a/clang/lib/CodeGen/CGPointerAuth.cpp b/clang/lib/CodeGen/CGPointerAuth.cpp
+index 438d08b53..05f1e97b6 100644
+--- a/clang/lib/CodeGen/CGPointerAuth.cpp
++++ b/clang/lib/CodeGen/CGPointerAuth.cpp
+@@ -362,6 +362,11 @@ llvm::Value *CodeGenFunction::emitPointerAuthResign(
+   if (!CurAuthInfo && !NewAuthInfo)
+     return Value;
+ 
++  bool CurAuthenticatesNull =
++      CurAuthInfo && CurAuthInfo.authenticatesNullValues();
++  bool NewAuthenticatesNull =
++      NewAuthInfo && NewAuthInfo.authenticatesNullValues();
++
+   llvm::Value *Null = nullptr;
+   // If the value is obviously null, we're done.
+   if (auto *PointerValue = dyn_cast<llvm::PointerType>(Value->getType())) {
+@@ -370,7 +375,7 @@ llvm::Value *CodeGenFunction::emitPointerAuthResign(
+     assert(Value->getType()->isIntegerTy());
+     Null = llvm::ConstantInt::get(IntPtrTy, 0);
+   }
+-  if (Value == Null)
++  if (Value == Null && !CurAuthenticatesNull && !NewAuthenticatesNull)
+     return Value;
+ 
+   // If both schemas sign the same way, we're done.
+@@ -385,12 +390,25 @@ llvm::Value *CodeGenFunction::emitPointerAuthResign(
+       return Value;
+   }
+ 
++  // A nullable source leaves an unsigned zero, while an authenticated-null
++  // destination signs it. In the other direction authenticate first, then
++  // preserve an authenticated zero instead of signing it for the nullable
++  // destination. The combined resign intrinsic cannot represent both rules.
++  if (CurAuthInfo && NewAuthInfo &&
++      CurAuthenticatesNull != NewAuthenticatesNull) {
++    Value = emitPointerAuthResign(Value, Type, CurAuthInfo,
++                                 CGPointerAuthInfo(), IsKnownNonNull);
++    return emitPointerAuthResign(Value, Type, CGPointerAuthInfo(), NewAuthInfo,
++                                 /*IsKnownNonNull=*/false);
++  }
++
+   llvm::BasicBlock *InitBB = Builder.GetInsertBlock();
+   llvm::BasicBlock *ResignBB = nullptr, *ContBB = nullptr;
+ 
+   // Null pointers have to be mapped to null, and the ptrauth_resign
+   // intrinsic doesn't do that.
+-  if (!IsKnownNonNull && !llvm::isKnownNonZero(Value, CGM.getDataLayout())) {
++  if (!CurAuthenticatesNull && !NewAuthenticatesNull && !IsKnownNonNull &&
++      !llvm::isKnownNonZero(Value, CGM.getDataLayout())) {
+     ContBB = createBasicBlock("resign.cont");
+     ResignBB = createBasicBlock("resign.nonnull");
+ 
+diff --git a/clang/lib/Parse/ParseDecl.cpp b/clang/lib/Parse/ParseDecl.cpp
+index 1d3789a10..0eed50d08 100644
+--- a/clang/lib/Parse/ParseDecl.cpp
++++ b/clang/lib/Parse/ParseDecl.cpp
+@@ -3200,7 +3200,7 @@ void Parser::ParsePtrauthQualifier(ParsedAttributes &Attrs) {
+   T.consumeClose();
+   SourceLocation EndLoc = T.getCloseLocation();
+ 
+-  if (ArgExprs.empty() || ArgExprs.size() > 3) {
++  if (ArgExprs.empty() || ArgExprs.size() > 4) {
+     Diag(KwLoc, diag::err_ptrauth_qualifier_bad_arg_count);
+     return;
+   }
+diff --git a/clang/lib/Sema/SemaType.cpp b/clang/lib/Sema/SemaType.cpp
+index 9de4f12aa..77a186aef 100644
+--- a/clang/lib/Sema/SemaType.cpp
++++ b/clang/lib/Sema/SemaType.cpp
+@@ -8659,14 +8659,31 @@ static void HandleNeonVectorTypeAttr(QualType &CurType, const ParsedAttr &Attr,
+ static void HandlePtrAuthQualifier(ASTContext &Ctx, QualType &T,
+                                    const ParsedAttr &Attr, Sema &S) {
+ 
+-  assert((Attr.getNumArgs() > 0 && Attr.getNumArgs() <= 3) &&
+-         "__ptrauth qualifier takes between 1 and 3 arguments");
++  assert((Attr.getNumArgs() > 0 && Attr.getNumArgs() <= 4) &&
++         "__ptrauth qualifier takes between 1 and 4 arguments");
+   Expr *KeyArg = Attr.getArgAsExpr(0);
+   Expr *IsAddressDiscriminatedArg =
+       Attr.getNumArgs() >= 2 ? Attr.getArgAsExpr(1) : nullptr;
+   Expr *ExtraDiscriminatorArg =
+       Attr.getNumArgs() >= 3 ? Attr.getArgAsExpr(2) : nullptr;
+ 
++  bool AuthenticatesNullValues = false;
++  if (Attr.getNumArgs() == 4) {
++    StringRef Option;
++    if (!S.checkStringLiteralArgumentAttr(Attr, 3, Option)) {
++      Attr.setInvalid();
++      return;
++    }
++    if (Option != "authenticates-null-values") {
++      unsigned ID = S.getDiagnostics().getCustomDiagID(
++          DiagnosticsEngine::Error, "unsupported __ptrauth option '%0'");
++      S.Diag(Attr.getLoc(), ID) << Option;
++      Attr.setInvalid();
++      return;
++    }
++    AuthenticatesNullValues = true;
++  }
++
+   unsigned Key;
+   if (S.checkConstantPointerAuthKey(KeyArg, Key)) {
+     Attr.setInvalid();
+@@ -8710,7 +8727,7 @@ static void HandlePtrAuthQualifier(ASTContext &Ctx, QualType &T,
+   PointerAuthQualifier Qual = PointerAuthQualifier::Create(
+       Key, IsAddressDiscriminated, ExtraDiscriminator,
+       PointerAuthenticationMode::SignAndAuth, /*IsIsaPointer=*/false,
+-      /*AuthenticatesNullValues=*/false);
++      AuthenticatesNullValues);
+   T = S.Context.getPointerAuthType(T, Qual);
+ }
+ 

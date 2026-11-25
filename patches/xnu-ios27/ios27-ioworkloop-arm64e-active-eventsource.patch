@@ -1,0 +1,48 @@
+diff --git a/iokit/Kernel/IOWorkLoop.cpp b/iokit/Kernel/IOWorkLoop.cpp
+--- a/iokit/Kernel/IOWorkLoop.cpp
++++ b/iokit/Kernel/IOWorkLoop.cpp
+@@ -707,6 +707,16 @@
+ 	} else if (IOEventSource::kActive & inEventSource->flags) {
+ 		result = true;
+ 	} else if (controlG) {
++#if __has_feature(ptrauth_member_function_pointer_type_discrimination)
++		/*
++		 * On arm64e with member-function pointer type discrimination,
++		 * OSMemberFunctionCast yields the shared virtual thunk for
++		 * &IOEventSource::checkForWork instead of resolving the vtable
++		 * entry, falsely classifying active sources (such as
++		 * IOInterruptEventSource) as passive.
++		 */
++		result = !OSDynamicCast(IOCommandGate, inEventSource);
++#else
+ 		void *  ptr1;
+ 		void *  ptr2;
+ 
+@@ -716,6 +726,7 @@
+ 		if (ptr1 == ptr2) {
+ 			result = false;
+ 		}
++#endif
+ 	}
+ 
+ 	return result;
+diff --git a/osfmk/kern/ast.c b/osfmk/kern/ast.c
+--- a/osfmk/kern/ast.c
++++ b/osfmk/kern/ast.c
+@@ -412,6 +412,16 @@
+ static inline void
+ assert_thread_return_to_user(thread_t thread)
+ {
++	if (thread->kern_promotion_schedpri != 0) {
++		extern int proc_selfpid(void);
++		extern void proc_name(int pid, char *buf, int size);
++		char pname[32] = {0};
++		int pid = proc_selfpid();
++		proc_name(pid, pname, (int)sizeof(pname));
++		printf("DITING_AST_PROMO: proc=%s[%d] tid=%llu pri=%u sched_flags=0x%x rw=%d\n",
++		    pname, pid, thread_tid(thread), thread->kern_promotion_schedpri,
++		    thread->sched_flags, thread->rwlock_count);
++	}
+ 	assert(thread->kern_promotion_schedpri == 0);
+ 	if (thread->rwlock_count > 0) {
+ 		panic("rwlock_count is %d for thread %p, possibly it still holds a rwlock", thread->rwlock_count, thread);

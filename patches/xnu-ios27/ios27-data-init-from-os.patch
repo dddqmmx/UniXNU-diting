@@ -1,0 +1,913 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9172,6 +9172,901 @@
+ 	return err;
+ }
+ 
++static int
++diting_ios27_write_file(proc_t p, user_addr_t scratch, const char *path, const char *body,
++    uid_t uid, gid_t gid, mode_t mode)
++{
++	size_t path_len = strlen(path) + 1;
++	if (path_len > 0x3f0) {
++		return ENAMETOOLONG;
++	}
++	int err = diting_ios27_mkdir_parents(p, scratch, path);
++	if (err) {
++		return err;
++	}
++	int32_t res = 0;
++	int fd = -1;
++	err = copyout(path, scratch + 0xc00, path_len);
++	if (!err) {
++		struct open_args op = {.path = scratch + 0xc00, .flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, .mode = mode};
++		err = open(p, &op, &res);
++		if (!err) {
++			fd = res;
++		}
++	}
++	size_t len = strlen(body);
++	for (size_t sent = 0; !err && fd >= 0 && sent < len; ) {
++		size_t piece = (len - sent < 0x1f0) ? (len - sent) : 0x1f0;
++		err = copyout(body + sent, scratch + 0x200, piece);
++		if (!err) {
++			struct write_args wr = {.fd = fd, .cbuf = scratch + 0x200, .nbyte = piece};
++			user_ssize_t written = 0;
++			err = write(p, &wr, &written);
++			if (!err && written != (user_ssize_t)piece) {
++				err = EIO;
++			}
++		}
++		sent += piece;
++	}
++	if (fd >= 0) {
++		struct fchown_args ow = {.fd = fd, .uid = uid, .gid = gid};
++		struct fchmod_args cm = {.fd = fd, .mode = mode};
++		struct close_args cl = {.fd = fd};
++		(void)fchown(p, &ow, &res);
++		(void)fchmod(p, &cm, &res);
++		(void)sys_close(p, &cl, &res);
++	}
++	return err;
++}
++
++static int
++diting_ios27_unlink_path(proc_t p, user_addr_t scratch, const char *path)
++{
++	size_t path_len = strlen(path) + 1;
++	if (path_len > 0x3f0) {
++		return ENAMETOOLONG;
++	}
++	struct unlink_args req = {.path = scratch + 0xc00};
++	int32_t res = 0;
++	int err = copyout(path, req.path, path_len);
++	if (!err) {
++		err = unlink(p, &req, &res);
++	}
++	return err;
++}
++
++static int
++diting_ios27_unlink_prefix_in_dir(proc_t p, user_addr_t scratch, const char *dir_path, const char *prefix,
++    vfs_context_t ctx)
++{
++	vnode_t dir = NULLVP;
++	if (vnode_lookup(dir_path, VNODE_LOOKUP_NOFOLLOW, &dir, ctx) != 0 || !dir) {
++		return 0;
++	}
++	if (vnode_vtype(dir) != VDIR) {
++		vnode_put(dir);
++		return 0;
++	}
++	const uint32_t entries_size = 8192;
++	const unsigned max_names = 16;
++	const size_t name_stride = 128;
++	uint8_t *entries = kalloc_data(entries_size, Z_WAITOK);
++	char *names = kalloc_data(max_names * name_stride, Z_WAITOK);
++	char *full = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	unsigned found = 0;
++	size_t pfx_len = strlen(prefix);
++	if (entries && names && full && VNOP_OPEN(dir, FREAD, ctx) == 0) {
++		off_t offset = 0;
++		for (int eof = 0; !eof && found < max_names; ) {
++			uio_t uio = uio_create(1, offset, UIO_SYSSPACE, UIO_READ);
++			if (!uio) {
++				break;
++			}
++			uio_addiov(uio, CAST_USER_ADDR_T(entries), entries_size);
++			int count = 0;
++			int rerr = vnode_readdir64(dir, uio, VNODE_READDIR_EXTENDED, &eof, &count, ctx);
++			uint32_t filled = entries_size - (uint32_t)uio_resid(uio);
++			offset = uio_offset(uio);
++			uio_free(uio);
++			if (rerr || !filled) {
++				break;
++			}
++			for (uint32_t at = 0; at + offsetof(struct direntry, d_name) < filled && found < max_names; ) {
++				struct direntry *de = (struct direntry *)(entries + at);
++				if (!de->d_reclen || at + de->d_reclen > filled) {
++					break;
++				}
++				at += de->d_reclen;
++				const char *name = de->d_name;
++				if (!de->d_ino || !strcmp(name, ".") || !strcmp(name, "..")) {
++					continue;
++				}
++				if (strncmp(name, prefix, pfx_len) == 0 && strlen(name) < name_stride) {
++					strlcpy(names + found * name_stride, name, name_stride);
++					found++;
++				}
++			}
++		}
++		VNOP_CLOSE(dir, FREAD, ctx);
++	}
++	vnode_put(dir);
++	int removed = 0;
++	if (names && full) {
++		for (unsigned i = 0; i < found; ++i) {
++			snprintf(full, MAXPATHLEN, "%s/%s", dir_path, names + i * name_stride);
++			if (diting_ios27_unlink_path(p, scratch, full) == 0) {
++				removed++;
++			}
++		}
++	}
++	if (full) kfree_data(full, MAXPATHLEN);
++	if (names) kfree_data(names, max_names * name_stride);
++	if (entries) kfree_data(entries, entries_size);
++	return removed;
++}
++
++static unsigned
++diting_ios27_list_subdirs(const char *dir_path, char *out_names, unsigned max_names, size_t stride,
++    vfs_context_t ctx)
++{
++	vnode_t dir = NULLVP;
++	if (vnode_lookup(dir_path, VNODE_LOOKUP_NOFOLLOW, &dir, ctx) != 0 || !dir) {
++		return 0;
++	}
++	if (vnode_vtype(dir) != VDIR) {
++		vnode_put(dir);
++		return 0;
++	}
++	const uint32_t entries_size = 8192;
++	uint8_t *entries = kalloc_data(entries_size, Z_WAITOK);
++	unsigned found = 0;
++	if (entries && VNOP_OPEN(dir, FREAD, ctx) == 0) {
++		off_t offset = 0;
++		for (int eof = 0; !eof && found < max_names; ) {
++			uio_t uio = uio_create(1, offset, UIO_SYSSPACE, UIO_READ);
++			if (!uio) {
++				break;
++			}
++			uio_addiov(uio, CAST_USER_ADDR_T(entries), entries_size);
++			int count = 0;
++			int rerr = vnode_readdir64(dir, uio, VNODE_READDIR_EXTENDED, &eof, &count, ctx);
++			uint32_t filled = entries_size - (uint32_t)uio_resid(uio);
++			offset = uio_offset(uio);
++			uio_free(uio);
++			if (rerr || !filled) {
++				break;
++			}
++			for (uint32_t at = 0; at + offsetof(struct direntry, d_name) < filled && found < max_names; ) {
++				struct direntry *de = (struct direntry *)(entries + at);
++				if (!de->d_reclen || at + de->d_reclen > filled) {
++					break;
++				}
++				at += de->d_reclen;
++				const char *name = de->d_name;
++				if (!de->d_ino || !strcmp(name, ".") || !strcmp(name, "..")) {
++					continue;
++				}
++				if (strlen(name) < stride) {
++					strlcpy(out_names + found * stride, name, stride);
++					found++;
++				}
++			}
++		}
++		VNOP_CLOSE(dir, FREAD, ctx);
++	}
++	vnode_put(dir);
++	if (entries) {
++		kfree_data(entries, entries_size);
++	}
++	return found;
++}
++
++/*
++ * Trigger a clean DataMigration + SystemAppMigrator + LaunchServices rebuild when
++ * staged_system_apps is populated on a Data volume that had already booted once
++ * without it.
++ */
++static void
++diting_ios27_reset_system_app_migration(proc_t p, user_addr_t scratch, vfs_context_t ctx)
++{
++	int mig_rm = (diting_ios27_unlink_path(p, scratch,
++	    "/private/var/mobile/Library/Preferences/com.apple.migration.plist") == 0) ? 1 : 0;
++	int sentinel_rc = diting_ios27_write_file(p, scratch,
++	    "/private/var/datamigrator/migrate", "", 0, 0, 0644);
++	int mi_rm = 0, ls_rm = 0, sb_rm = 0;
++
++	static const char *const direct_mi[] = {
++	    "/private/var/mobile/Library/MobileInstallation/SystemAppState.plist",
++	    "/private/var/installd/Library/MobileInstallation/SystemAppState.plist",
++	    "/private/var/installd/Library/MobileInstallation/LastBuildInfo.plist",
++	    "/private/var/installd/Library/MobileInstallation/LastLaunchServicesMap.plist",
++	    "/private/var/installd/Library/MobileInstallation/PreInstallConsentSet.plist",
++	};
++	for (unsigned i = 0; i < sizeof(direct_mi) / sizeof(direct_mi[0]); ++i) {
++		if (diting_ios27_unlink_path(p, scratch, direct_mi[i]) == 0) {
++			mi_rm++;
++		}
++	}
++
++	static const char *const mi_leaves[] = {
++	    "SystemAppState.plist",
++	    "LastBuildInfo.plist",
++	    "LastLaunchServicesMap.plist",
++	    "PreInstallConsentSet.plist",
++	};
++	const unsigned max_uuids = 256;
++	const size_t uuid_stride = 64;
++	char *uuids = kalloc_data(max_uuids * uuid_stride, Z_WAITOK);
++	char *path = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	if (uuids && path) {
++		unsigned sys_n = diting_ios27_list_subdirs("/private/var/containers/Data/System",
++		    uuids, max_uuids, uuid_stride, ctx);
++		for (unsigned i = 0; i < sys_n; ++i) {
++			const char *u = uuids + i * uuid_stride;
++			for (unsigned j = 0; j < sizeof(mi_leaves) / sizeof(mi_leaves[0]); ++j) {
++				snprintf(path, MAXPATHLEN,
++				    "/private/var/containers/Data/System/%s/Library/MobileInstallation/%s",
++				    u, mi_leaves[j]);
++				if (diting_ios27_unlink_path(p, scratch, path) == 0) {
++					mi_rm++;
++				}
++			}
++			snprintf(path, MAXPATHLEN,
++			    "/private/var/containers/Data/System/%s/Library/Caches", u);
++			ls_rm += diting_ios27_unlink_prefix_in_dir(p, scratch, path,
++			    "com.apple.LaunchServices-", ctx);
++		}
++		unsigned id_n = diting_ios27_list_subdirs("/private/var/mobile/Containers/Data/InternalDaemon",
++		    uuids, max_uuids, uuid_stride, ctx);
++		for (unsigned i = 0; i < id_n; ++i) {
++			snprintf(path, MAXPATHLEN,
++			    "/private/var/mobile/Containers/Data/InternalDaemon/%s/Library/Caches",
++			    uuids + i * uuid_stride);
++			ls_rm += diting_ios27_unlink_prefix_in_dir(p, scratch, path,
++			    "com.apple.LaunchServices-", ctx);
++		}
++	}
++	if (path) kfree_data(path, MAXPATHLEN);
++	if (uuids) kfree_data(uuids, max_uuids * uuid_stride);
++
++	ls_rm += diting_ios27_unlink_prefix_in_dir(p, scratch,
++	    "/private/var/mobile/Library/Caches", "com.apple.LaunchServices-", ctx);
++	(void)diting_ios27_unlink_path(p, scratch, "/private/var/ngpu/ls-store-rebuilt-1");
++
++	if (diting_ios27_unlink_path(p, scratch,
++	    "/private/var/mobile/Library/SpringBoard/IconState.plist") == 0) {
++		sb_rm++;
++	}
++	if (diting_ios27_unlink_path(p, scratch,
++	    "/private/var/mobile/Library/SpringBoard/DesiredIconState.plist") == 0) {
++		sb_rm++;
++	}
++
++	printf("DITING_INIT: staged_apps reset_migration sentinel=%d mig_plist_rm=%d mi_rm=%d ls_rm=%d sb_rm=%d\n",
++	    sentinel_rc, mig_rm, mi_rm, ls_rm, sb_rm);
++}
++
++static int
++diting_ios27_mkdir_attr(proc_t p, user_addr_t scratch, const char *path, mode_t mode, uid_t uid, gid_t gid, vfs_context_t ctx)
++{
++	size_t path_len = strlen(path) + 1;
++	if (path_len > 0x5f0) {
++		return ENAMETOOLONG;
++	}
++	struct mkdir_args req = {.path = scratch + 0xa00, .mode = (int)(mode & 07777)};
++	int32_t res = 0;
++	int err = copyout(path, req.path, path_len);
++	if (!err) {
++		err = mkdir(p, &req, &res);
++	}
++	if (err && err != EEXIST) {
++		return err;
++	}
++	vnode_t vp = NULLVP;
++	err = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
++	if (!err) {
++		struct vnode_attr va;
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_mode, mode & 07777);
++		VATTR_SET(&va, va_uid, uid);
++		VATTR_SET(&va, va_gid, gid);
++		err = vnode_setattr(vp, &va, ctx);
++		vnode_put(vp);
++	}
++	return err;
++}
++
++static int
++diting_ios27_copy_os_file_batched(vnode_t source, const char *path, mode_t mode, uid_t uid, gid_t gid,
++    uint8_t *buffer, uint32_t chunk, vfs_context_t ctx, uint64_t *bytes_total,
++    uint64_t *unsynced_bytes, uint32_t *unsynced_files)
++{
++	int err = VNOP_OPEN(source, FREAD, ctx);
++	if (err) {
++		return err;
++	}
++	vnode_t vp = NULLVP;
++	err = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, (int)(mode & 07777), 0, &vp, ctx);
++	off_t at = 0;
++	for (; !err; ) {
++		int resid = 0;
++		err = vn_rdwr(UIO_READ, source, (caddr_t)buffer, (int)chunk, at, UIO_SYSSPACE, IO_NOAUTH,
++		    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		int got = (int)chunk - resid;
++		if (err || !got) {
++			break;
++		}
++		err = vn_rdwr(UIO_WRITE, vp, (caddr_t)buffer, got, at, UIO_SYSSPACE, IO_NOAUTH | IO_UNIT,
++		    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		if (!err && resid) {
++			err = EIO;
++		}
++		at += got;
++		*bytes_total += (uint64_t)got;
++		if (unsynced_bytes) {
++			*unsynced_bytes += (uint64_t)got;
++		}
++	}
++	if (vp) {
++		if (!err) {
++			struct vnode_attr va;
++			VATTR_INIT(&va);
++			VATTR_SET(&va, va_mode, mode & 07777);
++			VATTR_SET(&va, va_uid, uid);
++			VATTR_SET(&va, va_gid, gid);
++			err = vnode_setattr(vp, &va, ctx);
++		}
++		if (!err) {
++			if (!unsynced_bytes || !unsynced_files) {
++				err = VNOP_FSYNC(vp, MNT_WAIT, ctx);
++			} else {
++				(*unsynced_files)++;
++				if (at >= 262144 || *unsynced_bytes >= (4 * 1024 * 1024) || *unsynced_files >= 64) {
++					err = VNOP_FSYNC(vp, MNT_WAIT, ctx);
++					*unsynced_bytes = 0;
++					*unsynced_files = 0;
++				}
++			}
++		}
++		int close_err = vnode_close(vp, FWRITE, ctx);
++		if (!err) {
++			err = close_err;
++		}
++	}
++	VNOP_CLOSE(source, FREAD, ctx);
++	return err;
++}
++
++static int
++diting_ios27_copy_os_symlink(proc_t p, user_addr_t scratch, vnode_t source, const char *path, vfs_context_t ctx)
++{
++	char target[512];
++	uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++	if (!uio) {
++		return ENOMEM;
++	}
++	uio_addiov(uio, CAST_USER_ADDR_T(target), sizeof(target) - 1);
++	int err = VNOP_READLINK(source, uio, ctx);
++	size_t tlen = (sizeof(target) - 1) - (size_t)uio_resid(uio);
++	uio_free(uio);
++	if (err) {
++		return err;
++	}
++	target[tlen] = '\0';
++	size_t plen = strlen(path);
++	if (tlen >= 0x5f0 || plen >= 0x7f0) {
++		return ENAMETOOLONG;
++	}
++	int32_t res = 0;
++	struct symlink_args sa = {.path = scratch + 0x200, .link = scratch + 0x800};
++	err = copyout(target, sa.path, tlen + 1);
++	if (!err) {
++		err = copyout(path, sa.link, plen + 1);
++	}
++	if (!err) {
++		err = symlink(p, &sa, &res);
++		if (err == EEXIST) {
++			err = 0;
++		}
++	}
++	return err;
++}
++
++/*
++ * Copy OS /private/var/staged_system_apps (52 removable system apps, ~759 MiB)
++ * into writable Data /private/var/staged_system_apps owned by mobile (501:501)
++ * so SystemAppMigrator + installcoordinationd + installd natively install them
++ * into /private/var/containers/Bundle/Application/<UUID> during DataMigration.
++ */
++static void
++diting_ios27_init_staged_apps_from_os(proc_t p, user_addr_t scratch, vnode_t covered_var,
++    int trigger_remigration, vfs_context_t ctx)
++{
++	static const char staged_marker[] = "/private/var/db/.diting_ios27_24B156_staged_apps1";
++	const uid_t mobile_uid = 501;
++	const gid_t mobile_gid = 501;
++
++	vnode_t src_root = NULLVP;
++	int err = vnode_lookupat("staged_system_apps", VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOCROSSMOUNT,
++	    &src_root, ctx, covered_var);
++	if (err || !src_root) {
++		printf("DITING_INIT: staged_apps source lookup err=%d\n", err);
++		return;
++	}
++	if (vnode_vtype(src_root) != VDIR) {
++		vnode_put(src_root);
++		printf("DITING_INIT: staged_apps source not dir\n");
++		return;
++	}
++
++	/* Ensure target container root and staging directory exist with mobile ownership. */
++	(void)diting_ios27_mkdir_attr(p, scratch, "/private/var/containers", 0755, 0, 0, ctx);
++	(void)diting_ios27_mkdir_attr(p, scratch, "/private/var/containers/Bundle", 0755, 0, 0, ctx);
++	(void)diting_ios27_mkdir_attr(p, scratch, "/private/var/containers/Bundle/Application", 0755, 0, 0, ctx);
++	int mk_err = diting_ios27_mkdir_attr(p, scratch, "/private/var/staged_system_apps", 0755,
++	    mobile_uid, mobile_gid, ctx);
++	if (mk_err) {
++		vnode_put(src_root);
++		printf("DITING_INIT: staged_apps mkdir root err=%d\n", mk_err);
++		return;
++	}
++
++	const uint32_t entries_size = 8192;
++	const uint32_t chunk_size = 1024 * 1024;
++	const uint32_t pool_size = 2 * 1024 * 1024;
++	const uint32_t max_dirs = 32768;
++	char *pool = kalloc_data(pool_size, Z_WAITOK);
++	uint32_t *queue = kalloc_data(max_dirs * sizeof(uint32_t), Z_WAITOK);
++	uint8_t *entries = kalloc_data(entries_size, Z_WAITOK);
++	uint8_t *buffer = kalloc_data(chunk_size, Z_WAITOK);
++	char *path = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	int dirs_ok = 0, files_ok = 0, links_ok = 0, failed = 0, last_err = 0;
++	uint64_t bytes_total = 0, unsynced_bytes = 0;
++	uint32_t unsynced_files = 0;
++
++	printf("DITING_INIT: staged_apps copy start (remigrate=%d)\n", trigger_remigration);
++	if (pool && queue && entries && buffer && path) {
++		uint32_t pool_used = 1, qhead = 0, qtail = 1;
++		pool[0] = '\0';
++		queue[0] = 0;
++		while (qhead < qtail) {
++			const char *rel = pool + queue[qhead++];
++			vnode_t dir = NULLVP;
++			if (rel[0] == '\0') {
++				dir = src_root;
++				if (vnode_getwithref(dir) != 0) {
++					failed++;
++					last_err = ENOENT;
++					continue;
++				}
++				strlcpy(path, "/private/var/staged_system_apps", MAXPATHLEN);
++			} else {
++				int lerr = vnode_lookupat(rel, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOCROSSMOUNT,
++				    &dir, ctx, src_root);
++				if (lerr) {
++					failed++;
++					last_err = lerr;
++					continue;
++				}
++				snprintf(path, MAXPATHLEN, "/private/var/staged_system_apps/%s", rel);
++			}
++			size_t base = strlen(path);
++			int oerr = VNOP_OPEN(dir, FREAD, ctx);
++			if (oerr) {
++				failed++;
++				last_err = oerr;
++				vnode_put(dir);
++				continue;
++			}
++			off_t offset = 0;
++			for (int eof = 0; !oerr && !eof; ) {
++				uio_t uio = uio_create(1, offset, UIO_SYSSPACE, UIO_READ);
++				if (!uio) {
++					oerr = ENOMEM;
++					break;
++				}
++				uio_addiov(uio, CAST_USER_ADDR_T(entries), entries_size);
++				int count = 0;
++				oerr = vnode_readdir64(dir, uio, VNODE_READDIR_EXTENDED, &eof, &count, ctx);
++				uint32_t filled = entries_size - (uint32_t)uio_resid(uio);
++				offset = uio_offset(uio);
++				uio_free(uio);
++				if (oerr || !filled) {
++					break;
++				}
++				for (uint32_t at = 0; at + offsetof(struct direntry, d_name) < filled; ) {
++					struct direntry *de = (struct direntry *)(entries + at);
++					if (!de->d_reclen || at + de->d_reclen > filled) {
++						oerr = EINVAL;
++						break;
++					}
++					at += de->d_reclen;
++					const char *name = de->d_name;
++					if (!de->d_ino || !strcmp(name, ".") || !strcmp(name, "..")) {
++						continue;
++					}
++					if (base + 1 + strlen(name) >= MAXPATHLEN) {
++						failed++;
++						last_err = ENAMETOOLONG;
++						continue;
++					}
++					path[base] = '/';
++					strlcpy(path + base + 1, name, MAXPATHLEN - base - 1);
++					vnode_t child = NULLVP;
++					int cerr = vnode_lookupat(name, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOCROSSMOUNT,
++					    &child, ctx, dir);
++					if (!cerr) {
++						struct vnode_attr va;
++						VATTR_INIT(&va);
++						VATTR_WANTED(&va, va_mode);
++						cerr = vnode_getattr(child, &va, ctx);
++						mode_t mode = VATTR_IS_SUPPORTED(&va, va_mode) ? (mode_t)(va.va_mode & 0777) : 0644;
++						if (!cerr) {
++							enum vtype vt = vnode_vtype(child);
++							if (vt == VDIR) {
++								cerr = diting_ios27_mkdir_attr(p, scratch, path,
++								    mode ? mode : 0755, mobile_uid, mobile_gid, ctx);
++								if (!cerr) {
++									const char *child_rel = path + sizeof("/private/var/staged_system_apps/") - 1;
++									size_t rlen = strlen(child_rel) + 1;
++									if (qtail < max_dirs && pool_used + rlen <= pool_size) {
++										memcpy(pool + pool_used, child_rel, rlen);
++										queue[qtail++] = pool_used;
++										pool_used += (uint32_t)rlen;
++										dirs_ok++;
++									} else {
++										cerr = ENOSPC;
++									}
++								}
++							} else if (vt == VREG) {
++								cerr = diting_ios27_copy_os_file_batched(child, path, mode,
++								    mobile_uid, mobile_gid, buffer, chunk_size, ctx,
++								    &bytes_total, &unsynced_bytes, &unsynced_files);
++								if (!cerr) {
++									files_ok++;
++									if ((files_ok % 500) == 0) {
++										printf("DITING_INIT: staged_apps progress files=%d dirs=%d mib=%llu fail=%d err=%d\n",
++										    files_ok, dirs_ok, (unsigned long long)(bytes_total >> 20), failed, last_err);
++									}
++								}
++							} else if (vt == VLNK) {
++								cerr = diting_ios27_copy_os_symlink(p, scratch, child, path, ctx);
++								if (!cerr) {
++									links_ok++;
++								}
++							}
++						}
++						vnode_put(child);
++					}
++					if (cerr) {
++						failed++;
++						last_err = cerr;
++					}
++					path[base] = '\0';
++				}
++			}
++			if (oerr) {
++				failed++;
++				last_err = oerr;
++			}
++			VNOP_CLOSE(dir, FREAD, ctx);
++			vnode_put(dir);
++		}
++	} else {
++		failed++;
++		last_err = ENOMEM;
++	}
++
++	if (path) kfree_data(path, MAXPATHLEN);
++	if (buffer) kfree_data(buffer, chunk_size);
++	if (entries) kfree_data(entries, entries_size);
++	if (queue) kfree_data(queue, max_dirs * sizeof(uint32_t));
++	if (pool) kfree_data(pool, pool_size);
++	vnode_put(src_root);
++
++	if (failed == 0) {
++		int wrc = diting_ios27_write_file(p, scratch, staged_marker, "24B156\n", 0, 0, 0644);
++		if (wrc) {
++			failed++;
++			last_err = wrc;
++		} else {
++			vnode_t mvp = NULLVP;
++			if (vnode_lookup(staged_marker, VNODE_LOOKUP_NOFOLLOW, &mvp, ctx) == 0 && mvp) {
++				(void)VNOP_FSYNC(mvp, MNT_WAIT, ctx);
++				vnode_put(mvp);
++			}
++			if (trigger_remigration) {
++				diting_ios27_reset_system_app_migration(p, scratch, ctx);
++			}
++		}
++	}
++	printf("DITING_INIT: staged_apps copy done dirs=%d files=%d links=%d mib=%llu fail=%d err=%d\n",
++	    dirs_ok, files_ok, links_ok, (unsigned long long)(bytes_total >> 20), failed, last_err);
++}
++
++static void
++diting_ios27_init_data_from_os(proc_t p, user_addr_t scratch)
++{
++	static const char init_marker[] = "/private/var/.diting_ios27_24B156_var_init1";
++	static const char staged_marker[] = "/private/var/db/.diting_ios27_24B156_staged_apps1";
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t mvp = NULLVP;
++	int var_already_inited = 0;
++	int staged_already_inited = 0;
++
++	if (vnode_lookup(init_marker, VNODE_LOOKUP_NOFOLLOW, &mvp, ctx) == 0) {
++		if (mvp) {
++			vnode_put(mvp);
++		}
++		var_already_inited = 1;
++	}
++	mvp = NULLVP;
++	if (vnode_lookup(staged_marker, VNODE_LOOKUP_NOFOLLOW, &mvp, ctx) == 0) {
++		if (mvp) {
++			vnode_put(mvp);
++		}
++		staged_already_inited = 1;
++	}
++	if (var_already_inited && staged_already_inited) {
++		printf("DITING_INIT: os_var_init + staged_apps markers present (skipped)\n");
++		return;
++	}
++
++	vnode_t var_vp = NULLVP;
++	int err = vnode_lookup("/private/var", VNODE_LOOKUP_NOFOLLOW, &var_vp, ctx);
++	if (err || !var_vp) {
++		printf("DITING_INIT: os_var_init lookup /private/var err=%d\n", err);
++		return;
++	}
++	mount_t data_mount = vnode_mount(var_vp);
++	vnode_t covered = data_mount ? data_mount->mnt_vnodecovered : NULLVP;
++	if (covered && vnode_getwithref(covered) != 0) {
++		covered = NULLVP;
++	}
++	vnode_put(var_vp);
++	if (!covered) {
++		printf("DITING_INIT: os_var_init covered OS /private/var unavailable\n");
++		return;
++	}
++
++	if (!var_already_inited) {
++		const uint32_t entries_size = 8192;
++		const uint32_t chunk_size = 256 * 1024;
++		const uint32_t pool_size = 64 * 1024;
++		const uint32_t max_dirs = 1024;
++		char *pool = kalloc_data(pool_size, Z_WAITOK);
++		uint32_t *queue = kalloc_data(max_dirs * sizeof(uint32_t), Z_WAITOK);
++		uint8_t *entries = kalloc_data(entries_size, Z_WAITOK);
++		uint8_t *buffer = kalloc_data(chunk_size, Z_WAITOK);
++		char *path = kalloc_data(MAXPATHLEN, Z_WAITOK);
++		int dirs_ok = 0, files_ok = 0, links_ok = 0, failed = 0, last_err = 0;
++		uint64_t bytes_total = 0;
++
++		if (pool && queue && entries && buffer && path) {
++			uint32_t pool_used = 1, qhead = 0, qtail = 1;
++			pool[0] = '\0';
++			queue[0] = 0;
++			while (qhead < qtail) {
++				const char *rel = pool + queue[qhead++];
++				vnode_t dir = NULLVP;
++				if (rel[0] == '\0') {
++					dir = covered;
++					if (vnode_getwithref(dir) != 0) {
++						failed++;
++						last_err = ENOENT;
++						continue;
++					}
++					strlcpy(path, "/private/var", MAXPATHLEN);
++				} else {
++					int lerr = vnode_lookupat(rel, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOCROSSMOUNT, &dir, ctx, covered);
++					if (lerr) {
++						failed++;
++						last_err = lerr;
++						continue;
++					}
++					snprintf(path, MAXPATHLEN, "/private/var/%s", rel);
++				}
++				size_t base = strlen(path);
++				int oerr = VNOP_OPEN(dir, FREAD, ctx);
++				if (oerr) {
++					failed++;
++					last_err = oerr;
++					vnode_put(dir);
++					continue;
++				}
++				off_t offset = 0;
++				for (int eof = 0; !oerr && !eof; ) {
++					uio_t uio = uio_create(1, offset, UIO_SYSSPACE, UIO_READ);
++					if (!uio) {
++						oerr = ENOMEM;
++						break;
++					}
++					uio_addiov(uio, CAST_USER_ADDR_T(entries), entries_size);
++					int count = 0;
++					oerr = vnode_readdir64(dir, uio, VNODE_READDIR_EXTENDED, &eof, &count, ctx);
++					uint32_t filled = entries_size - (uint32_t)uio_resid(uio);
++					offset = uio_offset(uio);
++					uio_free(uio);
++					if (oerr || !filled) {
++						break;
++					}
++					for (uint32_t at = 0; at + offsetof(struct direntry, d_name) < filled; ) {
++						struct direntry *de = (struct direntry *)(entries + at);
++						if (!de->d_reclen || at + de->d_reclen > filled) {
++							oerr = EINVAL;
++							break;
++						}
++						at += de->d_reclen;
++						const char *name = de->d_name;
++						if (!de->d_ino || !strcmp(name, ".") || !strcmp(name, "..")) {
++							continue;
++						}
++						/* Copied immediately below with mobile (501:501) ownership and 32K dir capacity. */
++						if (rel[0] == '\0' && !strcmp(name, "staged_system_apps")) {
++							continue;
++						}
++						if (base + 1 + strlen(name) >= MAXPATHLEN) {
++							failed++;
++							last_err = ENAMETOOLONG;
++							continue;
++						}
++						path[base] = '/';
++						strlcpy(path + base + 1, name, MAXPATHLEN - base - 1);
++						vnode_t child = NULLVP;
++						int cerr = vnode_lookupat(name, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOCROSSMOUNT, &child, ctx, dir);
++						if (!cerr) {
++							struct vnode_attr va;
++							VATTR_INIT(&va);
++							VATTR_WANTED(&va, va_mode);
++							VATTR_WANTED(&va, va_uid);
++							VATTR_WANTED(&va, va_gid);
++							cerr = vnode_getattr(child, &va, ctx);
++							mode_t mode = VATTR_IS_SUPPORTED(&va, va_mode) ? (mode_t)(va.va_mode & 07777) : 0755;
++							uid_t uid = VATTR_IS_SUPPORTED(&va, va_uid) ? va.va_uid : 0;
++							gid_t gid = VATTR_IS_SUPPORTED(&va, va_gid) ? va.va_gid : 0;
++							if (!cerr) {
++								enum vtype vt = vnode_vtype(child);
++								if (vt == VDIR) {
++									cerr = diting_ios27_mkdir_attr(p, scratch, path, mode, uid, gid, ctx);
++									if (!cerr) {
++										const char *child_rel = path + sizeof("/private/var/") - 1;
++										size_t rlen = strlen(child_rel) + 1;
++										if (qtail < max_dirs && pool_used + rlen <= pool_size) {
++											memcpy(pool + pool_used, child_rel, rlen);
++											queue[qtail++] = pool_used;
++											pool_used += (uint32_t)rlen;
++											dirs_ok++;
++										} else {
++											cerr = ENOSPC;
++										}
++									}
++								} else if (vt == VREG) {
++									cerr = diting_ios27_copy_os_file_batched(child, path, mode, uid, gid,
++									    buffer, chunk_size, ctx, &bytes_total, NULL, NULL);
++									if (!cerr) {
++										files_ok++;
++									}
++								} else if (vt == VLNK) {
++									cerr = diting_ios27_copy_os_symlink(p, scratch, child, path, ctx);
++									if (!cerr) {
++										links_ok++;
++									}
++								}
++							}
++							vnode_put(child);
++						}
++						if (cerr) {
++							failed++;
++							last_err = cerr;
++						}
++						path[base] = '\0';
++					}
++				}
++				if (oerr) {
++					failed++;
++					last_err = oerr;
++				}
++				VNOP_CLOSE(dir, FREAD, ctx);
++				vnode_put(dir);
++			}
++		} else {
++			failed++;
++			last_err = ENOMEM;
++		}
++		if (path) kfree_data(path, MAXPATHLEN);
++		if (buffer) kfree_data(buffer, chunk_size);
++		if (entries) kfree_data(entries, entries_size);
++		if (queue) kfree_data(queue, max_dirs * sizeof(uint32_t));
++		if (pool) kfree_data(pool, pool_size);
++
++		/* Create standard empty restore directories expected on a fresh Data volume. */
++		static const struct { const char *path; mode_t mode; uid_t uid; gid_t gid; } extra_dirs[] = {
++		    {"/private/var/keybags", 0755, 0, 0},
++		    {"/private/var/keybags/backup", 0755, 0, 0},
++		    {"/private/var/containers", 0755, 0, 0},
++		    {"/private/var/containers/Bundle", 0755, 0, 0},
++		    {"/private/var/containers/Bundle/Application", 0755, 0, 0},
++		    {"/private/var/containers/Data", 0755, 0, 0},
++		    {"/private/var/containers/Data/System", 0755, 0, 0},
++		    {"/private/var/containers/Data/Application", 0755, 0, 0},
++		    {"/private/var/containers/Shared", 0755, 0, 0},
++		    {"/private/var/containers/Shared/SystemGroup", 0755, 0, 0},
++		    {"/private/var/containers/Temp", 0755, 0, 0},
++		    {"/private/var/PersonaVolumes", 0755, 0, 0},
++		    {"/private/var/preboot", 0755, 0, 0},
++		    {"/private/var/db/dslocal", 0755, 0, 0},
++		    {"/private/var/db/dslocal/nodes", 0755, 0, 0},
++		    {"/private/var/db/dslocal/nodes/Default", 0755, 0, 0},
++		    {"/private/var/db/dslocal/nodes/Default/users", 0755, 0, 0},
++		    {"/private/var/db/dslocal/nodes/Default/groups", 0755, 0, 0},
++		    {"/private/var/db/dslocal/nodes/Default/config", 0755, 0, 0},
++		    {"/private/var/mobile/tmp", 0755, 501, 501},
++		    {"/private/var/mobile/Containers", 0755, 501, 501},
++		    {"/private/var/mobile/Documents", 0755, 501, 501},
++		};
++		for (unsigned di = 0; di < sizeof(extra_dirs) / sizeof(extra_dirs[0]); ++di) {
++			int derr = diting_ios27_mkdir_attr(p, scratch, extra_dirs[di].path,
++			    extra_dirs[di].mode, extra_dirs[di].uid, extra_dirs[di].gid, ctx);
++			if (derr) {
++				failed++;
++				last_err = derr;
++			}
++		}
++
++		/*
++		 * Hardware display compatibility only: uncompressed 32-bit BGRA CoreAnimation
++		 * framebuffers (matching upstream make-data-seed.py without --skip-setup).
++		 * Preserve iOS 27 default locale/languages; never write skip-migration or
++		 * skip-setup preferences so real first-boot DataMigration and Setup run.
++		 */
++		static const char ca_body[] =
++		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++		    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
++		    "<plist version=\"1.0\"><dict>"
++		    "<key>CAEnableDeepFramebuffer</key><false/>"
++		    "<key>CAEnableFramebufferCompression</key><false/>"
++		    "<key>CAEnableIOSurfaceCompression</key><false/>"
++		    "</dict></plist>\n";
++		static const char mobile_gp_body[] =
++		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++		    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
++		    "<plist version=\"1.0\"><dict>"
++		    "<key>AppleLanguages</key><array><string>en</string></array>"
++		    "<key>AppleLocale</key><string>en_US</string>"
++		    "<key>CAEnableDeepFramebuffer</key><false/>"
++		    "<key>CAEnableFramebufferCompression</key><false/>"
++		    "<key>CAEnableIOSurfaceCompression</key><false/>"
++		    "</dict></plist>\n";
++		static const struct { const char *path; const char *body; uid_t uid; gid_t gid; } prefs[] = {
++		    {"/private/var/mobile/Library/Preferences/backboardd.plist", ca_body, 501, 501},
++		    {"/private/var/mobile/Library/Preferences/.GlobalPreferences.plist", mobile_gp_body, 501, 501},
++		    {"/private/var/root/Library/Preferences/backboardd.plist", ca_body, 0, 0},
++		    {"/private/var/root/Library/Preferences/.GlobalPreferences.plist", ca_body, 0, 0},
++		};
++		for (unsigned fi = 0; fi < sizeof(prefs) / sizeof(prefs[0]); ++fi) {
++			int wrc = diting_ios27_write_file(p, scratch, prefs[fi].path, prefs[fi].body,
++			    prefs[fi].uid, prefs[fi].gid, 0644);
++			if (wrc) {
++				failed++;
++				last_err = wrc;
++			}
++		}
++
++		if (failed == 0) {
++			(void)diting_ios27_write_file(p, scratch, init_marker, "24B156\n", 0, 0, 0644);
++		}
++		printf("DITING_INIT: os_var_init dirs=%d files=%d links=%d mib=%llu fail=%d err=%d\n",
++		    dirs_ok, files_ok, links_ok, (unsigned long long)(bytes_total >> 20), failed, last_err);
++	} else {
++		printf("DITING_INIT: os_var_init marker present (skipped)\n");
++	}
++
++	if (!staged_already_inited) {
++		diting_ios27_init_staged_apps_from_os(p, scratch, covered, var_already_inited, ctx);
++	}
++	vnode_put(covered);
++}
++
+ static void
+ diting_ios27_mount_volumes(proc_t p, user_addr_t scratch)
+ {
+@@ -9355,6 +10250,7 @@
+ 					printf("DITING_INIT: launchd disabled.plist len=%zu rc=%d\n", plen, perr);
+ 				}
+ 			}
++			diting_ios27_init_data_from_os(p, scratch);
+ 		}
+ 	} else {
+ 		printf("DITING_INIT: Data UUID %s not found\n", data_uuid);

@@ -4,13 +4,16 @@
 // reprogram the PLL, or lend a physical DMA buffer to the DSI controller.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IODeviceTreeSupport.h>
+#include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSCollectionIterator.h>
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/OSKextLib.h>
@@ -19,6 +22,7 @@
 #include "DitingBacklightProtocol.h"
 #include "DitingPanelMode.h"
 #include "DitingDisplayText.h"
+#include "DitingPlatformResources.h"
 #include "../DitingProbe.h"
 
 extern "C" bool diting_display_panel_rate(unsigned) __attribute__((weak_import));
@@ -33,6 +37,26 @@ using namespace DitingBrightness;
 DitingBacklight *gPublishedBacklight;
 const OSMetaClass *gAppleBacklightClass;
 uint32_t gPanelCopyReady;
+#ifdef DITING_GUEST_24B156
+// Standard SDR nits range for iOS 27 CoreBrightness (matches Sheng AppleARMBacklight.cpp).
+constexpr uint32_t kMinNits = 2, kMidNits = 140, kMaxNits = 500;
+volatile int32_t gBacklightLastNits;
+volatile uint32_t gBacklightUnknownKeyLogs;
+#endif
+volatile uint32_t gBacklightDiagPublished, gBacklightDiagLevel, gBacklightDiagGoal;
+volatile uint32_t gBacklightDiagRaw, gBacklightDiagRequests, gBacklightDiagWrites, gBacklightDiagReads;
+volatile uint32_t gBacklightDiagStopped;
+volatile uint32_t gBacklightDiagLastNz, gBacklightDiagFbPowered = 1, gBacklightDiagEnabled = 1;
+volatile int32_t gBacklightDiagLastNzNits;
+volatile uint32_t gBacklightDiagLowPower, gBacklightDiagRetries, gBacklightDiagWakeRestores;
+volatile uint32_t gBacklightDiagEnableCalls, gBacklightDiagFbMsgs, gBacklightDiagMetaCalls;
+volatile uint32_t gBacklightDiagErrAck, gBacklightDiagErrIrq;
+char gBacklightDiagError[64];
+char gBacklightDiagLastMeta[64];
+volatile uint32_t *gEsdGpioRegs, *gRstGpioRegs;
+constexpr uint64_t kSm8475TlmmBase = 0x0f100000ULL;
+constexpr uint32_t kL12EsdErrGpio = 0x74u; // mi,esd-err-irq-gpio = <&tlmm 0x74 0x2008>
+constexpr uint32_t kL12ResetGpio = 0x00u;  // qcom,platform-reset-gpio = <&tlmm 0x00 0x00>
 uint64_t nowNs() {
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -42,14 +66,19 @@ uint64_t nowNs() {
 
 class DitingBacklight : public IOService {
     OSDeclareDefaultStructors(DitingBacklight)
+    static constexpr uint32_t kMessageFramebufferState = 0xe0014001u;
     Board board = {};
     IOMemoryMap *mapping = nullptr;
+    IOMemoryMap *esdGpioMap = nullptr;
+    IOMemoryMap *rstGpioMap = nullptr;
     volatile uint32_t *regs = nullptr;
     IOWorkLoop *loop = nullptr;
     IOTimerEventSource *timer = nullptr;
     IOTimerEventSource *requestTimer = nullptr;
+    IOSimpleLock *policyLock = nullptr;
     const OSMetaClass *appleClass = nullptr;
     Command command;
+    WakePolicy policy;
     DitingPanel::Mode panelMode;
     unsigned panelHz=0;
     bool panelReported=false;
@@ -62,7 +91,31 @@ class DitingBacklight : public IOService {
     uint32_t level = 0, sending = 0, from = 0, goal = 0;
     uint64_t idleDeadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0;
     uint64_t request = 0;
-    uint32_t requestedFade = 0, requests = 0, writes = 0, reads = 0;
+    uint32_t requestedFade = 0, requests = 0, writes = 0, reads = 0, retries = 0;
+
+    void syncPolicyDiagLocked() const {
+        __atomic_store_n(&gBacklightDiagLastNz, policy.lastNonZeroLevel, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagLastNzNits, policy.lastNonZeroNits, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagFbPowered, policy.fbPowered ? 1u : 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagEnabled, policy.enabled ? 1u : 0u, __ATOMIC_RELAXED);
+        const uint32_t reqs = __atomic_load_n(&gBacklightDiagRequests, __ATOMIC_RELAXED);
+        const uint32_t diagGoal = __atomic_load_n(&gBacklightDiagGoal, __ATOMIC_RELAXED);
+        const bool displayOn = policy.fbPowered && policy.enabled && (reqs == 0 || diagGoal > 0);
+        diting_power_set_display_on(displayOn ? 1 : 0);
+    }
+    uint32_t queueTargetLocked(uint32_t target, uint32_t fadeMs) {
+        const uint32_t req = __atomic_add_fetch(&requests, 1u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagRequests, req, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagGoal, target, __ATOMIC_RELAXED);
+        __atomic_store_n(&request, (1ULL << 63) | ((uint64_t)target << 16) | (fadeMs & 0xffffu), __ATOMIC_RELEASE);
+        syncPolicyDiagLocked();
+        return req;
+    }
+    static bool parseBoolOrNumber(OSObject *obj, bool &out) {
+        if (OSBoolean *b = OSDynamicCast(OSBoolean, obj)) { out = b->getValue(); return true; }
+        if (OSNumber *n = OSDynamicCast(OSNumber, obj)) { out = n->unsigned64BitValue() != 0; return true; }
+        return false;
+    }
 
     uint32_t rd(uint32_t offset) const { return regs[offset / 4]; }
     void wr(uint32_t offset, uint32_t value) {
@@ -125,23 +178,90 @@ class DitingBacklight : public IOService {
         uint32_t raw = 0;
         const bool valid = DitingBrightness::readLevel(rd(ReadControl) >> 16,
             rd(ReadData0), rd(ReadData1), raw);
-        if (valid) setProperty("DitingBrightnessRawReadback", raw, 32);
+        if (valid) {
+            setProperty("DitingBrightnessRawReadback", raw, 32);
+            __atomic_store_n(&gBacklightDiagRaw, raw, __ATOMIC_RELAXED);
+        }
         return valid && DitingBrightness::controlLevel(board, raw, answer);
     }
     bool publishLevel() {
+        __atomic_store_n(&gBacklightDiagLevel, level, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagGoal, goal, __ATOMIC_RELAXED);
         OSDictionary *item = OSDictionary::withCapacity(3);
+#ifdef DITING_GUEST_24B156
+        OSDictionary *milliNits = OSDictionary::withCapacity(3);
+        OSDictionary *parameters = OSDictionary::withCapacity(2);
+        OSNumber *minMilli = OSNumber::withNumber(kMinNits * 1000ULL, 32);
+        OSNumber *maxMilli = OSNumber::withNumber(kMaxNits * 1000ULL, 32);
+        OSNumber *curMilli = OSNumber::withNumber(board.maximum ? (uint64_t)level * kMaxNits * 1000ULL / board.maximum : 0ULL, 32);
+#else
         OSDictionary *parameters = OSDictionary::withCapacity(1);
+#endif
         OSNumber *minimum = OSNumber::withNumber(0ULL, 32);
         OSNumber *maximum = OSNumber::withNumber(board.maximum, 32);
         OSNumber *value = OSNumber::withNumber(level, 32);
-        const bool ready = item && parameters && minimum && maximum && value &&
+        bool ready = item && parameters && minimum && maximum && value &&
             item->setObject("min", minimum) && item->setObject("max", maximum) && item->setObject("value", value) &&
-            parameters->setObject("brightness", item) && setProperty("IODisplayParameters", parameters);
+            parameters->setObject("brightness", item);
+#ifdef DITING_GUEST_24B156
+        ready = ready && milliNits && minMilli && maxMilli && curMilli &&
+            milliNits->setObject("min", minMilli) && milliNits->setObject("max", maxMilli) &&
+            milliNits->setObject("value", curMilli) &&
+            parameters->setObject("BrightnessMilliNits", milliNits);
+        OSSafeReleaseNULL(milliNits); OSSafeReleaseNULL(minMilli);
+        OSSafeReleaseNULL(maxMilli); OSSafeReleaseNULL(curMilli);
+#endif
+        ready = ready && setProperty("IODisplayParameters", parameters);
         OSSafeReleaseNULL(item); OSSafeReleaseNULL(parameters);
         OSSafeReleaseNULL(minimum); OSSafeReleaseNULL(maximum); OSSafeReleaseNULL(value);
         return ready;
     }
+#ifdef DITING_GUEST_24B156
+    void publishCalibration() {
+        const int32_t table[] = {(int32_t)(kMinNits << 16), (int32_t)(kMidNits << 16), (int32_t)(kMaxNits << 16)};
+        if (OSData *marketing = OSData::withBytes(table, sizeof(table))) {
+            setProperty("backlight-marketing-table", marketing);
+            marketing->release();
+        }
+        if (OSData *lmax = OSData::withBytes(&table[2], sizeof(table[2]))) {
+            setProperty("LmaxProduct", lmax);
+            lmax->release();
+        }
+        const struct { const char *key; uint32_t nits; } products[] = {
+            {"LminProduct", kMinNits}, {"LmidProduct", kMidNits}
+        };
+        for (const auto &p : products) {
+            if (OSNumber *v = OSNumber::withNumber(p.nits, 32)) {
+                setProperty(p.key, v);
+                v->release();
+            }
+        }
+        OSDictionary *calibration = OSDictionary::withCapacity(6);
+        if (!calibration) return;
+        const struct { const char *key; uint32_t nits; } fields[] = {
+            {"lMinProduct", kMinNits}, {"lMidProduct", kMidNits}, {"lMaxProduct", kMaxNits},
+            {"lMinPanel", kMinNits}, {"lMidPanel", kMidNits}, {"lMaxPanel", kMaxNits}
+        };
+        for (const auto &f : fields) {
+            if (OSNumber *num = OSNumber::withNumber((uint64_t)f.nits << 16, 32)) {
+                calibration->setObject(f.key, num);
+                num->release();
+            }
+        }
+        setProperty("backlight-calibration-parameters", calibration);
+        calibration->release();
+    }
+    uint32_t levelForNits(int32_t fixed) const {
+        if (fixed <= 0) return 0;
+        const uint64_t scale = (uint64_t)kMaxNits << 16;
+        const uint64_t scaled = ((uint64_t)fixed * board.maximum + scale / 2) / scale;
+        if (scaled < board.minimum) return board.minimum;
+        if (scaled > board.maximum) return board.maximum;
+        return (uint32_t)scaled;
+    }
+#endif
     void reportError(const char *reason) {
+        strlcpy(gBacklightDiagError, reason ? reason : "", sizeof(gBacklightDiagError));
         OSString *previous = OSDynamicCast(OSString, getProperty("DitingBacklightError"));
         if (previous && previous->isEqualTo(reason)) return;
         setProperty("DitingBacklightError", reason);
@@ -150,6 +270,7 @@ class DitingBacklight : public IOService {
     }
     void fail(const char *reason) {
         __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&gBacklightDiagStopped, 1u, __ATOMIC_RELEASE);
         timer->cancelTimeout(); requestTimer->cancelTimeout();
         reportError(reason);
         if (command.inFlight()) command.finish();
@@ -159,6 +280,14 @@ class DitingBacklight : public IOService {
         // permit a newer request; the mailbox has not been consumed yet.
         needVerification = queryPending = retryPending = false;
         goal = from = level; fadeDuration = 0; idleDeadline = 0;
+        if (policyLock) {
+            IOSimpleLockLock(policyLock);
+            if (!(__atomic_load_n(&request, __ATOMIC_ACQUIRE) >> 63)) {
+                policy.currentTarget = level;
+                syncPolicyDiagLocked();
+            }
+            IOSimpleLockUnlock(policyLock);
+        }
         reportError(reason); timer->cancelTimeout();
         if (__atomic_load_n(&request, __ATOMIC_ACQUIRE) >> 63) timer->setTimeoutMS(1);
     }
@@ -184,8 +313,12 @@ class DitingBacklight : public IOService {
             removeProperty("backlight-control"); removeProperty("DitingBacklightProtocol");
             fail("brightness service property allocation failed"); return false;
         }
+#ifdef DITING_GUEST_24B156
+        publishCalibration();
+#endif
         gAppleBacklightClass = appleClass;
         __atomic_store_n(&gPublishedBacklight, this, __ATOMIC_RELEASE);
+        __atomic_store_n(&gBacklightDiagPublished, 1u, __ATOMIC_RELEASE);
         published = true; setName("AppleARMBacklight"); registerService();
         IOLog("DitingBacklight: L12 DCS service ready, level=%u max=%u, readback PASS\n", level, board.maximum);
         return true;
@@ -228,7 +361,11 @@ class DitingBacklight : public IOService {
             uint32_t returned = 0;
             const bool readOk = completion == Completion::Done &&
                 (operation == WriteLevel || operation == SetReadSize || readLevel(returned));
-            if (completion == Completion::Error) reportError("retired DSI command error");
+            if (completion == Completion::Error) {
+                __atomic_store_n(&gBacklightDiagErrAck, rd(AckError), __ATOMIC_RELAXED);
+                __atomic_store_n(&gBacklightDiagErrIrq, rd(InterruptControl), __ATOMIC_RELAXED);
+                reportError("retired DSI command error");
+            }
             if (!command.finish()) { timer->setTimeoutMS(1); return; }
             if (!readOk) {
                 // The command has retired, so a malformed response does
@@ -236,6 +373,24 @@ class DitingBacklight : public IOService {
                 // measured level and allow a later OS request to retry.
                 // An initial read is still required before publication.
                 if (!published) { fail("invalid initial DCS brightness response"); return; }
+                const bool isWriteOrVerify = (operation == WriteLevel) || (operation == ReadVerify) ||
+                    (operation == SetReadSize && pendingRead == ReadVerify);
+                if (completion == Completion::Error &&
+                    DitingBrightness::shouldRetryError(published, retriedWrite, sending, level, isWriteOrVerify)) {
+                    // Retry a retired HS/LP command error once in the opposite
+                    // signalling mode before abandoning the write.
+                    retriedWrite = retryPending = true;
+                    lowPowerWrite = !lowPowerWrite;
+                    retries++;
+                    __atomic_store_n(&gBacklightDiagLowPower, lowPowerWrite ? 1u : 0u, __ATOMIC_RELAXED);
+                    __atomic_store_n(&gBacklightDiagRetries, retries, __ATOMIC_RELAXED);
+                    needVerification = queryPending = false;
+                    idleDeadline = 0;
+                    IOLog("DitingBacklight: DSI command error op=%u sending=%u; retrying once with LP=%u\n",
+                          (unsigned)operation, sending, lowPowerWrite ? 1u : 0u);
+                    timer->setTimeoutMS(2);
+                    return;
+                }
                 abandonRetired(completion == Completion::Error ?
                     "retired DSI command error" : "invalid DCS brightness response");
                 return;
@@ -244,11 +399,13 @@ class DitingBacklight : public IOService {
                 queryPending = true;
             } else if (operation == WriteLevel) {
                 writes++; needVerification = true;
+                __atomic_store_n(&gBacklightDiagWrites, writes, __ATOMIC_RELAXED);
                 // DMA completion retires the packet, not the panel's DBV
                 // latch. Let at least two 120 Hz scans pass before GET.
                 verifyAfter = nowNs() + 20000000ULL;
             } else {
                 reads++;
+                __atomic_store_n(&gBacklightDiagReads, reads, __ATOMIC_RELAXED);
                 if (operation == ReadVerify && returned != sending) {
                     level = clamped(returned); publishLevel(); needVerification = false;
                     // Retry the same retired write once with the other
@@ -257,6 +414,9 @@ class DitingBacklight : public IOService {
                     // the panel rejected. Uncertain DMA retains ownership.
                     if (!retriedWrite) {
                         retriedWrite = retryPending = true; lowPowerWrite = !lowPowerWrite;
+                        retries++;
+                        __atomic_store_n(&gBacklightDiagLowPower, lowPowerWrite ? 1u : 0u, __ATOMIC_RELAXED);
+                        __atomic_store_n(&gBacklightDiagRetries, retries, __ATOMIC_RELAXED);
                     } else {
                         setProperty("DitingBacklightError", "DBV not accepted");
                         IOLog("DitingBacklight: DBV rejected wanted=%u measured=%u LP=%u; later requests remain available\n",
@@ -266,10 +426,26 @@ class DitingBacklight : public IOService {
                 } else {
                     level = clamped(returned);
                     removeProperty("DitingBacklightError");
+                    gBacklightDiagError[0] = 0;
                     retriedWrite = retryPending = false;
                 }
-                if (!published) { from = goal = level; if (!publishFirst()) return; }
-                else publishLevel();
+                if (!published) {
+                    from = goal = level;
+                    if (policyLock) {
+                        IOSimpleLockLock(policyLock);
+                        if (!policy.initialized) {
+                            int32_t initNits = 0;
+#ifdef DITING_GUEST_24B156
+                            initNits = board.maximum ?
+                                (int32_t)(((uint64_t)level * ((uint64_t)kMaxNits << 16)) / board.maximum) : 0;
+#endif
+                            policy.onInitialLevel(board, level, initNits);
+                            syncPolicyDiagLocked();
+                        }
+                        IOSimpleLockUnlock(policyLock);
+                    }
+                    if (!publishFirst()) return;
+                } else publishLevel();
                 needVerification = false;
                 setProperty("DitingBrightnessReadback", returned, 32);
                 setProperty("DitingBrightnessReadQuantum", 1u, 32);
@@ -363,17 +539,213 @@ public:
         loop = IOWorkLoop::workLoop();
         timer = IOTimerEventSource::timerEventSource(this, tick);
         requestTimer = IOTimerEventSource::timerEventSource(this, tick);
-        if (!loop || !timer || !requestTimer || loop->addEventSource(timer) || loop->addEventSource(requestTimer)) return false;
+        policyLock = IOSimpleLockAlloc();
+        if (!loop || !timer || !requestTimer || !policyLock ||
+            loop->addEventSource(timer) || loop->addEventSource(requestTimer)) return false;
+        if (IODeviceMemory *esdMem = IODeviceMemory::withRange(kSm8475TlmmBase + kL12EsdErrGpio * 0x1000ULL, 0x1000)) {
+            esdGpioMap = esdMem->map(kIOMapAnywhere | kIOMapInhibitCache);
+            esdMem->release();
+            if (esdGpioMap) {
+                __atomic_store_n(&gEsdGpioRegs,
+                    reinterpret_cast<volatile uint32_t *>(esdGpioMap->getVirtualAddress()), __ATOMIC_RELEASE);
+            }
+        }
+        if (IODeviceMemory *rstMem = IODeviceMemory::withRange(kSm8475TlmmBase + kL12ResetGpio * 0x1000ULL, 0x1000)) {
+            rstGpioMap = rstMem->map(kIOMapAnywhere | kIOMapInhibitCache);
+            rstMem->release();
+            if (rstGpioMap) {
+                __atomic_store_n(&gRstGpioRegs,
+                    reinterpret_cast<volatile uint32_t *>(rstGpioMap->getVirtualAddress()), __ATOMIC_RELEASE);
+            }
+        }
         setProperty("DitingPanel", "Diting L12 AMOLED / SM8475 DSI0");
         setProperty("DitingDSIVersion", rd(Version), 32);
         classDeadline = nowNs() + 30000000000ULL;
         timer->setTimeoutMS(1);
         return true;
     }
+    IOReturn message(UInt32 type, IOService *provider, void *argument) override {
+        if (type == kMessageFramebufferState) {
+            if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE) || !policyLock) return kIOReturnNotReady;
+            const bool powered = (reinterpret_cast<uintptr_t>(argument) != 0);
+            const uint32_t msgCount = __atomic_add_fetch(&gBacklightDiagFbMsgs, 1u, __ATOMIC_RELAXED);
+            IOSimpleLockLock(policyLock);
+            const WakeAction act = policy.onFramebufferState(board, powered);
+            uint32_t req = 0;
+            if (act.submit) {
+#ifdef DITING_GUEST_24B156
+                if (act.restored) {
+                    const int32_t restoredNits = policy.lastNonZeroNits > 0 ? policy.lastNonZeroNits :
+                        (board.maximum ? (int32_t)(((uint64_t)act.target * ((uint64_t)kMaxNits << 16)) / board.maximum) : 0);
+                    __atomic_store_n(&gBacklightLastNits, restoredNits, __ATOMIC_RELAXED);
+                } else if (act.target == 0) {
+                    __atomic_store_n(&gBacklightLastNits, 0, __ATOMIC_RELAXED);
+                }
+#endif
+                req = queueTargetLocked(act.target, 0);
+            } else {
+                syncPolicyDiagLocked();
+            }
+            IOSimpleLockUnlock(policyLock);
+            if (act.restored) __atomic_add_fetch(&gBacklightDiagWakeRestores, 1u, __ATOMIC_RELAXED);
+            if (act.submit) requestTimer->setTimeoutUS(1);
+            if (msgCount <= 16 || act.restored) {
+                IOLog("DitingBacklight: fbState -> %u submit=%u restored=%u target=%u req#%u\n",
+                      powered ? 1u : 0u, act.submit ? 1u : 0u, act.restored ? 1u : 0u, act.target, req);
+            }
+            return kIOReturnSuccess;
+        }
+        return IOService::message(type, provider, argument);
+    }
     IOReturn setProperties(OSObject *object) override {
         OSDictionary *properties = OSDynamicCast(OSDictionary, object);
         if (!properties) return kIOReturnBadArgument;
-        if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return kIOReturnNotReady;
+        if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE) || !policyLock) return kIOReturnNotReady;
+#ifdef DITING_GUEST_24B156
+        // iOS 27 CoreBrightness sends signed 16.16 nits in "brightness-nits" /
+        // "dcp-brightness-nits", enable controls in "EnableBacklight" /
+        // "dcp-backlight-enable", plus brightness/FadePeriod compatibility.
+        bool handled = false;
+        if (OSNumber *fade = OSDynamicCast(OSNumber, properties->getObject("FadePeriod"))) {
+            __atomic_store_n(&requestedFade,
+                DitingBrightness::fadeMilliseconds(fade->unsigned64BitValue(), fade->numberOfBits()),
+                __ATOMIC_RELAXED);
+            handled = true;
+        }
+        OSNumber *nits = OSDynamicCast(OSNumber, properties->getObject("brightness-nits"));
+        if (!nits) nits = OSDynamicCast(OSNumber, properties->getObject("dcp-brightness-nits"));
+        OSNumber *brightness = OSDynamicCast(OSNumber, properties->getObject("brightness"));
+        const bool hasExplicitBrightness = (nits != nullptr) || (brightness != nullptr);
+
+        bool dcpEnable = false;
+        if (parseBoolOrNumber(properties->getObject("dcp-backlight-enable"), dcpEnable)) {
+            const uint32_t enCalls = __atomic_add_fetch(&gBacklightDiagEnableCalls, 1u, __ATOMIC_RELAXED);
+            IOSimpleLockLock(policyLock);
+            const WakeAction act = policy.onFramebufferState(board, dcpEnable);
+            uint32_t req = 0;
+            const bool submit = !hasExplicitBrightness && act.submit;
+            if (submit) {
+                if (act.restored) {
+                    const int32_t restoredNits = policy.lastNonZeroNits > 0 ? policy.lastNonZeroNits :
+                        (board.maximum ? (int32_t)(((uint64_t)act.target * ((uint64_t)kMaxNits << 16)) / board.maximum) : 0);
+                    __atomic_store_n(&gBacklightLastNits, restoredNits, __ATOMIC_RELAXED);
+                } else if (act.target == 0) {
+                    __atomic_store_n(&gBacklightLastNits, 0, __ATOMIC_RELAXED);
+                }
+                req = queueTargetLocked(act.target, 0);
+            } else {
+                syncPolicyDiagLocked();
+            }
+            IOSimpleLockUnlock(policyLock);
+            if (submit && act.restored) __atomic_add_fetch(&gBacklightDiagWakeRestores, 1u, __ATOMIC_RELAXED);
+            if (submit) requestTimer->setTimeoutUS(1);
+            if (enCalls <= 16 || (submit && act.restored)) {
+                IOLog("DitingBacklight: dcp-backlight-enable=%u submit=%u restored=%u target=%u req#%u\n",
+                      dcpEnable ? 1u : 0u, submit ? 1u : 0u, act.restored ? 1u : 0u, act.target, req);
+            }
+            handled = true;
+        }
+        bool enableFlag = false;
+        if (parseBoolOrNumber(properties->getObject("EnableBacklight"), enableFlag)) {
+            const uint32_t enCalls = __atomic_add_fetch(&gBacklightDiagEnableCalls, 1u, __ATOMIC_RELAXED);
+            IOSimpleLockLock(policyLock);
+            const WakeAction act = policy.onEnableRequest(board, enableFlag);
+            uint32_t req = 0;
+            const bool submit = !hasExplicitBrightness && act.submit;
+            if (submit) {
+                if (act.restored) {
+                    const int32_t restoredNits = policy.lastNonZeroNits > 0 ? policy.lastNonZeroNits :
+                        (board.maximum ? (int32_t)(((uint64_t)act.target * ((uint64_t)kMaxNits << 16)) / board.maximum) : 0);
+                    __atomic_store_n(&gBacklightLastNits, restoredNits, __ATOMIC_RELAXED);
+                } else if (act.target == 0) {
+                    __atomic_store_n(&gBacklightLastNits, 0, __ATOMIC_RELAXED);
+                }
+                req = queueTargetLocked(act.target, 0);
+            } else {
+                syncPolicyDiagLocked();
+            }
+            IOSimpleLockUnlock(policyLock);
+            if (submit && act.restored) __atomic_add_fetch(&gBacklightDiagWakeRestores, 1u, __ATOMIC_RELAXED);
+            if (submit) requestTimer->setTimeoutUS(1);
+            if (enCalls <= 16 || (submit && act.restored)) {
+                IOLog("DitingBacklight: EnableBacklight=%u submit=%u restored=%u target=%u req#%u\n",
+                      enableFlag ? 1u : 0u, submit ? 1u : 0u, act.restored ? 1u : 0u, act.target, req);
+            }
+            handled = true;
+        }
+        if (nits) {
+            const int32_t fixed = static_cast<int32_t>(nits->unsigned32BitValue());
+            const uint32_t target = levelForNits(fixed);
+            IOSimpleLockLock(policyLock);
+            const WakeAction act = policy.onBrightnessRequest(board, target, fixed, true);
+            __atomic_store_n(&gBacklightLastNits, fixed, __ATOMIC_RELAXED);
+            const uint32_t req = queueTargetLocked(act.target, 0);
+            IOSimpleLockUnlock(policyLock);
+            if (req <= 12) IOLog("DitingBacklight: req#%u brightness-nits=0x%x (%d nits) -> level=%u\n", req, (unsigned)fixed, fixed >> 16, act.target);
+            requestTimer->setTimeoutUS(1);
+            return kIOReturnSuccess;
+        }
+        if (brightness) {
+            const uint32_t ms = __atomic_load_n(&requestedFade, __ATOMIC_RELAXED);
+            const uint32_t target = DitingBrightness::requestedLevel(board, brightness->unsigned64BitValue(), brightness->numberOfBits());
+            IOSimpleLockLock(policyLock);
+            const WakeAction act = policy.onBrightnessRequest(board, target);
+            queueTargetLocked(act.target, ms);
+            IOSimpleLockUnlock(policyLock);
+            requestTimer->setTimeoutUS(1);
+            return kIOReturnSuccess;
+        }
+        if (handled) return kIOReturnSuccess;
+        const uint32_t metaIdx = __atomic_fetch_add(&gBacklightUnknownKeyLogs, 1u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gBacklightDiagMetaCalls, metaIdx + 1u, __ATOMIC_RELAXED);
+        OSCollectionIterator *it = OSCollectionIterator::withCollection(properties);
+        if (it) {
+            bool recordedFirst = false;
+            while (const OSSymbol *key = OSDynamicCast(OSSymbol, it->getNextObject())) {
+                const char *kname = key->getCStringNoCopy();
+                OSObject *val = properties->getObject(key);
+                char summary[48];
+                if (OSNumber *num = OSDynamicCast(OSNumber, val)) {
+                    snprintf(summary, sizeof(summary), "num(0x%llx)", (unsigned long long)num->unsigned64BitValue());
+                } else if (OSBoolean *b = OSDynamicCast(OSBoolean, val)) {
+                    snprintf(summary, sizeof(summary), "bool(%u)", b->getValue() ? 1u : 0u);
+                } else if (OSDictionary *dict = OSDynamicCast(OSDictionary, val)) {
+                    snprintf(summary, sizeof(summary), "dict(%u)", dict->getCount());
+                } else if (OSData *d = OSDynamicCast(OSData, val)) {
+                    snprintf(summary, sizeof(summary), "data(%u)", d->getLength());
+                } else {
+                    snprintf(summary, sizeof(summary), "other");
+                }
+                if (!recordedFirst && kname) {
+                    recordedFirst = true;
+                    snprintf(gBacklightDiagLastMeta, sizeof(gBacklightDiagLastMeta), "%s:%s", kname, summary);
+                }
+                if (metaIdx < 16 && kname) {
+                    if (OSDictionary *dict = OSDynamicCast(OSDictionary, val)) {
+                        char subkeys[96] = {};
+                        size_t pos = 0;
+                        unsigned subCount = 0;
+                        if (OSCollectionIterator *sub = OSCollectionIterator::withCollection(dict)) {
+                            while (const OSSymbol *sk = OSDynamicCast(OSSymbol, sub->getNextObject())) {
+                                if (subCount >= 6 || pos + 4 >= sizeof(subkeys)) break;
+                                const char *sn = sk->getCStringNoCopy();
+                                if (!sn) continue;
+                                int w = snprintf(subkeys + pos, sizeof(subkeys) - pos, "%s%s", subCount ? "," : "", sn);
+                                if (w > 0) pos += (size_t)w < sizeof(subkeys) - pos ? (size_t)w : sizeof(subkeys) - pos - 1;
+                                subCount++;
+                            }
+                            sub->release();
+                        }
+                        IOLog("DitingBacklight: meta#%u key=%s %s [%s]\n", metaIdx + 1u, kname, summary, subkeys);
+                    } else {
+                        IOLog("DitingBacklight: meta#%u key=%s %s\n", metaIdx + 1u, kname, summary);
+                    }
+                }
+            }
+            it->release();
+        }
+        return kIOReturnSuccess;
+#else
         // Darwin24 also sends the optional calibrated current-table level.
         // It is metadata, not another L12 DBV command.
         if (properties->getCount() > 3 ||
@@ -391,22 +763,36 @@ public:
         if (fade) __atomic_store_n(&requestedFade, ms, __ATOMIC_RELAXED);
         if (!brightness) return kIOReturnSuccess;
         const uint32_t target = DitingBrightness::requestedLevel(board, brightness->unsigned64BitValue(), brightness->numberOfBits());
-        __atomic_fetch_add(&requests, 1u, __ATOMIC_RELAXED);
-        __atomic_store_n(&request, (1ULL << 63) | ((uint64_t)target << 16) | ms, __ATOMIC_RELEASE);
+        IOSimpleLockLock(policyLock);
+        const WakeAction act = policy.onBrightnessRequest(board, target);
+        queueTargetLocked(act.target, ms);
+        IOSimpleLockUnlock(policyLock);
         // A separate event source prevents the transaction/fade timer from
         // overwriting a concurrently armed slider wakeup.
         requestTimer->setTimeoutUS(1); // caller never waits on DSI or the work-loop gate
         return kIOReturnSuccess;
+#endif
     }
     void free() override {
         if (__atomic_load_n(&gPublishedBacklight, __ATOMIC_ACQUIRE) == this)
             __atomic_store_n(&gPublishedBacklight, (DitingBacklight *)nullptr, __ATOMIC_RELEASE);
+        __atomic_store_n(&gEsdGpioRegs, (volatile uint32_t *)nullptr, __ATOMIC_RELEASE);
+        __atomic_store_n(&gRstGpioRegs, (volatile uint32_t *)nullptr, __ATOMIC_RELEASE);
         if (timer) { timer->cancelTimeout(); if (loop) loop->removeEventSource(timer); }
         if (requestTimer) { requestTimer->cancelTimeout(); if (loop) loop->removeEventSource(requestTimer); }
-        OSSafeReleaseNULL(timer); OSSafeReleaseNULL(requestTimer); OSSafeReleaseNULL(loop); OSSafeReleaseNULL(mapping);
+        if (policyLock) { IOSimpleLockFree(policyLock); policyLock = nullptr; }
+        OSSafeReleaseNULL(timer); OSSafeReleaseNULL(requestTimer); OSSafeReleaseNULL(loop);
+        OSSafeReleaseNULL(esdGpioMap); OSSafeReleaseNULL(rstGpioMap); OSSafeReleaseNULL(mapping);
         IOService::free();
     }
 };
+
+extern "C" void diting_backlight_display_power(bool on) {
+    DitingBacklight *backlight = __atomic_load_n(&gPublishedBacklight, __ATOMIC_ACQUIRE);
+    if (!backlight) return;
+    backlight->message(0xe0014001u, backlight->getProvider(),
+                       reinterpret_cast<void *>(static_cast<uintptr_t>(on ? 1u : 0u)));
+}
 
 extern "C" void diting_panel_copy_ready(void) {
     __atomic_store_n(&gPanelCopyReady,1,__ATOMIC_RELEASE);
@@ -432,6 +818,50 @@ extern "C" unsigned diting_panel_snapshot_text(char *out,unsigned bytes) {
     t.add("PANEL_COLOUR status=%u address_before=%02x address_after=%02x writes=%u restored=%u error=%u physical_colour=UNQUALIFIED\n",
         d.colourStatus,d.addressMode,d.addressAfter,d.colourWrites,d.colourRestored,d.colourError);
     for(const auto &r:d.responses)if(r[0])t.add("PANEL_REPLY reg=%02x control=%08x data0=%08x data1=%08x\n",r[0],r[1],r[2],r[3]);
+    return t.used;
+}
+extern "C" unsigned diting_backlight_snapshot_text(char *out,unsigned bytes) {
+    if(!out || !bytes)return 0;
+    DitingDisplay::Text t{out,bytes};
+#ifdef DITING_GUEST_24B156
+    const int32_t lastNits = __atomic_load_n(&gBacklightLastNits, __ATOMIC_RELAXED);
+#else
+    const int32_t lastNits = 0;
+#endif
+    t.add("BACKLIGHT published=%u level=%u goal=%u raw=%u requests=%u writes=%u reads=%u stopped=%u last_nits_q16=%d err=%s\n",
+        __atomic_load_n(&gBacklightDiagPublished, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gBacklightDiagLevel, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagGoal, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagRaw, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagRequests, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagWrites, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagReads, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagStopped, __ATOMIC_ACQUIRE),
+        lastNits, gBacklightDiagError[0] ? gBacklightDiagError : "none");
+    uint32_t esdCfg = 0, esdIo = 0, rstCfg = 0, rstIo = 0;
+    if (volatile uint32_t *esd = __atomic_load_n(&gEsdGpioRegs, __ATOMIC_ACQUIRE)) {
+        esdCfg = esd[0]; esdIo = esd[1];
+        __asm__ volatile("dmb oshld" ::: "memory");
+    }
+    if (volatile uint32_t *rst = __atomic_load_n(&gRstGpioRegs, __ATOMIC_ACQUIRE)) {
+        rstCfg = rst[0]; rstIo = rst[1];
+        __asm__ volatile("dmb oshld" ::: "memory");
+    }
+    t.add("BACKLIGHT_DIAG fb=%u enabled=%u last_nz=%u last_nz_nits_q16=%d lp=%u retries=%u wake_restores=%u en_calls=%u fb_msgs=%u meta_calls=%u last_meta=%s err_ack=%08x err_irq=%08x esd_gpio=%08x/%08x rst_gpio=%08x/%08x\n",
+        __atomic_load_n(&gBacklightDiagFbPowered, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagEnabled, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagLastNz, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagLastNzNits, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagLowPower, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagRetries, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagWakeRestores, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagEnableCalls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagFbMsgs, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagMetaCalls, __ATOMIC_RELAXED),
+        gBacklightDiagLastMeta[0] ? gBacklightDiagLastMeta : "none",
+        __atomic_load_n(&gBacklightDiagErrAck, __ATOMIC_RELAXED),
+        __atomic_load_n(&gBacklightDiagErrIrq, __ATOMIC_RELAXED),
+        esdCfg, esdIo, rstCfg, rstIo);
     return t.used;
 }
 

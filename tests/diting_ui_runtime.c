@@ -209,6 +209,9 @@ static void prerequisites_and_failures(void)
     reset(0755);fail_open=stage;assert(install()==ENOSPC);equal_file(library,original,64);assert(!find(backup) && !find(identity));gpu_unchanged();
     reset(0755);archive[64]^=0xff;assert(install()==EINVAL && !writes && !upgrades);gpu_unchanged();
     reset(0755);candidate[0]=0;pack(0x11);assert(install()==EINVAL && !writes && !upgrades);gpu_unchanged();
+    reset(0755);diting_ui_runtime_prepare(NULL,0);
+    assert(diting_ui_runtime_error==EINVAL && !writes && !upgrades);
+    equal_file(library,original,64);gpu_unchanged();
 }
 int main(void)
 {

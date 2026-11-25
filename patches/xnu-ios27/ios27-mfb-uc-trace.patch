@@ -1,0 +1,38 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -5169,6 +5169,10 @@
+ }
+ 
+ /* Routine io_user_client_method */
++#if DEVELOPMENT || DEBUG
++extern "C" void diting_mfb_uc_trace(void *, uint32_t, IOReturn) __attribute__((weak_import));
++#endif
++
+ kern_return_t
+ is_io_connect_method
+ (
+@@ -5256,6 +5260,11 @@
+ 	if (kIOReturnSuccess == ret) {
+ 		ret = client->callExternalMethod( selector, &args );
+ 	}
++#if DEVELOPMENT || DEBUG
++	if (&diting_mfb_uc_trace) {
++		diting_mfb_uc_trace(client, selector, ret);
++	}
++#endif
+ 
+ 	*scalar_outputCnt = args.scalarOutputCount;
+ 	*inband_outputCnt = args.structureOutputSize;
+@@ -5370,6 +5379,11 @@
+ 	if (kIOReturnSuccess == ret) {
+ 		ret = client->callExternalMethod( selector, &args );
+ 	}
++#if DEVELOPMENT || DEBUG
++	if (&diting_mfb_uc_trace) {
++		diting_mfb_uc_trace(client, selector, ret);
++	}
++#endif
+ 
+ 	*scalar_outputCnt = args.scalarOutputCount;
+ 	*inband_outputCnt = args.structureOutputSize;

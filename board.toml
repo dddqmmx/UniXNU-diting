@@ -196,6 +196,7 @@ unixnu = "../UniXNU"
 
 [package.defconfig]
 "ipados-18.7.10-22H374" = "diting_ipados18_defconfig"
+"ios-27.2.1-24B156" = "diting_ios27_defconfig"
 
 [bootimg]
 # Compiled by scripts/build-diting-hardware-dtb.py at the firmware preflight step, relative to the
@@ -211,3 +212,76 @@ dtb = "build/diting/diting.dtb"
 # container the local flow produces; see the payload section above.
 header_version = 0
 pagesize = 4096
+
+# iOS 27 is a separate arm64e/xnu-12377 development target. The default and
+# its DitingPlatform24 runtime continue to select the existing iPadOS 18 port.
+[os_overrides."ios-27.2.1-24B156"]
+remove = ["kernel.builder_component", "kernel.machine_config"]
+
+[os_overrides."ios-27.2.1-24B156".components]
+include = ["ArmDTPlatform", "ArmCpu", "XnuPrelink", "DarwinBoot"]
+
+[os_overrides."ios-27.2.1-24B156".ipsw]
+url = "https://updates.cdn-apple.com/2026FallFCS/5cf23110-0e1e-4f62-aef3-746ff41c71f4/iPhone18,2_27.2.1_24B156_Restore.ipsw"
+product = "iPhone18,2"
+version = "27.2.1"
+build = "24B156"
+device_class = "v54ap"
+variant = "Customer Erase Install (IPSW)"
+chip_id = 0x8150
+board_id = 0x0e
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
+
+[os_overrides."ios-27.2.1-24B156".kernel]
+defconfig = "diting_ios27_defconfig"
+config_fragments = ["arch:configs/common.config", "os:configs/ios.config"]
+patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ios27/series"]
+archives = [
+  "build-corecrypto-14.py", "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform", "component:ArmCpu", "build-libpthread-kernel.py",
+  "build-diting-ios27-drivers.py --tree .",
+]
+
+[os_overrides."ios-27.2.1-24B156".kernel.prelink]
+tool = "kits/XnuPrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+slide = "0"
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe000927b430"
+extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--fileset-no-reference-order"]
+roots = [
+  "com.apple.kec.corecrypto", "com.apple.filesystems.apfs",
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.security.AppleImage4",
+  "com.apple.kext.CoreTrust", "com.apple.security.sandbox",
+  "com.apple.iokit.IOStorageFamily", "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOSurface",
+  "com.apple.iokit.IOMobileGraphicsFamily", "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOReportFamily",
+]
+
+[os_overrides."ios-27.2.1-24B156".payload]
+title = "Diting iOS 27.2.1"
+kernel_args = [
+  "-v", "keepsyms=1", "cpus=8", "debug=0x14e", "serial=0", "smp=1",
+  "armcpu-self-ipi=1", "armcpu-edge=1", "use_contiguous_hint=0",
+  "diting_fast_cs=1", "native-source-storage=1", "diting_ufs_readwrite=1",
+  "no-lc=1", "owner-dataprotect=1", "disable-watchdogd=1", "lite=1",
+  "sched_preemption_disable_debug_mode=0", "interrupt-masked-debug-mode=0",
+  "validation_disables=0x11040", "lcks=0x10",
+  "offline-mobile-graphics-load=1", "offline-mobile-graphics-client=1",
+  "offline-legacy-register=1", "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=3", "offline-legacy-pm=1",
+  "offline-legacy-validate=1", "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1", "offline-legacy-phase=4",
+  "vsync=120", "vsync-fixed=1", "sheng-fb-half=2", "diting_panel_hz=120", "diting_backlight=1",
+  "offline-key-events=1", "aks=1", "aks-sls=3",
+  "diting_adreno_start=1", "gpu-metal=1", "diting_metal=1", "sheng-fb-gpu=1", "gpu-addon=1",
+  "offline-hid-input=1", "offline-hid-home=1", "touch-hid=1", "diting_touch=1", "diting_buttons=1",
+  "diting_adsp=2", "diting_wifi=1",
+  "diting_usb=1", "diting_panic_fastboot=1",
+  "-no_slto_panic", "kt_fixed_zones=120",
+]
+
+[os_overrides."ios-27.2.1-24B156".payload.adt]
+chip_id = "0x8150"

@@ -16,6 +16,10 @@ extern int (*PE_halt_restart)(unsigned int);
 int reboot_kernel(int,char *);
 void diting_ramoops_console_write(const char *,int);
 void diting_ramoops_diagnostic_write(const char *,int);
+void diting_ufs_log_flush(void) __attribute__((weak_import));
+void diting_ufs_log_flush_panic(void) __attribute__((weak_import));
+void diting_fb_log_summary(void) __attribute__((weak_import));
+void diting_dump_process_snapshot(void) __attribute__((weak_import));
 }
 namespace DitingBootCapture {
 struct Window {
@@ -72,6 +76,7 @@ static int reset(unsigned type) {
  if(__atomic_exchange_n(&resetStarted,1,__ATOMIC_ACQ_REL))return -1;
  record(shutdownRequested&&type==kPERestartCPU&&!forcedFallback?"logs-committed-reset":
         forcedFallback?"forced-reset-sync-unconfirmed":"panic-or-external-reset");
+ if(&diting_ufs_log_flush_panic)diting_ufs_log_flush_panic();
  __asm__ volatile("dsb sy":::"memory");
  register uint64_t x0 __asm__("x0")=0x84000009u,x1 __asm__("x1")=0,x2 __asm__("x2")=0,x3 __asm__("x3")=0;
  __asm__ volatile("smc #0":"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3)::"memory","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x16","x17");
@@ -80,8 +85,19 @@ static int reset(unsigned type) {
 static void finish(){thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);}
 static void timer(void *,wait_result_t) {
  while(!__atomic_load_n(&armed,__ATOMIC_ACQUIRE))IOSleep(10);
- while(elapsed()<seconds)IOSleep(250);
+ uint64_t nextFlush=20;
+ while(elapsed()<seconds) {
+  IOSleep(250);
+  if(elapsed()>=nextFlush) {
+   nextFlush=elapsed()+10;
+   if(&diting_fb_log_summary)diting_fb_log_summary();
+   if(&diting_ufs_log_flush)diting_ufs_log_flush();
+  }
+ }
  __atomic_store_n(&shutdownRequested,1,__ATOMIC_RELEASE);record("timed-return-sync");
+ if(&diting_fb_log_summary)diting_fb_log_summary();
+ if(&diting_dump_process_snapshot)diting_dump_process_snapshot();
+ if(&diting_ufs_log_flush)diting_ufs_log_flush();
  // RB_QUICK: native file-system flush remains enabled; RB_NOSYNC is absent.
  const int result=reboot_kernel(0x400,nullptr);record("native-reboot-returned",result);finish();
 }
@@ -110,9 +126,16 @@ static void start() {
 // CDC requests are explicit, once per boot, and never start the timed capture.
 // Do shutdown work on its own thread: USB must remain able to deliver the ACK.
 static uint32_t manualPending;
+static void manualFallback(void *,wait_result_t) {
+ IOSleep(4000);
+ __atomic_store_n(&forcedFallback,1,__ATOMIC_RELEASE);
+ record("usb-manual-deadline-fallback");
+ reset(kPERestartCPU);
+ finish();
+}
 static void manual(void *argument,wait_result_t) {
  target=unsigned(uintptr_t(argument));strlcpy(id,"usb-manual",sizeof id);
- IOSleep(500);
+ IOSleep(300);
  uint8_t oldCell=0;uint32_t oldImem=0;
  if(!prepare() || !readCell(oldCell)) {record("manual-prepare-failed");goto done;}
  oldImem=imem.read(0);
@@ -121,6 +144,9 @@ static void manual(void *argument,wait_result_t) {
  __atomic_store_n(&shutdownRequested,1,__ATOMIC_RELEASE);
  __atomic_store_n(&armed,1,__ATOMIC_RELEASE);
  record(target==1?"usb-recovery-sync":"usb-fastboot-sync");
+ if(&diting_fb_log_summary)diting_fb_log_summary();
+ if(&diting_ufs_log_flush)diting_ufs_log_flush();
+ {thread_t fb=nullptr;if(kernel_thread_start(manualFallback,nullptr,&fb)==KERN_SUCCESS)thread_deallocate(fb);}
  record("native-reboot-returned",reboot_kernel(0x400,nullptr));
  __atomic_store_n(&armed,0,__ATOMIC_RELEASE);PE_halt_restart=previous;
 restore:
@@ -130,7 +156,10 @@ done:
  __atomic_store_n(&manualPending,0,__ATOMIC_RELEASE);finish();
 }
 static bool request(unsigned destination) {
- if((destination!=1&&destination!=2)||armed ||
+ if((destination!=1&&destination!=2) ||
+#ifndef DITING_GUEST_24B156
+    armed ||
+#endif
     __atomic_exchange_n(&manualPending,1,__ATOMIC_ACQ_REL))return false;
  thread_t t=nullptr;
  if(kernel_thread_start(manual,reinterpret_cast<void *>(uintptr_t(destination)),&t)!=KERN_SUCCESS) {
